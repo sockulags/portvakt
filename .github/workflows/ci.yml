@@ -29,7 +29,11 @@ jobs:
           --health-retries 30
 
     env:
-      TEST_DATABASE_URL: postgres://portvakt:portvakt@localhost:5433/portvakt_test
+      # Integration tests create a private schema per test file in this database: as the owner
+      # (migrations) and as the restricted runtime role (repositories). With CI set (GitHub sets
+      # it), an unreachable database fails the run instead of skipping the tests.
+      TEST_DATABASE_URL: postgres://portvakt_app:portvakt_app@localhost:5433/portvakt_test
+      TEST_MIGRATION_DATABASE_URL: postgres://portvakt:portvakt@localhost:5433/portvakt_test
 
     steps:
       - uses: actions/checkout@v7
@@ -37,9 +41,21 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Create the runtime database role
+        run: >-
+          docker exec -i ${{ job.services.postgres.id }}
+          psql -v ON_ERROR_STOP=1 -U portvakt -d portvakt_test
+          < deploy/postgres-init/02-create-app-role.sql
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
+      - name: Migrations apply, and a second run is a no-op
+        env:
+          DATABASE_URL: postgres://portvakt_app:portvakt_app@localhost:5433/portvakt_test
+          MIGRATION_DATABASE_URL: postgres://portvakt:portvakt@localhost:5433/portvakt_test
+        run: |
+          npm run migrate -w apps/server
+          npm run migrate -w apps/server
       - run: npm test
       - run: npm run build

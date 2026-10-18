@@ -1,7 +1,20 @@
 import { createApp } from "./app.js";
+import { type Config, ConfigError, loadConfig } from "./config/index.js";
 
-const port = Number(process.env.PORT ?? 3000);
+function loadConfigOrExit(): Config {
+  try {
+    return loadConfig();
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      console.error(error.message);
+      process.exit(1);
+    }
+    throw error;
+  }
+}
 
-createApp().listen(port, () => {
-  console.log(`portvakt server listening on port ${port}`);
+const config = loadConfigOrExit();
+
+createApp().listen(config.port, () => {
+  console.log(`portvakt server listening on port ${config.port}`);
 });

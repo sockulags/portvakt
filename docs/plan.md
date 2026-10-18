@@ -97,7 +97,7 @@ Access token and ID token for app X in tenant T:
 | Claim | Meaning |
 |---|---|
 | `iss` | `{PUBLIC_URL}/t/{T}` |
-| `aud` | client_id of X (access token: X's resource indicator) |
+| `aud` | client_id of X |
 | `sub` | Person UUID, or party UUID when representing |
 | `tid` | Tenant slug |
 | `idp` | Login method id; `idp_kind` is `employee` or `citizen` |
