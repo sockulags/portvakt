@@ -1,9 +1,9 @@
 import type { Tenant } from "../domain/tenant.js";
 import { tenantSlugSchema } from "../domain/schemas.js";
-import type { LoadedKeys, SigningKeyCache } from "../keys/key-cache.js";
+import type { SigningKeyCache } from "../keys/key-cache.js";
 import type { Logger } from "../logging/logger.js";
 import type { Repositories } from "../repositories/index.js";
-import type { TenantProvider } from "./provider.js";
+import type { TenantBuildInput, TenantProvider } from "./provider.js";
 
 /** Raised when providers cannot be built yet (no signing key loaded); answered with 503. */
 export class ProvidersNotReadyError extends Error {
@@ -13,11 +13,7 @@ export class ProvidersNotReadyError extends Error {
   }
 }
 
-export type ProviderBuilder = (
-  tenant: Tenant,
-  keys: LoadedKeys,
-  fingerprint: string,
-) => TenantProvider;
+export type ProviderBuilder = (input: TenantBuildInput) => TenantProvider;
 
 export interface ProviderRegistryOptions {
   readonly repos: Repositories;
@@ -28,7 +24,8 @@ export interface ProviderRegistryOptions {
 
 /**
  * Per-tenant oidc-provider instances, built lazily on the first request for a tenant and cached.
- * A cached provider is dropped when its tenant or the tenant's applications change (change
+ * A cached provider is dropped when its tenant, the tenant's applications or its login methods
+ * change (change
  * notification, or the periodic {@link reconcile} fallback) and rebuilt on the next request; a
  * new signing key set makes every cached provider stale at once. An unknown or suspended tenant
  * builds nothing.
@@ -116,12 +113,14 @@ export class ProviderRegistry {
     return dropped;
   }
 
-  async #build(slug: string, keys: LoadedKeys): Promise<TenantProvider | null> {
+  async #build(slug: string, keys: TenantBuildInput["keys"]): Promise<TenantProvider | null> {
     const { repos, build } = this.#options;
-    const tenant = await repos.tenants.findActiveBySlug(slug);
+    const tenant: Tenant | null = await repos.tenants.findActiveBySlug(slug);
     if (tenant === null) return null;
+    // Fingerprint first: a change after it is read invalidates the entry built here.
     const fingerprint = (await repos.tenants.providerFingerprints([tenant.id])).get(tenant.id);
     if (fingerprint === undefined) return null;
-    return build(tenant, keys, fingerprint);
+    const loginMethods = await repos.loginMethods.list(tenant.id);
+    return build({ tenant, keys, fingerprint, loginMethods });
   }
 }

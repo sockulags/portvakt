@@ -1,0 +1,13 @@
+/*
+ * The design system's web fonts, self-hosted (tokens.css names them in --font-sans and
+ * --font-display): Outfit 400-600 and Instrument Sans 400-700, latin subsets, static files.
+ * Import once in an app entry; the bundler copies the font files next to the app's assets, so
+ * pages load them from their own origin (CSP font-src 'self') and nothing from Google Fonts.
+ */
+@import "@fontsource/outfit/latin-400.css";
+@import "@fontsource/outfit/latin-500.css";
+@import "@fontsource/outfit/latin-600.css";
+@import "@fontsource/instrument-sans/latin-400.css";
+@import "@fontsource/instrument-sans/latin-500.css";
+@import "@fontsource/instrument-sans/latin-600.css";
+@import "@fontsource/instrument-sans/latin-700.css";

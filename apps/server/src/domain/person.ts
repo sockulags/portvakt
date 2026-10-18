@@ -25,6 +25,11 @@ export interface Person {
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly lastLoginAt: Date | null;
+  /**
+   * Skyddad identitet: set once any identity of the person was flagged upstream, and kept until
+   * an administrator clears it. Such a person never gets name or email claims.
+   */
+  readonly protectedIdentity: boolean;
 }
 
 export interface Identity {

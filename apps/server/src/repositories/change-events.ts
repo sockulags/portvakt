@@ -10,8 +10,8 @@ import type { Db } from "../db/database.js";
  *
  * Rule: a repository method emits an event when it changes a row a cached provider or the key
  * cache is built from: a tenant (slug, status), an application's client configuration, an
- * application's attachment to a tenant, or a signing key's state. Roles, rules, attributes and
- * persons are read live and emit nothing.
+ * application's attachment to a tenant, a tenant's login methods (acr values), or a signing key's
+ * state. Roles, rules, attributes and persons are read live and emit nothing.
  *
  * Payloads carry ids only, never personal data.
  */
@@ -20,6 +20,7 @@ export const CHANGE_CHANNEL = "portvakt_changes";
 export const changeEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("tenant"), tenantId: z.uuid() }),
   z.object({ type: z.literal("tenant_applications"), tenantId: z.uuid() }),
+  z.object({ type: z.literal("login_methods"), tenantId: z.uuid() }),
   z.object({ type: z.literal("application"), applicationId: z.uuid() }),
   z.object({ type: z.literal("signing_keys") }),
 ]);

@@ -2,7 +2,6 @@ import express, { Router, type NextFunction, type Request, type Response } from 
 import type { Logger } from "../logging/logger.js";
 import {
   InteractionError,
-  loadInteraction,
   type InteractionContext,
   type InteractionService,
 } from "./interactions.js";
@@ -20,6 +19,11 @@ export interface TenantRoutesOptions {
   readonly testRoutes: boolean;
   /** `PUBLIC_URL` (an origin): the only host and protocol the providers ever see. */
   readonly publicUrl: string;
+  /**
+   * The login flow (interaction pages and API, upstream federation callbacks), mounted below
+   * `/t/{slug}` once the tenant is resolved; it reads the tenant with {@link tenantOf}.
+   */
+  readonly loginRoutes?: Router;
 }
 
 /**
@@ -38,7 +42,8 @@ export function pinRequestOrigin(req: Request, origin: URL): void {
   delete req.headers.forwarded;
 }
 
-const tenantOf = (res: Response): TenantProvider => {
+/** The tenant provider resolved for this request (inside the `/t/{slug}` routes). */
+export const tenantOf = (res: Response): TenantProvider => {
   const tenant = (res.locals as { tenantProvider?: TenantProvider }).tenantProvider;
   if (tenant === undefined) throw new Error("tenant provider not resolved");
   return tenant;
@@ -103,18 +108,6 @@ export function tenantRoutes(options: TenantRoutesOptions): Router {
   };
 
   const interactions = Router();
-  // The login UI (M3) replaces this: for now the route only proves the interaction exists.
-  interactions.get(
-    "/interaction/:uid",
-    handle(async (req, res) => {
-      const details = await loadInteraction(interactionContext(req, res));
-      res.status(501).json({
-        error: "not_implemented",
-        error_description: "The login interface is not available yet",
-        prompt: details.prompt,
-      });
-    }),
-  );
   if (options.testRoutes) {
     interactions.post(
       "/interaction/:uid/__test__/login",
@@ -139,6 +132,8 @@ export function tenantRoutes(options: TenantRoutesOptions): Router {
     tenantProvider.handle(req, res);
   };
 
-  router.use("/t/:slug", resolveTenant, interactions, toProvider);
+  const tenantScoped =
+    options.loginRoutes === undefined ? [interactions] : [interactions, options.loginRoutes];
+  router.use("/t/:slug", resolveTenant, ...tenantScoped, toProvider);
   return router;
 }

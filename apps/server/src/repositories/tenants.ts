@@ -77,10 +77,11 @@ export class TenantRepository {
   }
 
   /**
-   * Fingerprint of what a tenant's OIDC provider is built from: the tenant row and every attached
-   * application (its client configuration and the attachment). It changes whenever one of them
-   * does, which lets replicas detect a change whose notification they missed. Tenants that no
-   * longer exist are absent from the result.
+   * Fingerprint of what a tenant's OIDC provider is built from: the tenant row, every attached
+   * application (its client configuration and the attachment) and every login method (its acr
+   * values and enabled state). It changes whenever one of them does, which lets replicas detect a
+   * change whose notification they missed. Tenants that no longer exist are absent from the
+   * result.
    */
   async providerFingerprints(tenantIds: readonly string[]): Promise<Map<string, string>> {
     for (const id of tenantIds) requireUuids({ id });
@@ -92,7 +93,11 @@ export class TenantRepository {
                                              ta.enabled, ta.updated_at::text), ','
                                    ORDER BY a.client_id)
                    FROM tenant_applications ta JOIN applications a ON a.id = ta.application_id
-                  WHERE ta.tenant_id = t.id))) AS fingerprint
+                  WHERE ta.tenant_id = t.id),
+                (SELECT string_agg(concat_ws(':', lm.id, lm.enabled, lm.updated_at::text), ','
+                                   ORDER BY lm.id)
+                   FROM login_methods lm
+                  WHERE lm.tenant_id = t.id))) AS fingerprint
          FROM tenants t
         WHERE t.id = ANY ($1::uuid[])`,
       [[...tenantIds]],

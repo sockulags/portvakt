@@ -25,6 +25,7 @@ interface PersonRow {
   created_at: Date;
   updated_at: Date;
   last_login_at: Date | null;
+  protected_identity: boolean;
 }
 
 interface IdentityRow {
@@ -40,7 +41,7 @@ interface IdentityRow {
   last_login_at: Date;
 }
 
-const PERSON_COLUMNS = "id, tenant_id, created_at, updated_at, last_login_at";
+const PERSON_COLUMNS = "id, tenant_id, created_at, updated_at, last_login_at, protected_identity";
 const IDENTITY_COLUMNS =
   "id, tenant_id, person_id, login_method_id, subject, attributes, pin_index, created_at, updated_at, last_login_at";
 
@@ -54,6 +55,7 @@ function toPerson(row: PersonRow): Person {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastLoginAt: row.last_login_at,
+    protectedIdentity: row.protected_identity,
   };
 }
 
@@ -72,7 +74,7 @@ function toIdentity(row: IdentityRow): Identity {
   };
 }
 
-/** A protected identity keeps no name or email: claims for it come from the live login only. */
+/** A flagged identity keeps no name or email (and its person becomes protected). */
 function storableAttributes(attributes: IdentityAttributes): IdentityAttributes {
   if (!attributes.protectedIdentity) return attributes;
   return {
@@ -282,15 +284,45 @@ export class PersonRepository {
         }
       }
 
+      // Protected identity is sticky on the person: once any linked identity was flagged, no
+      // identity of the person keeps a name or email, whichever method signs in.
       const personRow = requireRow(
         await tx.query<PersonRow>(
-          `UPDATE persons SET last_login_at = now() WHERE tenant_id = $1 AND id = $2
+          `UPDATE persons
+              SET last_login_at = now(), protected_identity = protected_identity OR $3
+            WHERE tenant_id = $1 AND id = $2
            RETURNING ${PERSON_COLUMNS}`,
-          [tenantId, identity.person_id],
+          [tenantId, identity.person_id, data.attributes.protectedIdentity],
         ),
       );
+      if (personRow.protected_identity) {
+        await tx.query(
+          `UPDATE identities SET attributes = attributes - 'name' - 'email'
+            WHERE tenant_id = $1 AND person_id = $2 AND (attributes ? 'name' OR attributes ? 'email')`,
+          [tenantId, personRow.id],
+        );
+        identity = requireRow(
+          await tx.query<IdentityRow>(`SELECT ${IDENTITY_COLUMNS} FROM identities WHERE id = $1`, [
+            identity.id,
+          ]),
+        );
+      }
       return { person: toPerson(personRow), identity: toIdentity(identity), created, linked };
     });
+  }
+
+  /**
+   * Clears a person's protected identity (an administrator's decision, M6 admin API). Nothing
+   * clears it automatically; a later flagged login sets it again. Returns false for an unknown
+   * person.
+   */
+  async clearProtectedIdentity(tenantId: string, personId: string): Promise<boolean> {
+    requireUuids({ tenantId, personId });
+    const rows = await this.#db.query(
+      `UPDATE persons SET protected_identity = false WHERE tenant_id = $1 AND id = $2 RETURNING id`,
+      [tenantId, personId],
+    );
+    return rows.length > 0;
   }
 
   #pinColumns(

@@ -18,6 +18,7 @@ import {
   discoverWithSecret,
   type TenantWorld,
 } from "../testing/oidc-flow.js";
+import { bootstrapOf } from "../testing/federation.js";
 import { TestBrowser, startTestServer } from "../testing/test-server.js";
 import { resourceIndicatorFor } from "./clients.js";
 
@@ -221,13 +222,14 @@ describe.skipIf(ts === undefined)("authorization code flow", () => {
     });
   });
 
-  it("asks for a new login when the session's login context is gone", async () => {
+  it("asks for a new login when the session's login state is gone", async () => {
     const { world, as } = await worldWithPerson();
     const config = await discoverWithSecret(ts!, world.tenant.slug, world.app);
     const browser = new TestBrowser();
     const tokens = await codeFlow(ts!, config, redirectUriOf(world), as, { browser });
     await db.db.query(
-      "DELETE FROM oidc_payloads WHERE tenant_id = $1 AND kind = 'PortvaktLoginContext'",
+      `DELETE FROM oidc_payloads
+        WHERE tenant_id = $1 AND kind IN ('PortvaktSession', 'PortvaktGrantLogin')`,
       [world.tenant.id],
     );
     expect(await oauthError(client.refreshTokenGrant(config, tokens.refresh_token!))).toBe(
@@ -286,7 +288,7 @@ describe.skipIf(ts === undefined)("authorization code flow", () => {
     ).rejects.toThrow(/test login failed: 403/);
   });
 
-  it("answers the interaction route with 501 until the login UI exists", async () => {
+  it("serves the login UI on the interaction route, bound to the interaction cookie", async () => {
     const { world } = await worldWithPerson();
     const config = await discoverWithSecret(ts!, world.tenant.slug, world.app);
     const browser = new TestBrowser();
@@ -300,11 +302,25 @@ describe.skipIf(ts === undefined)("authorization code flow", () => {
     expect(new URL(interaction).pathname).toMatch(
       new RegExp(`^/t/${world.tenant.slug}/interaction/[A-Za-z0-9_-]+$`),
     );
+    // The fixture login method is unreachable upstream (no choice to make, so it is tried
+    // directly): the login view opens with the error and a retry.
     const response = await browser.request(interaction);
-    expect(response.status).toBe(501);
-    expect(await response.json()).toMatchObject({ error: "not_implemented", prompt: "login" });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-security-policy")).toContain("script-src 'self'");
+    expect(bootstrapOf(await response.text())).toMatchObject({
+      view: "login",
+      uid: interaction.split("/").at(-1),
+      error: "upstream_unavailable",
+    });
+    // The shell itself is never served raw, only with its bootstrap block.
+    expect((await fetch(`${ts!.baseUrl}/ui/login/index.html`)).status).toBe(404);
     // Without the interaction cookie the interaction is not found.
-    expect((await fetch(interaction)).status).toBe(404);
+    const expired = await fetch(interaction);
+    expect(expired.status).toBe(404);
+    expect(bootstrapOf(await expired.text())).toMatchObject({
+      view: "error",
+      code: "interaction_expired",
+    });
   });
 });
 

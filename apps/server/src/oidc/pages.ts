@@ -1,81 +1,57 @@
 import type { ErrorOut, KoaContextWithOIDC } from "oidc-provider";
+import {
+  LOGIN_UI_HEADERS,
+  localeHints,
+  type LoginErrorCode,
+  type LoginUiShell,
+  type UiBootstrap,
+} from "../login/ui-shell.js";
 
 /**
- * The few pages oidc-provider renders itself (errors on the authorization endpoint, the
- * RP-initiated logout confirmation). Deliberately plain and self-contained: no external fonts or
- * scripts, nothing user-controlled without escaping, no error details beyond the OAuth error code
- * and its description. The login UI (M3) owns everything else.
+ * The pages oidc-provider renders itself (errors on the authorization endpoint, the
+ * RP-initiated logout confirmation and its success page), as login UI views. No error details
+ * beyond the OAuth error code reach the page.
  */
-
-const ESCAPES: Readonly<Record<string, string>> = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  '"': "&quot;",
-  "'": "&#39;",
-};
-
-export function escapeHtml(value: unknown): string {
-  return String(value).replace(/[&<>"']/g, (char) => ESCAPES[char] ?? char);
+export interface ProviderPages {
+  renderError(ctx: KoaContextWithOIDC, out: ErrorOut): void;
+  logoutSource(ctx: KoaContextWithOIDC, form: string): void;
+  postLogoutSuccessSource(ctx: KoaContextWithOIDC): void;
 }
 
-function page(title: string, body: string): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>${escapeHtml(title)}</title>
-<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.5}button{font:inherit;padding:.5rem 1rem;margin-right:.5rem}</style>
-</head>
-<body>
-${body}
-</body>
-</html>`;
+const OAUTH_ERROR = /^[\x20-\x21\x23-\x5B\x5D-\x7E]{1,64}$/;
+
+function errorView(ctx: KoaContextWithOIDC, out: ErrorOut): UiBootstrap {
+  const locale = localeHints(undefined, ctx.get("accept-language"));
+  const error = typeof out.error === "string" && OAUTH_ERROR.test(out.error) ? out.error : "";
+  let code: LoginErrorCode = "request_failed";
+  // Unknown client: the application is not registered or not enabled in this tenant.
+  if (error === "invalid_client") code = "app_unavailable";
+  // The resume of an interaction whose cookie or record is gone.
+  else if (ctx.oidc?.route === "resume" && error === "invalid_request")
+    code = "interaction_expired";
+  return code === "request_failed"
+    ? { view: "error", code, oauthError: error === "" ? "server_error" : error, locale }
+    : { view: "error", code, locale };
 }
 
-function setHtml(ctx: KoaContextWithOIDC, html: string): void {
-  ctx.type = "html";
-  ctx.set("Cache-Control", "no-store");
-  // No form-action: the logout form ends in a redirect to the application, which browsers
-  // check against form-action as well.
-  ctx.set(
-    "Content-Security-Policy",
-    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
-  );
-  ctx.body = html;
-}
-
-export function renderErrorPage(ctx: KoaContextWithOIDC, out: ErrorOut): void {
-  const description =
-    typeof out.error_description === "string" ? `<p>${escapeHtml(out.error_description)}</p>` : "";
-  setHtml(
-    ctx,
-    page(
-      "Sign-in failed",
-      `<h1>Sign-in failed</h1>
-<p>The request could not be completed. Return to the application and try again.</p>
-<p><code>${escapeHtml(out.error)}</code></p>
-${description}`,
-    ),
-  );
-}
-
-/** `form` is oidc-provider's hidden logout form (`id="op.logoutForm"`, with its xsrf token). */
-export function renderLogoutPage(ctx: KoaContextWithOIDC, form: string): void {
-  setHtml(
-    ctx,
-    page(
-      "Sign out",
-      `<h1>Sign out?</h1>
-${form}
-<button autofocus type="submit" form="op.logoutForm" value="yes" name="logout">Sign out</button>
-<button type="submit" form="op.logoutForm">Stay signed in</button>`,
-    ),
-  );
-}
-
-export function renderLogoutSuccessPage(ctx: KoaContextWithOIDC): void {
-  setHtml(ctx, page("Signed out", "<h1>You are signed out</h1>"));
+export function createProviderPages(shell: LoginUiShell): ProviderPages {
+  const send = (ctx: KoaContextWithOIDC, html: string): void => {
+    for (const [name, value] of Object.entries(LOGIN_UI_HEADERS)) ctx.set(name, value);
+    ctx.body = html;
+  };
+  return {
+    renderError(ctx, out) {
+      send(ctx, shell.render(errorView(ctx, out)));
+    },
+    // `form` is oidc-provider's hidden logout form (`id="op.logoutForm"`, with its xsrf token);
+    // the SPA renders the buttons that submit it.
+    logoutSource(ctx, form) {
+      const locale = localeHints(undefined, ctx.get("accept-language"));
+      send(ctx, shell.render({ view: "logout", locale }, form));
+    },
+    postLogoutSuccessSource(ctx) {
+      const locale = localeHints(undefined, ctx.get("accept-language"));
+      send(ctx, shell.render({ view: "logged_out", locale }));
+    },
+  };
 }

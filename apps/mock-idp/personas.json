@@ -1,0 +1,69 @@
+{
+  "entra": [
+    {
+      "id": "anna-handlaggare",
+      "oid": "6f1c8a52-3b7e-4d2a-9c41-8e2f5b7a1d03",
+      "name": "Anna Andersson",
+      "email": "anna.andersson@kommun.example",
+      "groups": ["grp-handlaggare", "grp-all-staff"]
+    },
+    {
+      "id": "erik-admin",
+      "oid": "a3d9e0f4-71c2-4b8e-b5a6-2c4f9d1e8b77",
+      "name": "Erik Eriksson",
+      "email": "erik.eriksson@kommun.example",
+      "groups": ["grp-admins", "grp-all-staff"]
+    },
+    {
+      "id": "olle-overage",
+      "oid": "c7b2e4a1-9f3d-4e6c-8a15-d4f7b2c9e061",
+      "name": "Olle Overage",
+      "email": "olle.overage@kommun.example",
+      "groups": ["grp-handlaggare"],
+      "groupsOverage": true
+    }
+  ],
+  "bankid": [
+    {
+      "id": "sven-medborgare",
+      "sub": "bankid-sven-medborgare",
+      "pin": "191212121212",
+      "givenName": "Sven",
+      "familyName": "Medborgare",
+      "acr": "http://id.elegnamnden.se/loa/1.0/loa3"
+    },
+    {
+      "id": "samuel-samordning",
+      "sub": "bankid-samuel-samordning",
+      "pin": "199001612382",
+      "givenName": "Samuel",
+      "familyName": "Samordning",
+      "acr": "http://id.elegnamnden.se/loa/1.0/loa3"
+    },
+    {
+      "id": "skyddad-person",
+      "sub": "bankid-skyddad-person",
+      "pin": "200001010008",
+      "givenName": "Skyddad",
+      "familyName": "Person",
+      "acr": "http://id.elegnamnden.se/loa/1.0/loa3",
+      "protectedIdentity": true
+    },
+    {
+      "id": "lisa-loa2",
+      "sub": "bankid-lisa-loa2",
+      "pin": "198507099805",
+      "givenName": "Lisa",
+      "familyName": "Lagnivå",
+      "acr": "http://id.elegnamnden.se/loa/1.0/loa2"
+    },
+    {
+      "id": "maja-loa4",
+      "sub": "bankid-maja-loa4",
+      "pin": "197811234561",
+      "givenName": "Maja",
+      "familyName": "Högnivå",
+      "acr": "http://id.elegnamnden.se/loa/1.0/loa4"
+    }
+  ]
+}

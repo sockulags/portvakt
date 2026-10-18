@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { parseDurationSeconds } from "./duration.js";
 import {
   ConfigError,
+  DEFAULT_ACR_RANKING,
   DEV_COOKIE_KEYS,
   DEV_MASTER_KEYS,
   loadConfig,
@@ -306,5 +307,28 @@ describe("loadConfig: test mode", () => {
     "http://app.localhost",
   ])("allows NODE_ENV=test with PUBLIC_URL %s", (url) => {
     expect(loadConfig({ ...devEnv, NODE_ENV: "test", PUBLIC_URL: url }).nodeEnv).toBe("test");
+  });
+});
+
+describe("loadConfig: federation settings", () => {
+  it("defaults the acr ranking to the Swedish eID levels and the upstream timeouts", () => {
+    const config = loadConfig(devEnv);
+    expect(config.acrRanking).toEqual([...DEFAULT_ACR_RANKING]);
+    expect(config.federation).toEqual({
+      upstreamTimeoutSeconds: 10,
+      metadataTtlSeconds: 3600,
+      failureCacheSeconds: 5,
+    });
+    expect(config.loginUiDir).toBeUndefined();
+  });
+
+  it("reads an ordered ACR_RANKING and refuses duplicates", () => {
+    expect(loadConfig({ ...devEnv, ACR_RANKING: "urn:low, urn:high" }).acrRanking).toEqual([
+      "urn:low",
+      "urn:high",
+    ]);
+    expect(issuesOf({ ...devEnv, ACR_RANKING: "urn:a,urn:a" })).toEqual([
+      "ACR_RANKING: acr values must be unique",
+    ]);
   });
 });

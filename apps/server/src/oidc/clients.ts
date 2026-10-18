@@ -15,7 +15,7 @@ export function clientIdFromResource(resource: string): string | null {
   return clientIdSchema.safeParse(clientId).success ? clientId : null;
 }
 
-/** Scopes every application may request. `pin` (allowed per application) arrives with M4. */
+/** Scopes every application may request; extra scopes (`pin`) are allowed per application. */
 export const STANDARD_SCOPES = ["openid", "profile", "email"] as const;
 
 /** Grant types every application gets: they are all confidential, first-party clients. */
@@ -38,7 +38,7 @@ export function clientMetadataFor(
     response_types: ["code"],
     redirect_uris: [...application.redirectUris],
     post_logout_redirect_uris: [...application.postLogoutRedirectUris],
-    scope: STANDARD_SCOPES.join(" "),
+    scope: [...STANDARD_SCOPES, ...application.allowedExtraScopes].join(" "),
     token_endpoint_auth_method: auth.method,
     id_token_signed_response_alg: "ES256",
     // Claims contract: every ID token carries auth_time.

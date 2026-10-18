@@ -9,6 +9,23 @@ import {
 export const LOGIN_METHOD_KINDS = ["employee", "citizen"] as const;
 export type LoginMethodKind = (typeof LOGIN_METHOD_KINDS)[number];
 
+/** How Portvakt authenticates at the upstream token endpoint. */
+export const UPSTREAM_AUTH_METHODS = [
+  "client_secret_basic",
+  "client_secret_post",
+  "private_key_jwt",
+] as const;
+export type UpstreamAuthMethod = (typeof UPSTREAM_AUTH_METHODS)[number];
+
+/** `aud` of private_key_jwt client assertions (Entra ID expects the token endpoint). */
+export const CLIENT_ASSERTION_AUDIENCES = ["token_endpoint", "issuer"] as const;
+export type ClientAssertionAudience = (typeof CLIENT_ASSERTION_AUDIENCES)[number];
+
+/** Upstream tenant id (Entra `tid`): a GUID or similar identifier. */
+const upstreamTenantSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, "must be an upstream tenant id");
+
 /** Upstream claim name, optionally a dotted path into a nested claim (`realm_access.roles`). */
 const claimNameSchema = z
   .string()
@@ -59,6 +76,27 @@ export interface LoginMethod {
   readonly issuer: string;
   readonly clientId: string;
   readonly hasClientSecret: boolean;
+  /**
+   * Upstream token endpoint authentication. `private_key_jwt` signs with the login method's own
+   * key pair, whose public JWKS is published at `/t/{slug}/federation/{id}/jwks`.
+   */
+  readonly clientAuthMethod: UpstreamAuthMethod;
+  /** kid of the login method's client key pair (`null` until one is generated). */
+  readonly clientKeyKid: string | null;
+  /** Call the upstream userinfo endpoint after the token exchange and merge its claims. */
+  readonly useUserinfo: boolean;
+  /** `aud` of private_key_jwt client assertions. */
+  readonly clientAssertionAudience: ClientAssertionAudience;
+  /**
+   * For a multi-tenant issuer (Entra `/common`, `/organizations`, `/consumers` or a discovered
+   * `{tenantid}` issuer): the upstream tenant ids allowed to sign in. Required there.
+   */
+  readonly allowedUpstreamTenants: readonly string[];
+  /**
+   * Map the email claim without `email_verified`: the upstream verifies addresses itself (Entra
+   * ID work accounts). Email is never an identifier either way.
+   */
+  readonly trustUpstreamEmail: boolean;
   readonly scopes: readonly string[];
   readonly claimMapping: ClaimMapping;
   readonly assertedAcr: string;
@@ -81,6 +119,11 @@ const scopesSchema = z
   .refine((scopes) => scopes.includes("openid"), "scopes must include openid")
   .transform((scopes) => [...new Set(scopes)]);
 
+const upstreamTenantsSchema = z
+  .array(upstreamTenantSchema)
+  .max(100)
+  .transform((tenants) => [...new Set(tenants)]);
+
 const domainsSchema = z
   .array(emailDomainSchema)
   .max(100)
@@ -93,6 +136,11 @@ export const createLoginMethodInputSchema = z.object({
   clientId: z.string().min(1).max(512),
   /** Plaintext upstream client secret; stored encrypted, never returned. */
   clientSecret: z.string().min(1).max(4096).optional(),
+  clientAuthMethod: z.enum(UPSTREAM_AUTH_METHODS).default("client_secret_basic"),
+  useUserinfo: z.boolean().default(false),
+  clientAssertionAudience: z.enum(CLIENT_ASSERTION_AUDIENCES).default("token_endpoint"),
+  allowedUpstreamTenants: upstreamTenantsSchema.default([]),
+  trustUpstreamEmail: z.boolean().default(false),
   scopes: scopesSchema.default(["openid"]),
   claimMapping: claimMappingSchema,
   assertedAcr: z.string().min(1).max(255),
@@ -112,6 +160,11 @@ export const updateLoginMethodInputSchema = z
     clientId: z.string().min(1).max(512),
     /** `null` removes the secret. */
     clientSecret: z.string().min(1).max(4096).nullable(),
+    clientAuthMethod: z.enum(UPSTREAM_AUTH_METHODS),
+    useUserinfo: z.boolean(),
+    clientAssertionAudience: z.enum(CLIENT_ASSERTION_AUDIENCES),
+    allowedUpstreamTenants: upstreamTenantsSchema,
+    trustUpstreamEmail: z.boolean(),
     scopes: scopesSchema,
     claimMapping: claimMappingSchema,
     assertedAcr: z.string().min(1).max(255),
@@ -123,6 +176,50 @@ export const updateLoginMethodInputSchema = z
   })
   .partial();
 export type UpdateLoginMethodInput = z.input<typeof updateLoginMethodInputSchema>;
+
+const MULTI_TENANT_SEGMENTS = new Set(["common", "organizations", "consumers"]);
+
+/**
+ * Whether an issuer serves many upstream tenants: Entra ID's `/common`, `/organizations` and
+ * `/consumers` endpoints, or an issuer with a `{tenantid}` placeholder (as Entra ID discovery
+ * returns for them). Such a login method must list its allowed upstream tenants.
+ */
+export function isMultiTenantIssuer(issuer: string): boolean {
+  try {
+    if (decodeURIComponent(issuer).toLowerCase().includes("{tenantid}")) return true;
+    const segments = new URL(issuer).pathname.split("/").map((part) => part.toLowerCase());
+    return segments.some((segment) => MULTI_TENANT_SEGMENTS.has(segment));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rules over a whole login method (create, and the merged result of an update), as messages for
+ * a validation error. `acrRanking`: ACR_RANKING.
+ */
+export function loginMethodRuleViolations(
+  method: {
+    readonly issuer: string;
+    readonly allowedUpstreamTenants: readonly string[];
+    readonly assertedAcr: string;
+    readonly claimMapping: ClaimMapping;
+  },
+  acrRanking: readonly string[],
+): string[] {
+  const issues: string[] = [];
+  if (isMultiTenantIssuer(method.issuer) && method.allowedUpstreamTenants.length === 0) {
+    issues.push(
+      "allowedUpstreamTenants: required for a multi-tenant issuer (only the listed upstream tenants may sign in)",
+    );
+  }
+  if (acrRanking.includes(method.assertedAcr) && method.claimMapping.acr === undefined) {
+    issues.push(
+      "claimMapping.acr: required when assertedAcr is a ranked level (the upstream must prove it)",
+    );
+  }
+  return issues;
+}
 
 /** Extracts the lowercased domain of an email address, or undefined if it is not one. */
 export function emailDomain(email: string): string | undefined {

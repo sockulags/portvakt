@@ -43,7 +43,9 @@ export async function createLoginMethod(
   return repos.loginMethods.create(tenantId, {
     kind: "employee",
     displayName: "Mock Entra",
-    issuer: "https://idp.example.test",
+    // Deterministically unreachable (discard port, no DNS): a flow through this method fails fast
+    // with upstream_unavailable. Federated tests use the mock IdP instead.
+    issuer: "http://127.0.0.1:9/unreachable",
     clientId: `upstream-${uniqueSuffix()}`,
     clientSecret: "upstream-secret-value",
     scopes: ["openid", "profile", "email"],

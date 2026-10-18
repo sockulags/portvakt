@@ -144,11 +144,15 @@ export interface TenantWorld {
 }
 
 /** A tenant with one login method and one enabled application with a client secret. */
-export async function createTenantWorld(repos: Repositories, prefix = "t"): Promise<TenantWorld> {
+export async function createTenantWorld(
+  repos: Repositories,
+  prefix = "t",
+  loginMethod: Parameters<typeof createLoginMethod>[2] = {},
+): Promise<TenantWorld> {
   const tenant = await createTenant(repos, prefix);
-  const loginMethod = await createLoginMethod(repos, tenant.id);
+  const method = await createLoginMethod(repos, tenant.id, loginMethod);
   const app = await createTestClient(repos, tenant);
-  return { tenant, loginMethod, app };
+  return { tenant, loginMethod: method, app };
 }
 
 /** JIT login of a person through the world's login method, with upstream groups. */

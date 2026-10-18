@@ -12,23 +12,28 @@ import Provider, {
   type ResourceServer,
 } from "oidc-provider";
 import type { Config } from "../config/index.js";
+import type { LoginMethod } from "../domain/login-method.js";
 import type { Tenant } from "../domain/tenant.js";
 import type { LoadedKeys } from "../keys/key-cache.js";
 import type { Logger } from "../logging/logger.js";
 import type { Repositories } from "../repositories/index.js";
+import { parseAcrValues, type AcrRanking } from "./acr.js";
 import { createAdapterFactory } from "./adapter.js";
 import { CLAIMS_BY_SCOPE, ClaimsService } from "./claims.js";
 import { clientIdFromResource, clientMetadataFor, resourceIndicatorFor } from "./clients.js";
 import {
-  LoginContextStore,
+  LoginStateStore,
   PENDING_LOGIN_RESULT_KEY,
   pendingLoginSchema,
   rememberedLoginContext,
+  rememberedSessionRecord,
   rememberLoginContext,
+  rememberSessionRecord,
   type LoginContext,
+  type SessionRecord,
 } from "./login-context.js";
-import { renderErrorPage, renderLogoutPage, renderLogoutSuccessPage } from "./pages.js";
-import type { SessionPolicy } from "./session-policy.js";
+import type { ProviderPages } from "./pages.js";
+import type { SessionPolicyService } from "./session-policy.js";
 
 const SIGNING_ALG = "ES256";
 const AUTHORIZATION_CODE_TTL_SECONDS = 60;
@@ -36,11 +41,36 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const epochNow = (): number => Math.floor(Date.now() / 1000);
 
+/**
+ * Login prompt reasons after which the upstream IdP must authenticate the person again
+ * (`prompt=login` upstream): its own SSO session would otherwise defeat the policy. A first
+ * login (`no_session`, `session_unknown`) may reuse the upstream session.
+ */
+export const FRESH_LOGIN_REASONS: ReadonlySet<string> = new Set([
+  "login_prompt",
+  "max_age",
+  "session_expired",
+  "session_idle",
+  "sso_not_allowed",
+  "acr_not_met",
+]);
+
 export interface ProviderDependencies {
   readonly config: Config;
   readonly repos: Repositories;
   readonly logger: Logger;
-  readonly sessionPolicy: SessionPolicy;
+  readonly sessionPolicy: SessionPolicyService;
+  readonly acrRanking: AcrRanking;
+  readonly pages: ProviderPages;
+}
+
+/** What a tenant's provider is built from (loaded by the registry). */
+export interface TenantBuildInput {
+  readonly tenant: Tenant;
+  readonly keys: LoadedKeys;
+  /** Tenant, application and login method configuration the provider is built with. */
+  readonly fingerprint: string;
+  readonly loginMethods: readonly LoginMethod[];
 }
 
 /** A built provider for one tenant, as cached by the registry. */
@@ -50,13 +80,33 @@ export interface TenantProvider {
   /** Path of the issuer (`/t/{slug}`); everything of the tenant lives below it. */
   readonly basePath: string;
   readonly provider: Provider;
-  readonly loginContexts: LoginContextStore;
+  readonly loginState: LoginStateStore;
   /** Signing key set the provider was built with. */
   readonly keysVersion: string;
-  /** Tenant and application configuration the provider was built with. */
+  /** Tenant, application and login method configuration the provider was built with. */
   readonly fingerprint: string;
   /** Hands a request below `basePath` (already stripped of it) to the provider. */
   readonly handle: (req: IncomingMessage, res: ServerResponse) => void;
+}
+
+/** The grant login a session record establishes for `clientId`. */
+function loginFromRecord(
+  record: SessionRecord,
+  clientId: string,
+  sessionUid: string,
+): LoginContext {
+  return {
+    personId: record.personId,
+    loginMethodId: record.loginMethodId,
+    loginMethodKind: record.loginMethodKind,
+    acr: record.acr,
+    amr: record.amr,
+    authTime: record.authTime,
+    sessionExpiresAt: record.sessionExpiresAt,
+    idleSeconds: record.idleSeconds,
+    clientId,
+    sessionUid,
+  };
 }
 
 /**
@@ -67,28 +117,43 @@ export interface TenantProvider {
  * development interactions, no claims parameter, no request objects.
  */
 export function buildTenantProvider(
-  tenant: Tenant,
-  keys: LoadedKeys,
-  fingerprint: string,
+  input: TenantBuildInput,
   deps: ProviderDependencies,
 ): TenantProvider {
-  const { config, repos, logger, sessionPolicy } = deps;
+  const { tenant, keys, fingerprint } = input;
+  const { config, repos, logger, sessionPolicy, acrRanking, pages } = deps;
   const basePath = `/t/${tenant.slug}`;
   const issuer = `${config.publicUrl}${basePath}`;
   const issuerPath = new URL(issuer).pathname;
-  const loginContexts = new LoginContextStore(tenant.id, repos.oidcPayloads);
+  const loginState = new LoginStateStore(tenant.id, repos.oidcPayloads);
   const claims = new ClaimsService(repos);
   const tokens = config.tokens;
   const log = logger.child({ tenant: tenant.slug });
+  // Every value a login can assert: the ranking plus the tenant's login methods' acr values.
+  const acrValues = [
+    ...new Set([...acrRanking.values, ...input.loginMethods.map((method) => method.assertedAcr)]),
+  ];
 
-  /** The login context for a token's session, cached for the rest of the request. */
-  async function loginContextFor(
+  /** The session record of the request's broker session, cached for the rest of the request. */
+  async function sessionRecordFor(
     ctx: KoaContextWithOIDC,
     sessionUid: string | undefined,
+  ): Promise<SessionRecord | undefined> {
+    const remembered = rememberedSessionRecord(ctx);
+    if (remembered !== undefined) return remembered;
+    const found = await loginState.findSession(sessionUid);
+    if (found !== undefined) rememberSessionRecord(ctx, found);
+    return found;
+  }
+
+  /** The login of a token's grant, cached for the rest of the request. */
+  async function grantLoginFor(
+    ctx: KoaContextWithOIDC,
+    grantId: string | undefined,
   ): Promise<LoginContext | undefined> {
     const remembered = rememberedLoginContext(ctx);
     if (remembered !== undefined) return remembered;
-    const found = await loginContexts.find(sessionUid);
+    const found = await loginState.findGrantLogin(grantId);
     if (found !== undefined) rememberLoginContext(ctx, found);
     return found;
   }
@@ -107,19 +172,25 @@ export function buildTenantProvider(
     if (!UUID.test(sub)) return undefined;
     const person = await repos.persons.findById(tenant.id, sub);
     if (person === null) return undefined;
-    // At the token endpoint (a code or refresh token) the session must still be known: claims
-    // and lifetimes depend on how the person signed in, so without it the grant fails. During
-    // authorization the login prompt checks it instead (see `policy` below), because the context
-    // of a fresh login is only stored at the resume, after this runs.
+    // At the token endpoint (a code or refresh token) the grant's login must still be known and
+    // live: claims and lifetimes follow it, so without it the grant fails. During authorization
+    // the login prompt checks the session record instead (see `policy` below).
     let login: LoginContext | undefined;
     if (token !== undefined) {
-      login = await loginContextFor(ctx, (token as { sessionUid?: string }).sessionUid);
-      if (login === undefined || login.personId !== sub) return undefined;
+      const presented = token as { grantId?: string; kind?: string; consumed?: unknown };
+      login = await grantLoginFor(ctx, presented.grantId);
+      if (login === undefined || login.personId !== sub || login.sessionExpiresAt <= epochNow()) {
+        return undefined;
+      }
+      if (presented.kind === "RefreshToken" && presented.consumed === undefined) {
+        // A refresh is activity: the session's idle timeout starts again.
+        await loginState.touchSession(login.sessionUid, sub, login.authTime, epochNow());
+      }
     }
     const account: Account = {
       accountId: sub,
       claims: async (use, scope) => {
-        const context = login ?? (await loginContextFor(ctx, ctx.oidc.session?.uid));
+        const context = login ?? rememberedLoginContext(ctx);
         if (context === undefined || context.personId !== sub) {
           throw new errors.InvalidGrant("the session of this grant has ended");
         }
@@ -148,7 +219,7 @@ export function buildTenantProvider(
     if (accessToken.accountId === undefined || audience === undefined) {
       return { tid: tenant.slug };
     }
-    const login = await loginContextFor(ctx, accessToken.sessionUid);
+    const login = await grantLoginFor(ctx, accessToken.grantId);
     if (login === undefined || login.personId !== accessToken.accountId) {
       throw new errors.InvalidGrant("the session of this grant has ended");
     }
@@ -190,28 +261,78 @@ export function buildTenantProvider(
     };
   };
 
+  /** The session record a login that just completed establishes (resume after `completeLogin`). */
+  async function recordForFreshLogin(
+    ctx: KoaContextWithOIDC,
+    clientId: string,
+  ): Promise<SessionRecord> {
+    const { session, result } = ctx.oidc;
+    const pending = pendingLoginSchema.safeParse(result?.[PENDING_LOGIN_RESULT_KEY]);
+    if (!pending.success || session?.accountId === undefined || typeof session.acr !== "string") {
+      throw new errors.AccessDenied("the login did not complete");
+    }
+    const policyOf = await sessionPolicy.forLoginMethod(tenant.id, pending.data.loginMethodId);
+    if (policyOf === null) throw new errors.AccessDenied("the login method is not available");
+    const now = epochNow();
+    const authTime = session.authTime() ?? now;
+    // The session lasts maxAge from this login at Portvakt; auth_time may be older (upstream SSO).
+    const sessionExpiresAt = now + policyOf.maxAgeSeconds;
+    const previous = await loginState.findSession(session.uid);
+    // Kept past the login's end (SESSION_TTL longer), so an expired session is recognised as
+    // one and its next login is a fresh upstream login, not a first visit the IdP may answer
+    // from its own session.
+    const retained = sessionExpiresAt + tokens.sessionSeconds;
+    const retainUntil =
+      previous?.personId === session.accountId
+        ? Math.max(previous.retainUntil, retained)
+        : retained;
+    return {
+      personId: session.accountId,
+      loginMethodId: pending.data.loginMethodId,
+      loginMethodKind: policyOf.loginMethodKind,
+      acr: session.acr,
+      amr: session.amr ?? [],
+      authTime,
+      sessionExpiresAt,
+      retainUntil,
+      idleSeconds: policyOf.idleSeconds,
+      allowSso: policyOf.allowSso,
+      clientId,
+      lastActivityAt: now,
+    };
+  }
+
   /**
    * Implicit consent (first-party applications): the grant always covers the requested scopes,
-   * which oidc-provider has already limited to the scopes the client may request. On the resume
-   * after a login, this is also where the login context is stored: the session uid and the
-   * login result are both known here, and it runs before the authorization code is issued.
+   * which oidc-provider has already limited to the scopes the client may request. This runs
+   * before the login prompt checks, so it only resolves the session record and the login the
+   * grant is for; they are stored once the checks passed (`portvakt_session_activity` below).
    */
   const loadExistingGrant = async (ctx: KoaContextWithOIDC): Promise<Grant | undefined> => {
     const { session, client, result } = ctx.oidc;
     if (session === undefined || client === undefined || session.accountId === undefined) {
       return undefined;
     }
+    let record: SessionRecord | undefined;
     if (ctx.oidc.route === "resume" && result?.login !== undefined) {
-      await storeLoginContext(ctx, session.uid, session.accountId, client.clientId);
+      record = await recordForFreshLogin(ctx, client.clientId);
+      rememberSessionRecord(ctx, record);
     } else {
-      // An existing session: the grant expires with the session's real end, so load it now.
-      await loginContextFor(ctx, session.uid);
+      record = await sessionRecordFor(ctx, session.uid);
+    }
+    if (record !== undefined && usableFor(record, session.accountId, client.clientId)) {
+      // The grant expires with the session's real end, so its login is known before it is saved.
+      // A record the login prompt will refuse is not used: the existing grant keeps its expiry.
+      rememberLoginContext(ctx, loginFromRecord(record, client.clientId, session.uid));
     }
     const grantId =
       (result?.consent as { grantId?: string } | undefined)?.grantId ??
       session.grantIdFor(client.clientId);
     let grant = grantId === undefined ? undefined : await ctx.oidc.provider.Grant.find(grantId);
     if (grant !== undefined && grant.accountId !== session.accountId) grant = undefined;
+    // A grant at (or, with clock skew against the database, past) its end would be saved with no
+    // time left: it is over, so the authorization starts a new one.
+    if (grant?.exp !== undefined && grant.exp <= epochNow()) grant = undefined;
     grant ??= new ctx.oidc.provider.Grant({
       accountId: session.accountId,
       clientId: client.clientId,
@@ -221,59 +342,102 @@ export function buildTenantProvider(
     return grant;
   };
 
-  async function storeLoginContext(
-    ctx: KoaContextWithOIDC,
-    sessionUid: string,
-    personId: string,
-    clientId: string,
-  ): Promise<void> {
-    const pending = pendingLoginSchema.safeParse(ctx.oidc.result?.[PENDING_LOGIN_RESULT_KEY]);
-    const { session } = ctx.oidc;
-    if (!pending.success || session === undefined) {
-      throw new errors.AccessDenied("the login did not complete");
-    }
-    const authTime = session.authTime() ?? epochNow();
-    const context: LoginContext = {
-      personId,
-      loginMethodId: pending.data.loginMethodId,
-      acr: session.acr ?? "",
-      amr: session.amr ?? [],
-      authTime,
-      sessionExpiresAt: await sessionPolicy.sessionExpiresAt({
-        tenantId: tenant.id,
-        loginMethodId: pending.data.loginMethodId,
-        authTime,
-      }),
-      clientId,
-    };
-    await loginContexts.save(sessionUid, context);
-    rememberLoginContext(ctx, context);
-  }
-
-  /** Remaining seconds of the broker session, if the request knows it. */
-  const remainingSession = (ctx: KoaContextWithOIDC | undefined, loginTs?: number): number => {
+  /** Whether the session's latest login may serve an authorization of `clientId` right now. */
+  const usableFor = (record: SessionRecord, accountId: string, clientId: string): boolean => {
     const now = epochNow();
-    const end =
-      rememberedLoginContext(ctx)?.sessionExpiresAt ?? (loginTs ?? now) + tokens.sessionSeconds;
-    return Math.max(1, end - now);
+    return (
+      record.personId === accountId &&
+      record.sessionExpiresAt > now &&
+      now - record.lastActivityAt <= record.idleSeconds &&
+      (record.allowSso || record.clientId === clientId)
+    );
   };
 
+  /** Remaining seconds of the broker session, if the request knows it. */
+  const remainingSession = (end: number | undefined, fallbackEnd: number): number =>
+    Math.max(1, (end ?? fallbackEnd) - epochNow());
+
   /**
-   * The default prompts (login, consent) plus Portvakt's own login checks. M3 adds the session
-   * policy checks (idle, allowSso, acr) here.
+   * The default prompts (login, consent) plus the session policy (docs/plan.md, "Session policy
+   * semantics"). Each check is skipped right after a login (`result.login`): that login is the
+   * fresh one the check would ask for.
    */
+  const sessionCheck = (
+    reason: string,
+    description: string,
+    fails: (record: SessionRecord, ctx: KoaContextWithOIDC, now: number) => boolean,
+  ): interactionPolicy.Check =>
+    new interactionPolicy.Check(reason, description, async (ctx) => {
+      const { session, result } = ctx.oidc;
+      if (session?.accountId === undefined || result?.login !== undefined) {
+        return interactionPolicy.Check.NO_NEED_TO_PROMPT;
+      }
+      const record = await sessionRecordFor(ctx, session.uid);
+      if (record === undefined || record.personId !== session.accountId) {
+        return reason === "session_unknown";
+      }
+      return fails(record, ctx, epochNow());
+    });
+
   const policy = interactionPolicy.base();
-  policy.get("login")?.checks.add(
+  const loginChecks = policy.get("login")?.checks;
+  const consentChecks = policy.get("consent")?.checks;
+  if (loginChecks === undefined || consentChecks === undefined) {
+    throw new Error("oidc-provider base policy without login or consent prompt");
+  }
+  loginChecks.add(
+    sessionCheck("session_unknown", "the broker session must be established again", () => false),
+  );
+  loginChecks.add(
+    sessionCheck(
+      "session_expired",
+      "the broker session reached its maximum age",
+      (record, _ctx, now) => record.sessionExpiresAt <= now,
+    ),
+  );
+  loginChecks.add(
+    sessionCheck(
+      "session_idle",
+      "the broker session was idle for too long",
+      (record, _ctx, now) => now - record.lastActivityAt > record.idleSeconds,
+    ),
+  );
+  loginChecks.add(
+    sessionCheck(
+      "sso_not_allowed",
+      "the login method requires a fresh login for every application",
+      (record, ctx) => !record.allowSso && record.clientId !== ctx.oidc.client?.clientId,
+    ),
+  );
+  loginChecks.add(
+    sessionCheck(
+      "acr_not_met",
+      "the requested assurance level requires a new login",
+      (record, ctx) =>
+        !acrRanking.satisfiesAny(record.acr, parseAcrValues(ctx.oidc.params?.acr_values)),
+    ),
+  );
+  // Runs only once the login prompt is satisfied (prompts are evaluated in order), just before
+  // the authorization response: the session's activity and the grant's login are stored here.
+  consentChecks.add(
     new interactionPolicy.Check(
-      "login_context_missing",
-      "the broker session must be established again",
+      "portvakt_session_activity",
+      "records the session activity",
       async (ctx) => {
-        const { session, result } = ctx.oidc;
-        if (session?.accountId === undefined || result?.login !== undefined) {
-          return interactionPolicy.Check.NO_NEED_TO_PROMPT;
+        const { session, grant } = ctx.oidc;
+        const record = rememberedSessionRecord(ctx);
+        const login = rememberedLoginContext(ctx);
+        if (
+          session?.accountId === undefined ||
+          record?.personId !== session.accountId ||
+          login === undefined ||
+          grant?.jti === undefined
+        ) {
+          throw new errors.AccessDenied("the broker session must be established again");
         }
-        const context = await loginContextFor(ctx, session.uid);
-        return context === undefined || context.personId !== session.accountId;
+        await loginState.saveSession(session.uid, { ...record, lastActivityAt: epochNow() });
+        await loginState.saveGrantLogin(grant.jti, login);
+        return interactionPolicy.Check.NO_NEED_TO_PROMPT;
       },
     ),
   );
@@ -309,7 +473,8 @@ export function buildTenantProvider(
     clientBasedCORS: () => false,
     responseTypes: ["code"],
     scopes: ["openid"],
-    claims: { ...CLAIMS_BY_SCOPE, acr: null, auth_time: null, sid: null, iss: null },
+    claims: { ...CLAIMS_BY_SCOPE, sid: null, iss: null },
+    acrValues,
     conformIdTokenClaims: true,
     pkce: { required: () => true },
     enabledJWA: {
@@ -327,7 +492,6 @@ export function buildTenantProvider(
       userinfo: { enabled: false },
       introspection: {
         enabled: true,
-        // Only tokens of applications enabled in this tenant (the storage is tenant-scoped too).
         // Only the client a token was issued to may introspect it (the storage is tenant-scoped,
         // so a token of another tenant is never even found).
         allowedPolicy: (_ctx, client, token) => token.clientId === client.clientId,
@@ -345,8 +509,8 @@ export function buildTenantProvider(
       },
       rpInitiatedLogout: {
         enabled: true,
-        logoutSource: renderLogoutPage,
-        postLogoutSuccessSource: renderLogoutSuccessPage,
+        logoutSource: (ctx, form) => pages.logoutSource(ctx, form),
+        postLogoutSuccessSource: (ctx) => pages.postLogoutSuccessSource(ctx),
       },
       resourceIndicators: {
         enabled: true,
@@ -375,10 +539,22 @@ export function buildTenantProvider(
       AuthorizationCode: AUTHORIZATION_CODE_TTL_SECONDS,
       Interaction: tokens.interactionSeconds,
       RefreshToken: (ctx) => sessionPolicy.refreshTokenTtl(rememberedLoginContext(ctx), epochNow()),
-      Session: (ctx, session) => remainingSession(ctx, session.loginTs),
-      Grant: (ctx) => remainingSession(ctx),
+      // The oidc-provider session outlives each login only as long as one of its grants may.
+      // Without a resolved record, an existing session keeps its expiry (never extended).
+      Session: (ctx, session) =>
+        remainingSession(
+          rememberedSessionRecord(ctx)?.retainUntil,
+          session.exp ?? (session.loginTs ?? epochNow()) + tokens.sessionSeconds,
+        ),
+      Grant: (ctx, grant) =>
+        remainingSession(
+          rememberedLoginContext(ctx)?.sessionExpiresAt,
+          grant.exp ?? epochNow() + tokens.sessionSeconds,
+        ),
     },
-    renderError: renderErrorPage,
+    renderError: (ctx, out) => {
+      pages.renderError(ctx, out);
+    },
   };
 
   const provider = new Provider(issuer, configuration);
@@ -432,7 +608,7 @@ export function buildTenantProvider(
     issuer,
     basePath,
     provider,
-    loginContexts,
+    loginState,
     keysVersion: keys.version,
     fingerprint,
     handle: (req, res) => {

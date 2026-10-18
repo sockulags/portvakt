@@ -22,6 +22,13 @@ const DEV_DATABASE_PASSWORDS: readonly string[] = [
   "password",
 ];
 
+/** Swedish eID Framework levels of assurance, lowest first (the default ACR_RANKING). */
+export const DEFAULT_ACR_RANKING: readonly string[] = [
+  "http://id.elegnamnden.se/loa/1.0/loa2",
+  "http://id.elegnamnden.se/loa/1.0/loa3",
+  "http://id.elegnamnden.se/loa/1.0/loa4",
+];
+
 export const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
@@ -102,6 +109,22 @@ export interface Config {
     readonly idp: BootstrapIdpConfig | undefined;
     readonly adminSubject: string | undefined;
   };
+  /**
+   * Assurance levels from lowest to highest (ACR_RANKING). A login method whose asserted acr
+   * ranks below a requested `acr_values` entry is not offered; unranked values only match
+   * themselves.
+   */
+  readonly acrRanking: readonly string[];
+  readonly federation: {
+    /** Timeout of every request to an upstream IdP (discovery, token, userinfo, JWKS). */
+    readonly upstreamTimeoutSeconds: number;
+    /** How long discovered upstream metadata is reused before it is fetched again. */
+    readonly metadataTtlSeconds: number;
+    /** A failed discovery is not retried for this long (0: always retried). */
+    readonly failureCacheSeconds: number;
+  };
+  /** Directory of the built login UI (apps/login/dist); `undefined` uses the default location. */
+  readonly loginUiDir: string | undefined;
 }
 
 export interface DatabaseConfig {
@@ -238,6 +261,23 @@ const envSchema = z.object({
   BOOTSTRAP_IDP_DISPLAY_NAME: optionalString,
   BOOTSTRAP_IDP_ACR: optionalString,
   BOOTSTRAP_ADMIN_SUBJECT: optionalString,
+  ACR_RANKING: z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .default(DEFAULT_ACR_RANKING.join(","))
+      .transform(commaList)
+      .pipe(
+        z
+          .array(z.string().min(1).max(255).regex(/^\S+$/, "acr values must not contain spaces"))
+          .min(1)
+          .refine((values) => new Set(values).size === values.length, "acr values must be unique"),
+      ),
+  ),
+  UPSTREAM_TIMEOUT: duration("10s"),
+  UPSTREAM_METADATA_TTL: duration("1h"),
+  UPSTREAM_FAILURE_CACHE: duration("5s", { allowZero: true }),
+  LOGIN_UI_DIR: optionalString,
 });
 
 type Env = z.infer<typeof envSchema>;
@@ -478,6 +518,13 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
       retireAfterSeconds: env.KEY_RETIRE_AFTER,
     },
     bootstrap,
+    acrRanking: env.ACR_RANKING,
+    federation: {
+      upstreamTimeoutSeconds: env.UPSTREAM_TIMEOUT,
+      metadataTtlSeconds: env.UPSTREAM_METADATA_TTL,
+      failureCacheSeconds: env.UPSTREAM_FAILURE_CACHE,
+    },
+    loginUiDir: env.LOGIN_UI_DIR,
   };
 }
 

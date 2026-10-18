@@ -17,15 +17,10 @@ import {
 } from "../testing/oidc-flow.js";
 import { startTestServer, TestBrowser } from "../testing/test-server.js";
 
-/** Sessions here end one hour after login, well before SESSION_TTL (8h). */
+/** Sessions here end one hour after login (the login method's maxAge), well before SESSION_TTL. */
 const SESSION_SECONDS = 3600;
 
-const ts = await startTestServer({
-  sessionPolicy: {
-    sessionExpiresAt: ({ authTime }) => Promise.resolve(authTime + SESSION_SECONDS),
-    refreshTokenTtl: (login, now) => Math.max(1, (login?.sessionExpiresAt ?? now + 1) - now),
-  },
-});
+const ts = await startTestServer();
 
 async function oauthError(promise: Promise<unknown>): Promise<string> {
   try {
@@ -67,7 +62,13 @@ describe.skipIf(ts === undefined)("security properties", () => {
   const { repos } = db;
 
   async function worldWithPerson(prefix = "sec") {
-    const world = await createTenantWorld(repos, prefix);
+    const world = await createTenantWorld(repos, prefix, {
+      sessionPolicy: {
+        maxAgeSeconds: SESSION_SECONDS,
+        idleSeconds: SESSION_SECONDS,
+        allowSso: true,
+      },
+    });
     const { person } = await createPerson(repos, world, `p-${uniqueSuffix()}`);
     const as = {
       personId: person.id,

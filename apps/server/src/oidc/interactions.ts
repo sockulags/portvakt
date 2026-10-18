@@ -28,6 +28,11 @@ export const completeLoginInputSchema = z
     acr: z.string().min(1).max(255),
     /** Authentication methods (RFC 8176 values such as `pwd`, `mfa`, `hwk`). */
     amr: z.array(amrValueSchema).min(1).max(16),
+    /**
+     * Epoch seconds of the upstream authentication (its `auth_time`), when known; never later than
+     * now. Becomes the session login time (`auth_time`, `max_age` checks).
+     */
+    authTime: z.number().int().positive().optional(),
   })
   .strict();
 export type CompleteLoginInput = z.input<typeof completeLoginInputSchema>;
@@ -49,8 +54,20 @@ export class InteractionError extends Error {
 export interface InteractionDetails {
   readonly uid: string;
   readonly prompt: string;
+  /** Why the prompt is required (oidc-provider and Portvakt check reasons, e.g. `max_age`). */
+  readonly reasons: readonly string[];
   readonly clientId: string | undefined;
+  /** Authorization request parameters the login flow uses (strings only, as sent). */
+  readonly params: {
+    readonly acrValues: string | undefined;
+    readonly loginHint: string | undefined;
+    readonly uiLocales: string | undefined;
+    readonly maxAge: number | undefined;
+  };
 }
+
+const stringParam = (value: unknown, max = 2048): string | undefined =>
+  typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined;
 
 /** Loads the pending interaction of this browser (cookie-bound) and checks it is `ctx.uid`. */
 export async function loadInteraction(ctx: InteractionContext): Promise<InteractionDetails> {
@@ -66,11 +83,22 @@ export async function loadInteraction(ctx: InteractionContext): Promise<Interact
   if (details.uid !== ctx.uid) {
     throw new InteractionError("interaction_not_found", "Interaction not found or expired");
   }
-  const clientId = details.params.client_id;
+  const { params } = details;
+  const maxAge = Number(params.max_age);
   return {
     uid: details.uid,
     prompt: details.prompt.name,
-    clientId: typeof clientId === "string" ? clientId : undefined,
+    reasons: [...details.prompt.reasons],
+    clientId: stringParam(params.client_id, 128),
+    params: {
+      acrValues: stringParam(params.acr_values),
+      loginHint: stringParam(params.login_hint, 320),
+      uiLocales: stringParam(params.ui_locales, 256),
+      maxAge:
+        params.max_age !== undefined && Number.isSafeInteger(maxAge) && maxAge >= 0
+          ? maxAge
+          : undefined,
+    },
   };
 }
 
@@ -81,7 +109,7 @@ export interface InteractionService {
    * with a 303). The broker session and its login context are created there; consent is
    * implicit.
    *
-   * M3's login UI calls this after the upstream login and JIT provisioning; M4 adds the
+   * The federation calls this after the upstream login and JIT provisioning; M4 adds the
    * representation step before it. Checks that the person and the login method belong to the
    * tenant, the method is enabled, and the person has an identity through it; otherwise throws
    * {@link InteractionError}.
@@ -90,6 +118,8 @@ export interface InteractionService {
     ctx: InteractionContext,
     input: CompleteLoginInput,
   ): Promise<{ readonly returnTo: string }>;
+  /** Ends the interaction without a login: the application receives `access_denied`. */
+  abort(ctx: InteractionContext): Promise<{ readonly returnTo: string }>;
 }
 
 export function createInteractionService(repos: Repositories): InteractionService {
@@ -125,10 +155,20 @@ export function createInteractionService(repos: Repositories): InteractionServic
             acr: login.acr,
             amr: [...login.amr],
             remember: true,
-            ts: Math.floor(Date.now() / 1000),
+            ts: Math.min(login.authTime ?? Number.MAX_SAFE_INTEGER, Math.floor(Date.now() / 1000)),
           },
           [PENDING_LOGIN_RESULT_KEY]: pending,
         },
+        { mergeWithLastSubmission: false },
+      );
+      return { returnTo };
+    },
+    async abort(ctx) {
+      await loadInteraction(ctx);
+      const returnTo = await ctx.tenantProvider.provider.interactionResult(
+        ctx.req,
+        ctx.res,
+        { error: "access_denied", error_description: "End-User aborted interaction" },
         { mergeWithLastSubmission: false },
       );
       return { returnTo };

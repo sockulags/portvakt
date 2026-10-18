@@ -1,6 +1,6 @@
 import { createServer, type RequestListener, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Express } from "express";
+import express, { Router, type Express } from "express";
 import type { Pool } from "pg";
 import { createApp, type ReadinessReport } from "./app.js";
 import type { Config } from "./config/index.js";
@@ -9,15 +9,23 @@ import { createDb } from "./db/database.js";
 import { JOB_LOCKS, runExclusive } from "./jobs/exclusive.js";
 import { PeriodicTask } from "./jobs/periodic.js";
 import { SigningKeyCache } from "./keys/key-cache.js";
+import { FederationService } from "./federation/service.js";
+import { UpstreamClients } from "./federation/upstream.js";
 import { KeyRotationService, type ScheduledRotationResult } from "./keys/rotation.js";
 import type { Logger } from "./logging/logger.js";
+import { loginRoutes } from "./login/routes.js";
+import { MetricRegistry } from "./metrics/registry.js";
+import { LOGIN_UI_BASE, LoginUiShell } from "./login/ui-shell.js";
+import { AcrRanking } from "./oidc/acr.js";
 import { ChangeListener } from "./oidc/change-listener.js";
 import { createInteractionService, type InteractionService } from "./oidc/interactions.js";
+import { createProviderPages } from "./oidc/pages.js";
 import { buildTenantProvider } from "./oidc/provider.js";
 import { ProviderRegistry } from "./oidc/registry.js";
-import { tenantRoutes } from "./oidc/routes.js";
-import { defaultSessionPolicy, type SessionPolicy } from "./oidc/session-policy.js";
+import { tenantOf, tenantRoutes } from "./oidc/routes.js";
+import { SessionPolicyService } from "./oidc/session-policy.js";
 import type { ChangeEvent } from "./repositories/change-events.js";
+import { FederationStateRepository } from "./repositories/federation-states.js";
 import { createRepositories, type Repositories } from "./repositories/index.js";
 import { OidcPayloadRepository } from "./repositories/oidc-payloads.js";
 
@@ -35,8 +43,6 @@ export interface PortvaktOptions {
   readonly listenUrl?: string;
   /** Defaults to the key ring of `config.masterKeys`. */
   readonly keys?: KeyRing;
-  /** Session lifetimes; defaults to the configured lifetimes (M3 plugs in session policies). */
-  readonly sessionPolicy?: SessionPolicy;
 }
 
 export interface Portvakt {
@@ -46,8 +52,12 @@ export interface Portvakt {
   readonly keyCache: SigningKeyCache;
   /** `rotateNow` is the entry point for the admin API (M6). */
   readonly rotation: KeyRotationService;
-  /** `completeLogin` is the entry point for the login UI (M3). */
+  /** `completeLogin` finishes a login (the federation calls it; M4 adds representation). */
   readonly interactions: InteractionService;
+  /** Upstream OIDC federation (login methods). */
+  readonly federation: FederationService;
+  /** In-process counters (M8 exposes them to Prometheus). */
+  readonly metrics: MetricRegistry;
   readonly readiness: () => Promise<ReadinessReport>;
   /** The scheduled jobs, runnable on demand (tests, operations). */
   readonly jobs: {
@@ -76,8 +86,19 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
   const { config, pool, logger } = options;
   const db = createDb(pool);
   const keys = options.keys ?? createKeyRing(config.masterKeys);
-  const repos = createRepositories(db, keys);
-  const sessionPolicy = options.sessionPolicy ?? defaultSessionPolicy(config.tokens);
+  const repos = createRepositories(db, keys, {
+    maxSessionSeconds: config.tokens.sessionSeconds,
+    acrRanking: config.acrRanking,
+  });
+  const sessionPolicy = new SessionPolicyService(config.tokens, repos.loginMethods);
+  const acrRanking = new AcrRanking(config.acrRanking);
+  const shell = new LoginUiShell({
+    dir: config.loginUiDir,
+    production: config.isProduction,
+    logger,
+  });
+  const pages = createProviderPages(shell);
+  const metrics = new MetricRegistry();
   const keyCache = new SigningKeyCache(repos.signingKeys);
   const servers = new Set<Server>();
   /** Shutdown began: readiness reports 503. */
@@ -90,8 +111,8 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     repos,
     keys: keyCache,
     logger,
-    build: (tenant, loaded, fingerprint) =>
-      buildTenantProvider(tenant, loaded, fingerprint, { config, repos, logger, sessionPolicy }),
+    build: (input) =>
+      buildTenantProvider(input, { config, repos, logger, sessionPolicy, acrRanking, pages }),
   });
 
   const reloadKeys = async (): Promise<void> => {
@@ -107,11 +128,29 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     onChange: reloadKeys,
   });
   const interactions = createInteractionService(repos);
+  const upstream = new UpstreamClients({
+    loginMethods: repos.loginMethods,
+    logger,
+    production: config.isProduction,
+    timeoutSeconds: config.federation.upstreamTimeoutSeconds,
+    metadataTtlSeconds: config.federation.metadataTtlSeconds,
+    failureCacheSeconds: config.federation.failureCacheSeconds,
+  });
+  const federation = new FederationService({
+    config,
+    repos,
+    logger,
+    upstream,
+    acrRanking,
+    interactions,
+    metrics,
+  });
 
   const onEvent = async (event: ChangeEvent): Promise<void> => {
     switch (event.type) {
       case "tenant":
       case "tenant_applications":
+      case "login_methods":
         registry.invalidateTenant(event.tenantId);
         return;
       case "application":
@@ -144,14 +183,21 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     cleanupExpired: async (): Promise<number | null> => {
       let total = 0;
       for (let batch = 0; batch < CLEANUP_MAX_BATCHES; batch += 1) {
-        const result = await runExclusive(db, JOB_LOCKS.payloadCleanup, { wait: false }, (tx) =>
-          new OidcPayloadRepository(tx).deleteExpiredBatch(CLEANUP_BATCH_SIZE),
+        const result = await runExclusive(
+          db,
+          JOB_LOCKS.payloadCleanup,
+          { wait: false },
+          async (tx) =>
+            (await new OidcPayloadRepository(tx).deleteExpiredBatch(CLEANUP_BATCH_SIZE)) +
+            (await new FederationStateRepository(tx, keys.secrets).deleteExpiredBatch(
+              CLEANUP_BATCH_SIZE,
+            )),
         );
         if (!result.ran) return batch === 0 ? null : total;
         total += result.value;
         if (result.value < CLEANUP_BATCH_SIZE) break;
       }
-      if (total > 0) logger.info({ deleted: total }, "deleted expired oidc payloads");
+      if (total > 0) logger.info({ deleted: total }, "deleted expired oidc payloads and states");
       return total;
     },
     rotateKeys: () => rotation.runScheduled(),
@@ -205,12 +251,23 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     readiness,
     isDraining: () => closing,
     routes: [
+      loginUiAssets(shell.dir, config.isProduction),
       tenantRoutes({
         registry,
         interactions,
         logger,
         testRoutes,
         publicUrl: config.publicUrl,
+        loginRoutes: loginRoutes({
+          config,
+          repos,
+          federation,
+          interactions,
+          shell,
+          acrRanking,
+          logger,
+          tenantOf,
+        }),
       }),
     ],
   });
@@ -228,10 +285,14 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     keyCache,
     rotation,
     interactions,
+    federation,
+    metrics,
     readiness,
     jobs,
     async start() {
       if (started) return;
+      // Production serves the built login UI and refuses to start without it.
+      if (config.isProduction) shell.assertBuilt();
       await rotation.ensureActiveKey();
       await reloadKeys();
       await listener.start();
@@ -272,6 +333,31 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
       logger.info("shut down");
     },
   };
+}
+
+/**
+ * The login UI's built assets (`apps/login/dist`, Vite `base` ${LOGIN_UI_BASE}). File names are
+ * content-hashed, so production lets browsers cache them for a year.
+ */
+function loginUiAssets(dir: string, production: boolean): Router {
+  const router = Router();
+  // The shell is only ever served with its bootstrap block (login/ui-shell.ts), never raw.
+  router.all(`${LOGIN_UI_BASE}index.html`, (_req, res) => {
+    res.status(404).json({ error: "not_found" });
+  });
+  router.use(
+    LOGIN_UI_BASE,
+    express.static(dir, {
+      index: false,
+      fallthrough: true,
+      immutable: production,
+      maxAge: production ? "365d" : 0,
+      setHeaders: (res) => {
+        res.setHeader("X-Content-Type-Options", "nosniff");
+      },
+    }),
+  );
+  return router;
 }
 
 async function pingDatabase(pool: Pool): Promise<boolean> {

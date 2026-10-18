@@ -142,6 +142,40 @@ export class OidcPayloadRepository {
     return { consumed: false, grantId: existing?.grant_id ?? null };
   }
 
+  /**
+   * Sets one top-level JSON field of a live payload, only when every `guards` field still has
+   * the given value: a single atomic UPDATE, no read-modify-write of the whole payload. Field
+   * names are fixed identifiers of the caller, never input. Returns whether a row changed.
+   */
+  async setFieldIf(
+    tenantId: string,
+    kind: string,
+    id: string,
+    field: string,
+    value: string | number | boolean,
+    guards: Readonly<Record<string, string | number | boolean>>,
+  ): Promise<boolean> {
+    requireUuids({ tenantId });
+    const names = [field, ...Object.keys(guards)];
+    if (names.some((name) => !/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(name))) {
+      throw new TypeError("invalid payload field name");
+    }
+    const params: unknown[] = [tenantId, kind, id, field, JSON.stringify(value)];
+    const conditions = Object.entries(guards).map(([name, expected]) => {
+      params.push(name, JSON.stringify(expected));
+      return `payload -> $${params.length - 1}::text = $${params.length}::jsonb`;
+    });
+    const rows = await this.#db.query(
+      `UPDATE oidc_payloads SET payload = jsonb_set(payload, ARRAY[$4::text], $5::jsonb)
+        WHERE tenant_id = $1 AND kind = $2 AND id = $3
+          AND (expires_at IS NULL OR expires_at > now())
+          ${conditions.map((condition) => `AND ${condition}`).join(" ")}
+        RETURNING 1`,
+      params,
+    );
+    return rows.length > 0;
+  }
+
   /** Revokes a grant: deletes its grant-bound tokens and the Grant itself. */
   async revokeGrant(tenantId: string, grantId: string): Promise<void> {
     requireUuids({ tenantId });
