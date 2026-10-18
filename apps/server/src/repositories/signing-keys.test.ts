@@ -248,23 +248,20 @@ describe.skipIf(testDb === undefined)("SigningKeyRepository", () => {
     ).toBe(party.id);
     const relogin = await login(newOnly, tenant.id, method, "pin-holder", { pin: TEST_PINS[0] });
     expect(relogin.identity.pinIndex).toBe(rotated.index.compute("pin", "191212121212").index);
-    const { person: agent, identity: agentIdentity } = await login(
-      newOnly,
-      tenant.id,
-      method,
-      "agent",
-      { pin: TEST_PINS[1] },
-    );
+    const { person: agent } = await login(newOnly, tenant.id, method, "agent", {
+      pin: TEST_PINS[1],
+    });
+    const agentPins = await newOnly.persons.pinIndexCandidates(tenant.id, agent.id);
     expect(
-      (
-        await newOnly.grants.listValidForAgent(tenant.id, agent.id, agentIdentity.pinIndex, app.id)
-      ).map((g) => g.id),
+      (await newOnly.grants.listValidForAgent(tenant.id, agent.id, agentPins, app.id)).map(
+        (g) => g.id,
+      ),
     ).toEqual([]); // app not attached to this tenant
     await newOnly.applications.enableForTenant(tenant.id, app.id);
     expect(
-      (
-        await newOnly.grants.listValidForAgent(tenant.id, agent.id, agentIdentity.pinIndex, app.id)
-      ).map((g) => g.id),
+      (await newOnly.grants.listValidForAgent(tenant.id, agent.id, agentPins, app.id)).map(
+        (g) => g.id,
+      ),
     ).toEqual([grant.id]);
 
     expect(await rewrapAllSecrets(db, rotated)).toEqual({

@@ -45,10 +45,45 @@ export interface BootstrapIdpConfig {
   readonly acr: string;
 }
 
+/** Express `trust proxy`: `false`, `true` (trust every hop) or the number of trusted hops. */
+export type TrustProxy = boolean | number;
+
+export interface TokenLifetimes {
+  /** Access tokens (JWT, per-app `aud`), also for client_credentials. */
+  readonly accessTokenSeconds: number;
+  readonly idTokenSeconds: number;
+  /** Default refresh token lifetime; never beyond the broker session (session policies, M3). */
+  readonly refreshTokenSeconds: number;
+  /** Default absolute broker session lifetime (login method session policies refine it, M3). */
+  readonly sessionSeconds: number;
+  /** How long a login interaction may take. */
+  readonly interactionSeconds: number;
+}
+
 export interface Config {
   readonly nodeEnv: NodeEnv;
   readonly isProduction: boolean;
   readonly port: number;
+  /** Proxy hops trusted for X-Forwarded-* (client IP, protocol, host). */
+  readonly trustProxy: TrustProxy;
+  /** Apply pending migrations at start-up (default: on outside production, off in production). */
+  readonly migrateOnStart: boolean;
+  readonly tokens: TokenLifetimes;
+  readonly intervals: {
+    /** Periodic provider/key reload, the fallback when a change notification was missed. */
+    readonly providerReloadSeconds: number;
+    /** How often the key rotation job checks whether a transition is due. */
+    readonly keyRotationCheckSeconds: number;
+    /** How often expired oidc-provider rows are deleted. */
+    readonly payloadCleanupSeconds: number;
+  };
+  /** Graceful shutdown: how long in-flight requests may take before connections are closed. */
+  readonly shutdownTimeoutSeconds: number;
+  /**
+   * Graceful shutdown: how long readiness reports 503 before the listener closes, so load
+   * balancers stop routing new requests first (0 in tests).
+   */
+  readonly shutdownDrainDelaySeconds: number;
   /** Origin and optional path prefix, without a trailing slash. Issuers are `${publicUrl}/t/{slug}`. */
   readonly publicUrl: string;
   readonly database: DatabaseConfig;
@@ -115,8 +150,9 @@ const commaList = (value: string): string[] =>
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
 
-const duration = (fallback: string) =>
+const duration = (fallback: string, options: { readonly allowZero?: boolean } = {}) =>
   z.preprocess(emptyToUndefined, z.string().default(fallback)).transform((value, ctx) => {
+    if (options.allowZero === true && /^0[smhdw]?$/i.test(value.trim())) return 0;
     const seconds = parseDurationSeconds(value);
     if (seconds === undefined) {
       ctx.addIssue({
@@ -128,9 +164,45 @@ const duration = (fallback: string) =>
     return seconds;
   });
 
+const trustProxy = z.preprocess(
+  emptyToUndefined,
+  z
+    .string()
+    .trim()
+    .toLowerCase()
+    .default("false")
+    .transform((value, ctx): TrustProxy => {
+      if (value === "false" || value === "0") return false;
+      if (value === "true") return true;
+      if (/^[1-9][0-9]?$/.test(value)) return Number(value);
+      ctx.addIssue({ code: "custom", message: "must be false, true or a number of proxy hops" });
+      return z.NEVER;
+    }),
+);
+
+const booleanFlag = z.preprocess(
+  emptyToUndefined,
+  z
+    .enum(["true", "false", "1", "0"])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value === "true" || value === "1")),
+);
+
 const envSchema = z.object({
   NODE_ENV: z.preprocess(emptyToUndefined, z.enum(NODE_ENVS).default("development")),
   PORT: z.preprocess(emptyToUndefined, z.coerce.number().int().min(1).max(65535).default(3000)),
+  TRUST_PROXY: trustProxy,
+  MIGRATE_ON_START: booleanFlag,
+  ACCESS_TOKEN_TTL: duration("5m"),
+  ID_TOKEN_TTL: duration("5m"),
+  REFRESH_TOKEN_TTL: duration("8h"),
+  SESSION_TTL: duration("8h"),
+  INTERACTION_TTL: duration("15m"),
+  PROVIDER_RELOAD_INTERVAL: duration("30s"),
+  KEY_ROTATION_CHECK_INTERVAL: duration("1h"),
+  PAYLOAD_CLEANUP_INTERVAL: duration("15m"),
+  SHUTDOWN_TIMEOUT: duration("15s"),
+  SHUTDOWN_DRAIN_DELAY: duration("5s", { allowZero: true }),
   PUBLIC_URL: optionalString,
   DATABASE_URL: z.preprocess(emptyToUndefined, z.string().trim()),
   MIGRATION_DATABASE_URL: optionalString,
@@ -175,6 +247,17 @@ const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
 function isLocalHostname(hostname: string): boolean {
   return (
     LOCAL_HOSTNAMES.has(hostname) || hostname.endsWith(".localhost") || hostname.endsWith(".test")
+  );
+}
+
+/** Hosts a test-mode server may use: loopback addresses and the reserved test domains. */
+function isLoopbackOrTestHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "[::1]" ||
+    hostname.endsWith(".localhost") ||
+    hostname.endsWith(".test")
   );
 }
 
@@ -324,10 +407,38 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
   if (env.KEY_RETIRE_AFTER >= env.KEY_ROTATION_INTERVAL) {
     issues.push("KEY_RETIRE_AFTER: must be shorter than KEY_ROTATION_INTERVAL");
   }
+  const longestSignedToken = Math.max(env.ACCESS_TOKEN_TTL, env.ID_TOKEN_TTL);
+  if (env.KEY_RETIRE_AFTER < longestSignedToken) {
+    issues.push(
+      "KEY_RETIRE_AFTER: must be at least the longest signed token lifetime (ACCESS_TOKEN_TTL, ID_TOKEN_TTL)",
+    );
+  }
+  // ID tokens come back as id_token_hint (logout) for as long as the broker session lasts, so a
+  // key must stay published for the longest session too. M3 caps login method maxAge to it.
+  if (env.KEY_RETIRE_AFTER < env.SESSION_TTL) {
+    issues.push("KEY_RETIRE_AFTER: must be at least SESSION_TTL (the longest broker session)");
+  }
+  if (env.REFRESH_TOKEN_TTL > env.SESSION_TTL) {
+    issues.push("REFRESH_TOKEN_TTL: must not exceed SESSION_TTL");
+  }
   const allMasterKeys = [env.MASTER_KEY, ...env.MASTER_KEY_PREVIOUS];
   const distinct = new Set(allMasterKeys.map((key) => key.toString("base64")));
   if (distinct.size !== allMasterKeys.length) {
     issues.push("MASTER_KEY_PREVIOUS: must not repeat MASTER_KEY or another previous key");
+  }
+
+  if (publicUrl !== undefined && publicUrl.pathname !== "/") {
+    issues.push("PUBLIC_URL: must be an origin without a path (issuers are {PUBLIC_URL}/t/{slug})");
+  }
+  if (
+    env.NODE_ENV === "test" &&
+    publicUrl !== undefined &&
+    !isLoopbackOrTestHost(publicUrl.hostname)
+  ) {
+    // NODE_ENV=test mounts a login route that needs no authentication: never on a real host.
+    issues.push(
+      "NODE_ENV: test mode is only allowed with a loopback, .localhost or .test PUBLIC_URL",
+    );
   }
 
   const bootstrap = bootstrapConfig(env, issues);
@@ -340,6 +451,22 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     nodeEnv: env.NODE_ENV,
     isProduction,
     port: env.PORT,
+    trustProxy: env.TRUST_PROXY,
+    migrateOnStart: env.MIGRATE_ON_START ?? !isProduction,
+    tokens: {
+      accessTokenSeconds: env.ACCESS_TOKEN_TTL,
+      idTokenSeconds: env.ID_TOKEN_TTL,
+      refreshTokenSeconds: env.REFRESH_TOKEN_TTL,
+      sessionSeconds: env.SESSION_TTL,
+      interactionSeconds: env.INTERACTION_TTL,
+    },
+    intervals: {
+      providerReloadSeconds: env.PROVIDER_RELOAD_INTERVAL,
+      keyRotationCheckSeconds: env.KEY_ROTATION_CHECK_INTERVAL,
+      payloadCleanupSeconds: env.PAYLOAD_CLEANUP_INTERVAL,
+    },
+    shutdownTimeoutSeconds: env.SHUTDOWN_TIMEOUT,
+    shutdownDrainDelaySeconds: env.SHUTDOWN_DRAIN_DELAY,
     publicUrl: publicUrl.href.replace(/\/+$/, ""),
     database,
     masterKeys: { current: env.MASTER_KEY, previous: env.MASTER_KEY_PREVIOUS },

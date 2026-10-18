@@ -116,7 +116,7 @@ describe("loadConfig", () => {
   it("parses previous master keys, durations and strips a trailing slash", () => {
     const config = loadConfig({
       ...devEnv,
-      PUBLIC_URL: "https://auth.example.org/portvakt/",
+      PUBLIC_URL: "https://auth.example.org/",
       MASTER_KEY_PREVIOUS: `${DEV_MASTER_KEYS[1]}, ${strongKey()}`,
       KEY_ROTATION_INTERVAL: "30d",
       KEY_PUBLISH_AHEAD: "1d",
@@ -124,7 +124,7 @@ describe("loadConfig", () => {
       LOG_LEVEL: "debug",
       PORT: "8080",
     });
-    expect(config.publicUrl).toBe("https://auth.example.org/portvakt");
+    expect(config.publicUrl).toBe("https://auth.example.org");
     expect(config.masterKeys.previous).toHaveLength(2);
     expect(config.keyRotation.retireAfterSeconds).toBe(43_200);
     expect(config.port).toBe(8080);
@@ -239,5 +239,72 @@ describe("loadConfig", () => {
     const env: NodeJS.ProcessEnv = { ...productionEnv, ...override };
     const issues = issuesOf(env);
     expect(issues.some((issue) => issue.startsWith(`${variable}:`))).toBe(true);
+  });
+});
+
+describe("loadConfig: OIDC core settings", () => {
+  it("defaults token lifetimes, intervals, proxy trust and start-up migrations", () => {
+    const config = loadConfig(devEnv);
+    expect(config.tokens).toEqual({
+      accessTokenSeconds: 300,
+      idTokenSeconds: 300,
+      refreshTokenSeconds: 8 * 3600,
+      sessionSeconds: 8 * 3600,
+      interactionSeconds: 900,
+    });
+    expect(config.intervals).toEqual({
+      providerReloadSeconds: 30,
+      keyRotationCheckSeconds: 3600,
+      payloadCleanupSeconds: 900,
+    });
+    expect(config.shutdownTimeoutSeconds).toBe(15);
+    expect(config.shutdownDrainDelaySeconds).toBe(5);
+    expect(loadConfig({ ...devEnv, SHUTDOWN_DRAIN_DELAY: "0" }).shutdownDrainDelaySeconds).toBe(0);
+    expect(config.trustProxy).toBe(false);
+    expect(config.migrateOnStart).toBe(true);
+    expect(loadConfig(productionEnv).migrateOnStart).toBe(false);
+    expect(loadConfig({ ...productionEnv, MIGRATE_ON_START: "true" }).migrateOnStart).toBe(true);
+    expect(loadConfig({ ...devEnv, MIGRATE_ON_START: "0" }).migrateOnStart).toBe(false);
+  });
+
+  it.each([
+    ["true", true],
+    ["false", false],
+    ["0", false],
+    ["2", 2],
+    ["10", 10],
+  ])("reads TRUST_PROXY=%s", (value, expected) => {
+    expect(loadConfig({ ...devEnv, TRUST_PROXY: value }).trustProxy).toBe(expected);
+  });
+
+  it.each([
+    [{ TRUST_PROXY: "loopback" }, "TRUST_PROXY"],
+    [{ TRUST_PROXY: "1d" }, "TRUST_PROXY"],
+    [{ TRUST_PROXY: "100" }, "TRUST_PROXY"],
+    [{ PUBLIC_URL: "https://auth.example.org/portvakt" }, "PUBLIC_URL"],
+    [{ NODE_ENV: "test", PUBLIC_URL: "https://login.example.org" }, "NODE_ENV"],
+    [{ NODE_ENV: "test", PUBLIC_URL: "http://10.0.0.5:3000" }, "NODE_ENV"],
+    [{ SESSION_TTL: "3d", REFRESH_TOKEN_TTL: "1h" }, "KEY_RETIRE_AFTER"],
+    [{ SHUTDOWN_DRAIN_DELAY: "-1s" }, "SHUTDOWN_DRAIN_DELAY"],
+    [{ MIGRATE_ON_START: "yes" }, "MIGRATE_ON_START"],
+    [{ ACCESS_TOKEN_TTL: "0s" }, "ACCESS_TOKEN_TTL"],
+    [{ ID_TOKEN_TTL: "3d" }, "KEY_RETIRE_AFTER"],
+    [{ REFRESH_TOKEN_TTL: "9h" }, "REFRESH_TOKEN_TTL"],
+    [{ PROVIDER_RELOAD_INTERVAL: "soon" }, "PROVIDER_RELOAD_INTERVAL"],
+  ])("refuses %j", (override, variable) => {
+    const issues = issuesOf({ ...devEnv, ...override });
+    expect(issues.some((issue) => issue.startsWith(`${variable}:`))).toBe(true);
+  });
+});
+
+describe("loadConfig: test mode", () => {
+  it.each([
+    "http://localhost:3000",
+    "http://127.0.0.1:4000",
+    "http://[::1]:4000",
+    "https://portvakt.test",
+    "http://app.localhost",
+  ])("allows NODE_ENV=test with PUBLIC_URL %s", (url) => {
+    expect(loadConfig({ ...devEnv, NODE_ENV: "test", PUBLIC_URL: url }).nodeEnv).toBe("test");
   });
 });

@@ -64,15 +64,20 @@ const SELECT_GRANT = `
     JOIN parties p ON p.tenant_id = g.tenant_id AND p.id = g.party_id`;
 
 /**
- * SQL condition: grant `g` can be used at time `at` for application `app` by the agent with
- * person id `person` or pin index `pin`. Valid means: not revoked, `at` in [valid_from, valid_to),
- * the application enabled for the tenant, and either `all_applications` or a row for the
- * application. A limited grant whose last
- * application was removed matches nothing.
+ * SQL condition: grant `g` is made out to the agent with person id `person`, or to a personal
+ * identity number whose blind index is in the text array `pins`.
  */
-const usableBy = (person: string, pin: string, app: string, at: string): string => `
-      (g.agent_person_id = ${person}
-       OR (${pin}::text IS NOT NULL AND g.agent_identifier_index = ${pin}::text))
+const madeOutTo = (person: string, pins: string): string => `
+      (g.agent_person_id = ${person} OR g.agent_identifier_index = ANY (${pins}::text[]))`;
+
+/**
+ * SQL condition: grant `g` can be used at time `at` for application `app` by the agent (see
+ * {@link madeOutTo}). Valid means: not revoked, `at` in [valid_from, valid_to), the application
+ * enabled for the tenant, and either `all_applications` or a row for the application. A limited
+ * grant whose last application was removed matches nothing.
+ */
+const usableBy = (person: string, pins: string, app: string, at: string): string => `
+  ${madeOutTo(person, pins)}
   AND g.revoked_at IS NULL
   AND g.valid_from <= ${at}
   AND (g.valid_to IS NULL OR g.valid_to > ${at})
@@ -288,19 +293,23 @@ export class RepresentationGrantRepository {
   /**
    * Every grant of an agent (by person id, or by pin index for grants created before the first
    * sign-in), including expired and revoked ones (administration).
+   *
+   * `pinIndexes` are the agent's pin blind indexes under every configured master key, from
+   * `PersonRepository.pinIndexCandidates`: a grant indexed before a master key rotation still
+   * matches an identity indexed after it, and the other way round. Empty when the agent has no
+   * personal identity number.
    */
   async listForAgent(
     tenantId: string,
     personId: string,
-    pinIndex: string | null,
+    pinIndexes: readonly string[],
   ): Promise<RepresentationGrant[]> {
     requireUuids({ tenantId, personId });
     const rows = await this.#db.query<GrantRow>(
       `${SELECT_GRANT}
-        WHERE g.tenant_id = $1
-          AND (g.agent_person_id = $2 OR ($3::text IS NOT NULL AND g.agent_identifier_index = $3))
+        WHERE g.tenant_id = $1 AND ${madeOutTo("$2", "$3")}
         ORDER BY g.created_at, g.id`,
-      [tenantId, personId, pinIndex],
+      [tenantId, personId, [...pinIndexes]],
     );
     return rows.map((row) => this.#toGrant(row));
   }
@@ -316,13 +325,13 @@ export class RepresentationGrantRepository {
 
   /**
    * Grants the signed-in person can use now (or at `at`) for this application: what the
-   * representation chooser offers. `pinIndex` is the identity's pin index (matches grants made
-   * out to the personal identity number before the person existed), or `null`.
+   * representation chooser offers. `pinIndexes` as for {@link listForAgent}: they match grants
+   * made out to the personal identity number before the person existed.
    */
   async listValidForAgent(
     tenantId: string,
     personId: string,
-    pinIndex: string | null,
+    pinIndexes: readonly string[],
     applicationId: string,
     at?: Date,
   ): Promise<RepresentationGrant[]> {
@@ -332,17 +341,20 @@ export class RepresentationGrantRepository {
         WHERE g.tenant_id = $1
           AND ${usableBy("$2", "$3", "$4", "COALESCE($5::timestamptz, now())")}
         ORDER BY p.display_name, g.id`,
-      [tenantId, personId, pinIndex, applicationId, at ?? null],
+      [tenantId, personId, [...pinIndexes], applicationId, at ?? null],
     );
     return rows.map((row) => this.#toGrant(row));
   }
 
-  /** The grant if it is still usable by this agent for this application (checked at refresh). */
+  /**
+   * The grant if it is still usable by this agent for this application (checked at refresh).
+   * `pinIndexes` as for {@link listForAgent}.
+   */
   async findValid(
     tenantId: string,
     grantId: string,
     personId: string,
-    pinIndex: string | null,
+    pinIndexes: readonly string[],
     applicationId: string,
     at?: Date,
   ): Promise<RepresentationGrant | null> {
@@ -351,7 +363,7 @@ export class RepresentationGrantRepository {
       `${SELECT_GRANT}
         WHERE g.tenant_id = $1 AND g.id = $6
           AND ${usableBy("$2", "$3", "$4", "COALESCE($5::timestamptz, now())")}`,
-      [tenantId, personId, pinIndex, applicationId, at ?? null, grantId],
+      [tenantId, personId, [...pinIndexes], applicationId, at ?? null, grantId],
     );
     return row === undefined ? null : this.#toGrant(row);
   }

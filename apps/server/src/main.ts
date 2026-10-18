@@ -1,5 +1,9 @@
-import { createApp } from "./app.js";
 import { type Config, ConfigError, loadConfig } from "./config/index.js";
+import { createDb, createPool } from "./db/database.js";
+import { migrate } from "./db/migrate.js";
+import { assertRestrictedRuntimeRole } from "./db/runtime-role.js";
+import { createLogger, type Logger } from "./logging/logger.js";
+import { createPortvakt } from "./server.js";
 
 function loadConfigOrExit(): Config {
   try {
@@ -13,8 +17,78 @@ function loadConfigOrExit(): Config {
   }
 }
 
-const config = loadConfigOrExit();
+/** Applies migrations as the owner role, then grants the runtime role (MIGRATE_ON_START). */
+async function migrateOnStart(config: Config, logger: Logger): Promise<void> {
+  const owner = createPool({
+    url: config.database.migrationUrl,
+    poolMax: 1,
+    applicationName: "portvakt-migrate",
+  });
+  try {
+    const result = await migrate(owner, {
+      ...(config.database.separateRoles ? { runtimeRole: config.database.runtimeRole } : {}),
+      onApplied: (migration, durationMs) => {
+        logger.info({ migration: migration.fileName, durationMs }, "migration applied");
+      },
+    });
+    logger.info({ applied: result.applied.length }, "migrations up to date");
+  } finally {
+    await owner.end();
+  }
+}
 
-createApp().listen(config.port, () => {
-  console.log(`portvakt server listening on port ${config.port}`);
+async function main(): Promise<void> {
+  const config = loadConfigOrExit();
+  const logger = createLogger({ level: config.logLevel });
+
+  process.on("unhandledRejection", (reason) => {
+    logger.fatal({ err: reason }, "unhandled promise rejection");
+    process.exit(1);
+  });
+  process.on("uncaughtException", (error) => {
+    logger.fatal({ err: error }, "uncaught exception");
+    process.exit(1);
+  });
+
+  if (config.migrateOnStart) await migrateOnStart(config, logger);
+
+  const pool = createPool({
+    url: config.database.url,
+    poolMax: config.database.poolMax,
+    onIdleError: (error) => logger.warn({ err: error }, "idle database connection failed"),
+  });
+  if (config.isProduction) {
+    const role = await assertRestrictedRuntimeRole(createDb(pool));
+    logger.info({ role: role.role }, "runtime database role is restricted");
+  }
+
+  const portvakt = createPortvakt({ config, pool, logger });
+  await portvakt.start();
+  await portvakt.listen(config.port);
+
+  let stopping = false;
+  const stop = (signal: NodeJS.Signals): void => {
+    if (stopping) {
+      logger.warn({ signal }, "second signal, exiting immediately");
+      process.exit(1);
+    }
+    stopping = true;
+    logger.info({ signal }, "signal received");
+    portvakt
+      .shutdown()
+      .then(() => pool.end())
+      .then(() => process.exit(0))
+      .catch((error: unknown) => {
+        logger.error({ err: error }, "shutdown failed");
+        process.exit(1);
+      });
+  };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+}
+
+main().catch((error: unknown) => {
+  // The logger may not exist yet; the error serializer keeps personal data out either way.
+  console.error("portvakt failed to start:", error instanceof Error ? error.message : error);
+  process.exit(1);
 });

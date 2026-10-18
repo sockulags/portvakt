@@ -137,6 +137,30 @@ export class PersonRepository {
   }
 
   /**
+   * Blind indexes of the person's personal identity numbers (from every identity that carries
+   * one) under every configured master key, current first and without duplicates. Pass them to
+   * the representation grant lookups: a stored index only matches indexes computed under the same
+   * master key, so comparing against the identity's stored `pinIndex` alone would miss grants
+   * indexed before (or after) a master key rotation until `rewrap-secrets` has run. Empty when
+   * no identity has a personal identity number. Never log the result.
+   */
+  async pinIndexCandidates(tenantId: string, personId: string): Promise<string[]> {
+    requireUuids({ tenantId, personId });
+    const rows = await this.#db.query<{ id: string; pin_encrypted: string }>(
+      `SELECT id, pin_encrypted FROM identities
+        WHERE tenant_id = $1 AND person_id = $2 AND pin_encrypted IS NOT NULL
+        ORDER BY created_at, id`,
+      [tenantId, personId],
+    );
+    const candidates = new Set<string>();
+    for (const row of rows) {
+      const pin = this.#keys.secrets.decryptString(row.pin_encrypted, identityPinContext(row.id));
+      for (const index of this.#keys.index.candidates("pin", pin)) candidates.add(index);
+    }
+    return [...candidates];
+  }
+
+  /**
    * Just-in-time provisioning at login, in one transaction: finds the identity for (login
    * method, upstream subject) and refreshes its attributes, or creates the identity. A new
    * identity joins an existing person when the login method links by pin, the login reached the

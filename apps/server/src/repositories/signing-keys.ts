@@ -16,6 +16,7 @@ import {
   type SigningKeyState,
 } from "../domain/signing-key.js";
 import { AuditRepository } from "./audit.js";
+import { emitChange } from "./change-events.js";
 import {
   InvalidStateTransitionError,
   mapDbErrors,
@@ -102,14 +103,18 @@ export class SigningKeyRepository {
       throw new ValidationError(["publicJwk: does not match the private key"]);
     }
     const encrypted = this.#secrets.encrypt(JSON.stringify(privateJwk), privateJwkContext(key.kid));
-    const rows = await mapDbErrors(() =>
-      this.#db.query<SigningKeyRow>(
-        `INSERT INTO signing_keys (kid, alg, private_jwk_encrypted, public_jwk, state)
-         VALUES ($1, $2, $3, $4::jsonb, 'next')
-         RETURNING ${COLUMNS}`,
-        [key.kid, key.alg, encrypted, JSON.stringify(publicJwk)],
-      ),
-    );
+    const rows = await this.#db.transaction(async (tx) => {
+      const inserted = await mapDbErrors(() =>
+        tx.query<SigningKeyRow>(
+          `INSERT INTO signing_keys (kid, alg, private_jwk_encrypted, public_jwk, state)
+           VALUES ($1, $2, $3, $4::jsonb, 'next')
+           RETURNING ${COLUMNS}`,
+          [key.kid, key.alg, encrypted, JSON.stringify(publicJwk)],
+        ),
+      );
+      await emitChange(tx, { type: "signing_keys" });
+      return inserted;
+    });
     return toSigningKey(requireRow(rows));
   }
 
@@ -195,6 +200,7 @@ export class SigningKeyRepository {
       await this.#auditForced(tx, policy, "key.activate_forced", kid, {
         retiringKid: retiringRow?.kid ?? null,
       });
+      await emitChange(tx, { type: "signing_keys" });
       return {
         activated: toSigningKey(activatedRow),
         retiring: retiringRow === undefined ? null : toSigningKey(retiringRow),
@@ -223,6 +229,7 @@ export class SigningKeyRepository {
       if (!current.due) throw new TransitionNotDueError("Signing key", "retired");
       const key = await this.#markRetired(tx, kid);
       await this.#auditForced(tx, policy, "key.retire_forced", kid, {});
+      await emitChange(tx, { type: "signing_keys" });
       return key;
     });
   }
@@ -238,7 +245,9 @@ export class SigningKeyRepository {
       if (current.state !== "next") {
         throw new InvalidStateTransitionError("Signing key", current.state, "retired");
       }
-      return this.#markRetired(tx, kid);
+      const key = await this.#markRetired(tx, kid);
+      await emitChange(tx, { type: "signing_keys" });
+      return key;
     });
   }
 

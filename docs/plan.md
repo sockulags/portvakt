@@ -8,7 +8,7 @@ of shared platform services.
 **Target: a production-ready v1.** Every milestone must pass its tests, and the release must pass
 the full end-to-end suite against the containerised stack. Robustness requirements (security
 hardening, observability, graceful failure) are part of the scope, not polish. Upstream login is
-generic OIDC, so real providers (Entra ID, Criipto, Signicat, Freja via a broker) are configured,
+generic OIDC or SAML, so real providers (Entra ID, Criipto, Signicat, Freja via a broker) are configured,
 not coded; the mock IdP exists only for development and tests.
 
 ## Fixed decisions
@@ -21,7 +21,10 @@ These were decided with the owner and are not reopened during delivery.
 - **Tenancy:** always multi-tenant. A single-tenant install is an install with one tenant. Each
   tenant has its own issuer: `{PUBLIC_URL}/t/{tenantSlug}`.
 - **Upstream:** Portvakt is only a relying party upstream. Tenants configure their own upstream
-  IdPs ("login methods") and Portvakt stores their secrets encrypted. v1 supports upstream OIDC only.
+  IdPs ("login methods") and Portvakt stores their secrets encrypted. v1 supports two upstream
+  protocols: **OIDC** (Entra ID, Criipto, Signicat and similar) and **SAML 2.0 following the
+  Swedish eID Framework** (Sweden Connect / DIGG technical framework), which is how BankID, Freja
+  eID and SITHS are typically reached through IdPs such as Inera's IdP or Swedish eID brokers.
 - **Downstream:** apps talk OIDC to Portvakt only. Web apps use the backend-for-frontend pattern
   through the Portvakt SDK. Access tokens are short-lived JWTs with a per-app `aud`.
 - **Users:** no pre-provisioning. A person record is created just in time at first login.
@@ -61,7 +64,12 @@ docs/              Architecture, claims contract, operations
 - **TenantApplication:** application enabled for a tenant. Only enabled apps can authenticate in
   that tenant. Enabling app B for a tenant that already uses app A gives SSO between them without
   further configuration.
-- **LoginMethod:** per tenant. Upstream OIDC config (issuer, client_id, encrypted secret, scopes),
+- **LoginMethod:** per tenant, with `protocol` `oidc` or `saml`. OIDC config: issuer, client_id,
+  encrypted secret, scopes. SAML config: IdP metadata (URL or inline, refreshed on a schedule and
+  signature-checked when a metadata signing certificate is configured), IdP entityID, requested
+  LoA / AuthnContextClassRef values, requested attribute set or entity category, SP signing and
+  encryption key pair (encrypted at rest, rotatable with overlap), and the attribute mapping.
+  Common to both:
   claim mapping (subject, name, email, personal identity number, groups, upstream acr), the acr value
   Portvakt asserts, home-realm email domains, display name/kind (`employee` or `citizen`), secret
   expiry date, and a **session policy**: `maxAgeSeconds`, `idleSeconds`, `allowSso`.
@@ -79,6 +87,32 @@ docs/              Architecture, claims contract, operations
 - **AuditEvent:** append-only: login success/failure, representation chosen, token issued for app,
   admin changes, key rotation. Fields: tenant, actor, subject, action, details, timestamp.
 
+## SAML upstream (Swedish eID Framework)
+
+- One SP per login method, entityID `{PUBLIC_URL}/t/{tenant}/saml/{loginMethodId}`, with its own
+  published SP metadata (signing and encryption certificates, AssertionConsumerService, entity
+  categories) so the tenant can register it with the federation or IdP.
+- Signed AuthnRequests (HTTP-Redirect or POST binding), RequestedAuthnContext with the configured
+  LoA URIs (for example `http://id.elegnamnden.se/loa/1.0/loa3`), optional `PrincipalSelection`
+  with personal identity number for step-up and signing scenarios.
+- Responses: POST binding to the ACS. Require signed assertions, support encrypted assertions
+  (required by the framework), validate audience, recipient, destination, InResponseTo against a
+  stored request, NotBefore/NotOnOrAfter with small clock skew, one-time use of assertion IDs
+  (replay cache in Postgres), and the issued LoA against what was requested. Reject unsigned or
+  wrapped responses (XML signature wrapping defences come from the library plus our own checks).
+- Attribute mapping defaults for the framework: `urn:oid:1.2.752.29.4.13` personalIdentityNumber,
+  `urn:oid:2.5.4.42` givenName, `urn:oid:2.5.4.4` sn, `urn:oid:2.16.840.1.113730.3.1.241`
+  displayName, `urn:oid:1.2.752.201.3.4` prid, `urn:oid:1.2.752.201.3.5` pridPersistence,
+  `urn:oid:1.2.752.201.3.6` personalIdentityNumberBinding, `urn:oid:1.2.752.201.3.1`
+  orgAffiliation, and for SITHS `urn:oid:1.2.752.29.6.2.1` employeeHsaId. Verify every OID
+  against the current "Attribute Specification for the Swedish eID Framework" before shipping;
+  the mapping stays configurable per login method. The SAML subject
+  used for identity linking is configurable: personal identity number, prid, HSA-id, or NameID.
+- Single logout: SP-initiated SLO toward the IdP when the IdP supports it; failures do not block
+  local logout.
+- The mock IdP gains a SAML IdP mode that signs and encrypts assertions with framework attributes,
+  so e2e tests exercise BankID-, Freja- and SITHS-style logins over SAML.
+
 ## Session policy semantics
 
 - The broker session lasts at most `maxAgeSeconds` of the login method used.
@@ -92,23 +126,25 @@ docs/              Architecture, claims contract, operations
 
 ## Claims contract (v1)
 
-Access token and ID token for app X in tenant T:
+ID token and access token for app X in tenant T. Access tokens carry only `sub`, `tid`, `idp`,
+`idp_kind`, `acr`, `auth_time`, `roles`, `attrs` and `rep` (besides `iss`, `aud`, `exp`, `iat`, `jti`,
+`client_id`), never `name`, `email` or `pin` (data minimisation). ID tokens carry the profile claims
+per scope. The userinfo endpoint is disabled: apps read profile claims from the ID token.
 
 | Claim | Meaning |
 |---|---|
 | `iss` | `{PUBLIC_URL}/t/{T}` |
 | `aud` | client_id of X |
-| `sub` | Person UUID, or party UUID when representing |
+| `sub` | The signed-in person's UUID, always, also when representing |
 | `tid` | Tenant slug |
 | `idp` | Login method id; `idp_kind` is `employee` or `citizen` |
-| `acr`, `amr`, `auth_time` | Assurance level asserted by the login method, method, auth time |
+| `acr`, `amr`, `auth_time` | Assurance level asserted by the login method, method (`amr`: ID token only), auth time |
 | `roles` | Roles for app X only (direct assignments plus matched rules) |
 | `attrs` | Attribute map for app X only |
-| `act` | Present only when representing: `{ "sub": <agent person UUID>, "name": ... }` |
-| `rep` | Present only when representing: `{ "type": "person" or "organisation", "name": ... }` |
-| `name`, `email` | With `profile` / `email` scopes |
-| `pin` | Personal identity number, only with scope `pin` and only if X allows it |
-| `protected_identity` | `true` when upstream flags protected identity; apps must then minimise display |
+| `rep` | Present only when representing: `{ "sub": <party UUID>, "type": "person" or "organisation", "name": ... }` |
+| `name`, `email` | ID token only, with `profile` / `email` scopes |
+| `pin` | ID token only: personal identity number, only with scope `pin` and only if X allows it |
+| `protected_identity` | ID token only: `true` when upstream flags protected identity; apps must then minimise display |
 | `session_exp` | ID token only: absolute broker session end |
 
 The contract is versioned in `docs/claims.md`. Changing claim names is a breaking change.
@@ -166,25 +202,29 @@ reviewer).
 4. **M3 Federation and login.** Mock IdP app, upstream login with `openid-client`, home realm
    discovery, JIT persons and identities, claims and roles/rules/attributes, session policies,
    login UI in the design system. Accept: integration tests for policy semantics and claims.
-5. **M4 Representation, step-up, audit.** Representation chooser, `act`/`rep` claims, grant
+5. **M3b SAML upstream.** SAML login methods per the section above, SP metadata endpoint, metadata
+   refresh, replay cache, SAML mode in the mock IdP, step-up via RequestedAuthnContext. Accept:
+   integration tests for signature, encryption, replay, audience, InResponseTo, expiry, LoA
+   mismatch, and attribute mapping to the claims contract.
+6. **M4 Representation, step-up, audit.** Representation chooser, `rep` claim, grant
    revocation honoured at refresh, `acr_values` step-up, audit events. Accept: integration tests.
-6. **M5 SDK and demo service.** BFF middleware, API validation middleware with roles/acr checks,
+7. **M5 SDK and demo service.** BFF middleware, API validation middleware with roles/acr checks,
    JWKS cache, `session_exp`, step-up helper; demo service shown as A and B. Accept: SDK unit tests
    and a local SSO smoke test.
-7. **M5b Java SDK.** Core library (JWKS cache with unknown-kid refetch, claims model including
-   `act`/`rep`, role and acr checks) and Spring Boot starter (oauth2Login wired to a Portvakt
+8. **M5b Java SDK.** Core library (JWKS cache with unknown-kid refetch, claims model including
+   `rep`, role and acr checks) and Spring Boot starter (oauth2Login wired to a Portvakt
    tenant, `session_exp` enforcement, step-up, resource-server validation). A Java demo service.
    Accept: JUnit tests against a real Portvakt instance in the test stack.
-8. **M6 Admin API and portal.** Admin API with platform/tenant scoping, admin portal on the SDK.
+9. **M6 Admin API and portal.** Admin API with platform/tenant scoping, admin portal on the SDK.
    Accept: API integration tests including tenant isolation, portal builds and type-checks.
-9. **M7 End-to-end.** Playwright suite over the full local stack (see scenarios below), with the
+10. **M7 End-to-end.** Playwright suite over the full local stack (see scenarios below), with the
    Java demo service covering scenarios 2, 3, 6 and 7 as well.
-10. **M8 Production hardening.** Rate limiting on login and token endpoints, strict security
+11. **M8 Production hardening.** Rate limiting on login and token endpoints, strict security
    headers and CSP, CSRF protection for admin and interaction forms, input validation everywhere,
    structured JSON logs without personal data, Prometheus metrics, graceful shutdown, migrations
    under an advisory lock, configuration validated at start (refuse to run with dev defaults in
    production), dependency audit clean, and an independent security review with fixes.
-11. **M9 Packaging and docs.** Dockerfiles, docker-compose for the full stack, Helm chart,
+12. **M9 Packaging and docs.** Dockerfiles, docker-compose for the full stack, Helm chart,
    README, architecture, claims contract, operations (rotation, outage, backup), threat notes.
    Accept: images build, compose stack passes the e2e suite, `helm template` renders.
 
@@ -192,11 +232,11 @@ reviewer).
 
 1. Platform admin signs in to the admin portal, creates a tenant, enables Service A, adds an
    employee login method and a citizen login method.
-2. An employee (mock Entra) signs in to Service A without existing beforehand; a group rule gives
+2. An employee (mock Entra over OIDC) signs in to Service A without existing beforehand; a group rule gives
    role `handlaggare`, which Service A displays.
 3. Service B is not enabled for the tenant: sign-in is refused. After enabling it, the same
    employee reaches Service B without a new upstream login (SSO).
-4. A citizen (mock BankID) with `allowSso = false` must sign in again when moving from A to B.
+4. A citizen (mock BankID over SAML, Swedish eID Framework attributes) with `allowSso = false` must sign in again when moving from A to B.
 5. A short citizen session expires on schedule and Service A requires sign-in again.
 6. An agent with a representation grant chooses an organisation; Service A shows that it acts for
    the organisation and who the agent is. After revoking the grant, the next refresh fails.
@@ -206,10 +246,11 @@ reviewer).
    rejected by Service B's API; a tenant admin cannot see other tenants in the admin portal.
 9. Key rotation from the admin portal: signed-in sessions keep working and new tokens use the new
    key.
-10. A login method with a secret expiring in less than 30 days is flagged in the portal.
+10. A SITHS-style employee login over SAML maps the HSA-id and gets roles from a rule.
+11. A login method with a secret or SP certificate expiring in less than 30 days is flagged in the portal.
 
 ## Out of scope for v1 (recorded as follow-ups)
 
-Upstream SAML (needed for some SITHS setups), Bolagsverket and Mina ombud as representation sources,
+Direct BankID RP API and Freja REST API integrations (v1 reaches them through SAML or OIDC IdPs), Bolagsverket and Mina ombud as representation sources,
 SCIM provisioning, a policy engine for fine-grained authorization, a Python SDK, forwarding audit
 events to the starter kit's log service, per-tenant signing keys, and pairwise subjects.

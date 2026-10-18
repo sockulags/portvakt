@@ -129,26 +129,27 @@ describe.skipIf(testDb === undefined)("tenant scoping", () => {
     expect(await repos.grants.findById(A, b.grant.id)).toBeNull();
     // Same personal identity number in both tenants: blind indexes match, tenant scoping holds.
     expect(a.identity.pinIndex).toBe(b.identity.pinIndex);
+    const pins = (x: typeof a) => repos.persons.pinIndexCandidates(x.tenant.id, x.person.id);
+    expect(await pins(a)).toEqual(await pins(b));
+    expect(await repos.persons.pinIndexCandidates(A, b.person.id)).toEqual([]);
     expect(await repos.grants.findById(A, b.pinGrant.id)).toBeNull();
     // B's person id finds nothing in A; the shared pin index only finds A's own pin grant.
     expect(
-      (await repos.grants.listForAgent(A, b.person.id, b.identity.pinIndex)).map((g) => g.id),
+      (await repos.grants.listForAgent(A, b.person.id, await pins(b))).map((g) => g.id),
     ).toEqual([a.pinGrant.id]);
     expect(
-      (await repos.grants.listForAgent(A, a.person.id, a.identity.pinIndex))
-        .map((g) => g.id)
-        .sort(),
+      (await repos.grants.listForAgent(A, a.person.id, await pins(a))).map((g) => g.id).sort(),
     ).toEqual([a.grant.id, a.pinGrant.id].sort());
     expect(
-      await repos.grants.listValidForAgent(A, b.person.id, b.identity.pinIndex, b.application.id),
+      await repos.grants.listValidForAgent(A, b.person.id, await pins(b), b.application.id),
     ).toEqual([]);
     expect(
-      (
-        await repos.grants.listValidForAgent(A, a.person.id, a.identity.pinIndex, b.application.id)
-      ).map((g) => g.id),
+      (await repos.grants.listValidForAgent(A, a.person.id, await pins(a), b.application.id)).map(
+        (g) => g.id,
+      ),
     ).toEqual([]);
     expect(
-      await repos.grants.findValid(A, b.grant.id, b.person.id, null, b.application.id),
+      await repos.grants.findValid(A, b.grant.id, b.person.id, [], b.application.id),
     ).toBeNull();
     await expect(repos.grants.revoke(A, b.grant.id, null)).rejects.toBeInstanceOf(NotFoundError);
     expect((await repos.grants.findById(b.tenant.id, b.grant.id))?.revokedAt).toBeNull();

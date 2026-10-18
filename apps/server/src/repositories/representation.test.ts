@@ -7,8 +7,10 @@ import {
   TEST_PINS,
   uniqueSuffix,
 } from "../testing/fixtures.js";
-import { setupTestDatabase } from "../testing/test-database.js";
+import { createKeyRing } from "../crypto/keyring.js";
+import { setupTestDatabase, testMasterKeys } from "../testing/test-database.js";
 import { ConflictError, InvalidIdError, InvalidReferenceError, ValidationError } from "./errors.js";
+import { createRepositories } from "./index.js";
 
 const testDb = await setupTestDatabase();
 
@@ -30,14 +32,9 @@ describe.skipIf(testDb === undefined)("representation grants", () => {
       identifier: TEST_ORGNR,
       displayName: "Exempel AB",
     });
+    const pins = await repos.persons.pinIndexCandidates(base.tenant.id, agent.id);
     const valid = (applicationId = base.application.id, at?: Date) =>
-      repos.grants.listValidForAgent(
-        base.tenant.id,
-        agent.id,
-        identity.pinIndex,
-        applicationId,
-        at,
-      );
+      repos.grants.listValidForAgent(base.tenant.id, agent.id, pins, applicationId, at);
     return { ...base, agent, identity, organisation, valid };
   }
 
@@ -60,7 +57,7 @@ describe.skipIf(testDb === undefined)("representation grants", () => {
       applicationIds: [],
     });
     expect(
-      await repos.grants.findValid(tenant.id, grant.id, agent.id, null, application.id),
+      await repos.grants.findValid(tenant.id, grant.id, agent.id, [], application.id),
     ).not.toBeNull();
   });
 
@@ -81,7 +78,7 @@ describe.skipIf(testDb === undefined)("representation grants", () => {
     });
     expect(await valid()).toEqual([]);
     const findAt = (grantId: string, at?: Date) =>
-      repos.grants.findValid(tenant.id, grantId, agent.id, null, application.id, at);
+      repos.grants.findValid(tenant.id, grantId, agent.id, [], application.id, at);
     expect(await findAt(expired.id)).toBeNull();
     expect(await findAt(future.id)).toBeNull();
 
@@ -111,9 +108,9 @@ describe.skipIf(testDb === undefined)("representation grants", () => {
 
     expect(await valid()).toEqual([]);
     expect(
-      await repos.grants.findValid(tenant.id, grant.id, agent.id, null, application.id),
+      await repos.grants.findValid(tenant.id, grant.id, agent.id, [], application.id),
     ).toBeNull();
-    expect(await repos.grants.listForAgent(tenant.id, agent.id, null)).toHaveLength(1);
+    expect(await repos.grants.listForAgent(tenant.id, agent.id, [])).toHaveLength(1);
   });
 
   it("honours an application limit", async () => {
@@ -147,7 +144,7 @@ describe.skipIf(testDb === undefined)("representation grants", () => {
     expect(after).toMatchObject({ allApplications: false, applicationIds: [] });
     expect(await valid(application.id)).toEqual([]);
     expect(
-      await repos.grants.findValid(tenant.id, grant.id, agent.id, null, application.id),
+      await repos.grants.findValid(tenant.id, grant.id, agent.id, [], application.id),
     ).toBeNull();
     // Even re-attaching X does not resurrect the limit.
     await repos.applications.enableForTenant(tenant.id, x.id);
@@ -183,48 +180,99 @@ describe.skipIf(testDb === undefined)("representation grants", () => {
     );
     expect(JSON.stringify(raw)).not.toContain("200001010008");
 
-    const { person, identity } = await login(repos, tenant.id, loginMethod, "newcomer", {
+    const { person } = await login(repos, tenant.id, loginMethod, "newcomer", {
       pin: "000101-0008",
     });
-    const found = await repos.grants.listValidForAgent(
-      tenant.id,
-      person.id,
-      identity.pinIndex,
-      application.id,
-    );
+    const pins = await repos.persons.pinIndexCandidates(tenant.id, person.id);
+    const found = await repos.grants.listValidForAgent(tenant.id, person.id, pins, application.id);
     expect(found.map((g) => g.id)).toEqual([grant.id]);
     expect(
-      await repos.grants.findValid(
-        tenant.id,
-        grant.id,
-        person.id,
-        identity.pinIndex,
-        application.id,
-      ),
+      await repos.grants.findValid(tenant.id, grant.id, person.id, pins, application.id),
     ).not.toBeNull();
-    expect(await repos.grants.listForAgent(tenant.id, person.id, identity.pinIndex)).toHaveLength(
-      1,
-    );
+    expect(await repos.grants.listForAgent(tenant.id, person.id, pins)).toHaveLength(1);
 
     // Someone else, with another or no pin, does not get it.
-    const { person: other, identity: otherIdentity } = await login(
-      repos,
-      tenant.id,
-      loginMethod,
-      "someone-else",
-      { pin: TEST_PINS[0] },
-    );
+    const { person: other } = await login(repos, tenant.id, loginMethod, "someone-else", {
+      pin: TEST_PINS[0],
+    });
     expect(
       await repos.grants.listValidForAgent(
         tenant.id,
         other.id,
-        otherIdentity.pinIndex,
+        await repos.persons.pinIndexCandidates(tenant.id, other.id),
         application.id,
       ),
     ).toEqual([]);
-    expect(await repos.grants.listValidForAgent(tenant.id, other.id, null, application.id)).toEqual(
+    expect(await repos.grants.listValidForAgent(tenant.id, other.id, [], application.id)).toEqual(
       [],
     );
+  });
+
+  it("matches pin grants across a master key rotation before re-wrapping, both ways", async () => {
+    const { tenant, application, loginMethod, organisation } = await setup();
+    // Same database, rotated key ring: a new current key, the old current key as previous key.
+    const rotated = createRepositories(
+      db,
+      createKeyRing({
+        current: Buffer.from("test-master-key-rotated-32-bytes", "utf8"),
+        previous: [testMasterKeys.current],
+      }),
+    );
+
+    // Grant indexed under the old key; the agent signs in for the first time after the rotation.
+    const oldGrant = await repos.grants.create(tenant.id, {
+      agent: { pin: TEST_PINS[1] },
+      partyId: organisation.id,
+      allApplications: true,
+    });
+    const late = await login(rotated, tenant.id, loginMethod, `late-${uniqueSuffix()}`, {
+      pin: TEST_PINS[1],
+    });
+    const [stored] = await db.query<{ agent_identifier_index: string }>(
+      "SELECT agent_identifier_index FROM representation_grants WHERE id = $1",
+      [oldGrant.id],
+    );
+    expect(late.identity.pinIndex).not.toBe(stored?.agent_identifier_index);
+    // The identity's stored index alone misses the grant ...
+    expect(
+      await rotated.grants.listValidForAgent(
+        tenant.id,
+        late.person.id,
+        [late.identity.pinIndex ?? ""],
+        application.id,
+      ),
+    ).toEqual([]);
+    // ... the candidates under every configured key find it.
+    const latePins = await rotated.persons.pinIndexCandidates(tenant.id, late.person.id);
+    expect(latePins).toHaveLength(2);
+    expect(
+      (
+        await rotated.grants.listValidForAgent(tenant.id, late.person.id, latePins, application.id)
+      ).map((g) => g.id),
+    ).toEqual([oldGrant.id]);
+    expect(
+      await rotated.grants.findValid(
+        tenant.id,
+        oldGrant.id,
+        late.person.id,
+        latePins,
+        application.id,
+      ),
+    ).not.toBeNull();
+
+    // Identity indexed under the old key; the grant is created after the rotation.
+    const early = await login(repos, tenant.id, loginMethod, `early-${uniqueSuffix()}`, {
+      pin: TEST_PINS[2],
+    });
+    const newGrant = await rotated.grants.create(tenant.id, {
+      agent: { pin: TEST_PINS[2] },
+      partyId: organisation.id,
+      allApplications: true,
+    });
+    const earlyPins = await rotated.persons.pinIndexCandidates(tenant.id, early.person.id);
+    expect(
+      (await rotated.grants.listForAgent(tenant.id, early.person.id, earlyPins)).map((g) => g.id),
+    ).toEqual([newGrant.id]);
   });
 
   it("only lists grants of the given agent", async () => {
@@ -241,10 +289,10 @@ describe.skipIf(testDb === undefined)("representation grants", () => {
       allApplications: true,
     });
     expect(
-      await repos.grants.listValidForAgent(tenant.id, someoneElse.id, null, application.id),
+      await repos.grants.listValidForAgent(tenant.id, someoneElse.id, [], application.id),
     ).toEqual([]);
     expect(
-      await repos.grants.findValid(tenant.id, grant.id, someoneElse.id, null, application.id),
+      await repos.grants.findValid(tenant.id, grant.id, someoneElse.id, [], application.id),
     ).toBeNull();
   });
 
@@ -284,7 +332,7 @@ describe.skipIf(testDb === undefined)("representation grants", () => {
       }),
     ).rejects.toBeInstanceOf(ValidationError);
     await expect(
-      repos.grants.findValid(tenant.id, "bad", agent.id, null, application.id),
+      repos.grants.findValid(tenant.id, "bad", agent.id, [], application.id),
     ).rejects.toBeInstanceOf(InvalidIdError);
   });
 

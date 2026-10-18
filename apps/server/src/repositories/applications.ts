@@ -17,6 +17,7 @@ import {
   type UpdateApplicationInput,
 } from "../domain/application.js";
 import { attributeKeySchema, roleNameSchema } from "../domain/schemas.js";
+import { emitChange } from "./change-events.js";
 import { mapDbErrors, NotFoundError, parseInput, requireUuids } from "./errors.js";
 
 interface ApplicationRow {
@@ -213,9 +214,10 @@ export class ApplicationRepository {
     const data = parseInput(updateApplicationInputSchema, patch);
     const auth =
       data.clientAuth === undefined ? undefined : this.#clientAuthColumns(id, data.clientAuth);
-    const rows = await mapDbErrors(() =>
-      this.#db.query<{ id: string }>(
-        `UPDATE applications SET
+    const rows = await this.#db.transaction(async (tx) => {
+      const updated = await mapDbErrors(() =>
+        tx.query<{ id: string }>(
+          `UPDATE applications SET
            name = COALESCE($2, name),
            enabled = COALESCE($3, enabled),
            token_endpoint_auth_method = CASE WHEN $4::boolean THEN $5 ELSE token_endpoint_auth_method END,
@@ -227,21 +229,24 @@ export class ApplicationRepository {
            allowed_extra_scopes = COALESCE($11, allowed_extra_scopes)
          WHERE id = $1
          RETURNING id`,
-        [
-          id,
-          data.name ?? null,
-          data.enabled ?? null,
-          auth !== undefined,
-          auth?.method ?? null,
-          auth?.secretEncrypted ?? null,
-          auth?.jwksUri ?? null,
-          auth?.jwks ?? null,
-          data.redirectUris ?? null,
-          data.postLogoutRedirectUris ?? null,
-          data.allowedExtraScopes ?? null,
-        ],
-      ),
-    );
+          [
+            id,
+            data.name ?? null,
+            data.enabled ?? null,
+            auth !== undefined,
+            auth?.method ?? null,
+            auth?.secretEncrypted ?? null,
+            auth?.jwksUri ?? null,
+            auth?.jwks ?? null,
+            data.redirectUris ?? null,
+            data.postLogoutRedirectUris ?? null,
+            data.allowedExtraScopes ?? null,
+          ],
+        ),
+      );
+      if (updated.length > 0) await emitChange(tx, { type: "application", applicationId: id });
+      return updated;
+    });
     if (rows.length === 0) throw new NotFoundError("Application");
     return this.#require(id);
   }
@@ -249,10 +254,13 @@ export class ApplicationRepository {
   /** Deletes the application and, in every tenant, its assignments, rules and grant limits. */
   async delete(id: string): Promise<boolean> {
     requireUuids({ id });
-    const rows = await mapDbErrors(() =>
-      this.#db.query("DELETE FROM applications WHERE id = $1 RETURNING id", [id]),
-    );
-    return rows.length > 0;
+    return this.#db.transaction(async (tx) => {
+      const rows = await mapDbErrors(() =>
+        tx.query("DELETE FROM applications WHERE id = $1 RETURNING id", [id]),
+      );
+      if (rows.length > 0) await emitChange(tx, { type: "application", applicationId: id });
+      return rows.length > 0;
+    });
   }
 
   async declareRole(
@@ -312,13 +320,16 @@ export class ApplicationRepository {
   /** Attaches the application to the tenant (or re-enables it). */
   async enableForTenant(tenantId: string, applicationId: string): Promise<void> {
     requireUuids({ tenantId, applicationId });
-    await mapDbErrors(() =>
-      this.#db.query(
-        `INSERT INTO tenant_applications (tenant_id, application_id, enabled) VALUES ($1, $2, true)
-         ON CONFLICT (tenant_id, application_id) DO UPDATE SET enabled = true`,
-        [tenantId, applicationId],
-      ),
-    );
+    await this.#db.transaction(async (tx) => {
+      await mapDbErrors(() =>
+        tx.query(
+          `INSERT INTO tenant_applications (tenant_id, application_id, enabled) VALUES ($1, $2, true)
+           ON CONFLICT (tenant_id, application_id) DO UPDATE SET enabled = true`,
+          [tenantId, applicationId],
+        ),
+      );
+      await emitChange(tx, { type: "tenant_applications", tenantId });
+    });
   }
 
   /**
@@ -327,12 +338,12 @@ export class ApplicationRepository {
    */
   async disableForTenant(tenantId: string, applicationId: string): Promise<boolean> {
     requireUuids({ tenantId, applicationId });
-    const rows = await this.#db.query(
+    return this.#changeAttachment(
+      tenantId,
       `UPDATE tenant_applications SET enabled = false
         WHERE tenant_id = $1 AND application_id = $2 RETURNING application_id`,
-      [tenantId, applicationId],
+      applicationId,
     );
-    return rows.length > 0;
   }
 
   /**
@@ -342,12 +353,12 @@ export class ApplicationRepository {
    */
   async removeFromTenant(tenantId: string, applicationId: string): Promise<boolean> {
     requireUuids({ tenantId, applicationId });
-    const rows = await this.#db.query(
+    return this.#changeAttachment(
+      tenantId,
       `DELETE FROM tenant_applications WHERE tenant_id = $1 AND application_id = $2
        RETURNING application_id`,
-      [tenantId, applicationId],
+      applicationId,
     );
-    return rows.length > 0;
   }
 
   /**
@@ -409,6 +420,15 @@ export class ApplicationRepository {
       jwksUri: null,
       jwks: JSON.stringify(auth.jwks),
     };
+  }
+
+  /** Runs a statement on one tenant attachment and emits a change event if a row was hit. */
+  async #changeAttachment(tenantId: string, sql: string, applicationId: string): Promise<boolean> {
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx.query(sql, [tenantId, applicationId]);
+      if (rows.length > 0) await emitChange(tx, { type: "tenant_applications", tenantId });
+      return rows.length > 0;
+    });
   }
 
   async #require(id: string): Promise<Application> {

@@ -7,6 +7,7 @@ import {
   updateTenantInputSchema,
   type UpdateTenantInput,
 } from "../domain/tenant.js";
+import { emitChange } from "./change-events.js";
 import { mapDbErrors, NotFoundError, parseInput, requireUuids } from "./errors.js";
 import { requireRow } from "./sql.js";
 
@@ -75,6 +76,30 @@ export class TenantRepository {
     return row === undefined ? null : toTenant(row);
   }
 
+  /**
+   * Fingerprint of what a tenant's OIDC provider is built from: the tenant row and every attached
+   * application (its client configuration and the attachment). It changes whenever one of them
+   * does, which lets replicas detect a change whose notification they missed. Tenants that no
+   * longer exist are absent from the result.
+   */
+  async providerFingerprints(tenantIds: readonly string[]): Promise<Map<string, string>> {
+    for (const id of tenantIds) requireUuids({ id });
+    if (tenantIds.length === 0) return new Map();
+    const rows = await this.#db.query<{ id: string; fingerprint: string }>(
+      `SELECT t.id,
+              md5(concat_ws('|', t.slug, t.status, t.updated_at::text,
+                (SELECT string_agg(concat_ws(':', a.client_id, a.enabled, a.updated_at::text,
+                                             ta.enabled, ta.updated_at::text), ','
+                                   ORDER BY a.client_id)
+                   FROM tenant_applications ta JOIN applications a ON a.id = ta.application_id
+                  WHERE ta.tenant_id = t.id))) AS fingerprint
+         FROM tenants t
+        WHERE t.id = ANY ($1::uuid[])`,
+      [[...tenantIds]],
+    );
+    return new Map(rows.map((row) => [row.id, row.fingerprint]));
+  }
+
   async list(): Promise<Tenant[]> {
     const rows = await this.#db.query<TenantRow>(`SELECT ${COLUMNS} FROM tenants ORDER BY slug`);
     return rows.map(toTenant);
@@ -83,25 +108,32 @@ export class TenantRepository {
   async update(id: string, patch: UpdateTenantInput): Promise<Tenant> {
     requireUuids({ id });
     const data = parseInput(updateTenantInputSchema, patch);
-    const [row] = await mapDbErrors(() =>
-      this.#db.query<TenantRow>(
-        `UPDATE tenants
-            SET name = COALESCE($2, name), status = COALESCE($3, status)
-          WHERE id = $1
-        RETURNING ${COLUMNS}`,
-        [id, data.name ?? null, data.status ?? null],
-      ),
-    );
-    if (row === undefined) throw new NotFoundError("Tenant");
+    const row = await this.#db.transaction(async (tx) => {
+      const [updated] = await mapDbErrors(() =>
+        tx.query<TenantRow>(
+          `UPDATE tenants
+              SET name = COALESCE($2, name), status = COALESCE($3, status)
+            WHERE id = $1
+          RETURNING ${COLUMNS}`,
+          [id, data.name ?? null, data.status ?? null],
+        ),
+      );
+      if (updated === undefined) throw new NotFoundError("Tenant");
+      await emitChange(tx, { type: "tenant", tenantId: id });
+      return updated;
+    });
     return toTenant(row);
   }
 
   /** Deletes the tenant and every row it owns. Audit events are kept. */
   async delete(id: string): Promise<boolean> {
     requireUuids({ id });
-    const rows = await mapDbErrors(() =>
-      this.#db.query("DELETE FROM tenants WHERE id = $1 RETURNING id", [id]),
-    );
-    return rows.length > 0;
+    return this.#db.transaction(async (tx) => {
+      const rows = await mapDbErrors(() =>
+        tx.query("DELETE FROM tenants WHERE id = $1 RETURNING id", [id]),
+      );
+      if (rows.length > 0) await emitChange(tx, { type: "tenant", tenantId: id });
+      return rows.length > 0;
+    });
   }
 }
