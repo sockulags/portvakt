@@ -19,15 +19,33 @@ const TITLES: Record<IssuerKind, string> = {
 
 /**
  * The mock IdP's login page: one button per persona (`data-testid="persona-{id}"`) and a cancel
- * button (`data-testid="cancel"`). Plain, accessible HTML without scripts: it is a development
- * tool, never shown to real users.
+ * button (`data-testid="cancel"`). The SAML IdPs add a select of test switches
+ * (`data-testid="switch"`, posted as `switch`). Plain, accessible HTML without scripts: it is a
+ * development tool, never shown to real users.
  */
 export function renderLoginPage(options: {
-  readonly kind: IssuerKind;
+  readonly kind?: IssuerKind;
+  /** Page title (default: the issuer kind's). */
+  readonly title?: string;
   readonly action: string;
   readonly personas: readonly { id: string; label: string; detail: string }[];
+  readonly switches?: readonly string[];
 }): string {
-  const title = TITLES[options.kind];
+  const title = options.title ?? (options.kind === undefined ? "Mock IdP" : TITLES[options.kind]);
+  const switchOptions = (options.switches ?? [])
+    .map(
+      (name) =>
+        `<option value="${escapeHtml(name)}" data-testid="switch-${escapeHtml(name)}">${escapeHtml(name)}</option>`,
+    )
+    .join("\n");
+  const switches =
+    switchOptions === ""
+      ? ""
+      : `<p><label for="switch">Test switch</label>
+<select id="switch" name="switch" data-testid="switch">
+<option value="">None (a normal response)</option>
+${switchOptions}
+</select></p>`;
   const buttons = options.personas
     .map(
       (
@@ -62,6 +80,7 @@ button:focus-visible{outline:3px solid #0a58ca;outline-offset:2px}
 <p class="notice">Development identity provider. Never use it in production.</p>
 <form method="post" action="${escapeHtml(options.action)}/login">
 <h2>Choose a persona</h2>
+${switches}
 <ul>
 ${buttons}
 </ul>

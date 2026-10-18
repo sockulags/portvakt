@@ -9,19 +9,19 @@ there are not reopened during delivery.
 
 ## Layout
 
-| Path                     | Contents                                                        |
-| ------------------------ | --------------------------------------------------------------- |
-| `apps/server`            | Broker (Express 5); `createApp()` in `src/app.ts`               |
-| `apps/login`             | Login/interaction SPA (Vite + React 19), served by the server   |
-| `apps/admin`             | Admin portal SPA (Vite + React 19)                              |
-| `apps/mock-idp`          | Dev/test upstream IdPs (`/entra`, `/bankid`; oidc-provider)     |
-| `packages/sdk-node`      | TypeScript SDK for Node/Express                                 |
-| `packages/design-system` | Delivered design system; source in `src/` kept as delivered     |
-| `packages/fonts`         | Self-hosted design-system fonts (`@portvakt/fonts/fonts.css`)   |
-| `examples/demo-service`  | Demo downstream service (Service A and B)                       |
-| `e2e`                    | Playwright suite                                                |
-| `deploy`                 | `docker-compose.dev.yml` (dev/test Postgres), later images/Helm |
-| `docs`                   | Plan, claims contract (`claims.md`); architecture later         |
+| Path                     | Contents                                                         |
+| ------------------------ | ---------------------------------------------------------------- |
+| `apps/server`            | Broker (Express 5); `createApp()` in `src/app.ts`                |
+| `apps/login`             | Login/interaction SPA (Vite + React 19), served by the server    |
+| `apps/admin`             | Admin portal SPA (Vite + React 19)                               |
+| `apps/mock-idp`          | Dev/test upstream IdPs: OIDC `/entra`, `/bankid`; SAML `/saml/*` |
+| `packages/sdk-node`      | TypeScript SDK for Node/Express                                  |
+| `packages/design-system` | Delivered design system; source in `src/` kept as delivered      |
+| `packages/fonts`         | Self-hosted design-system fonts (`@portvakt/fonts/fonts.css`)    |
+| `examples/demo-service`  | Demo downstream service (Service A and B)                        |
+| `e2e`                    | Playwright suite                                                 |
+| `deploy`                 | `docker-compose.dev.yml` (dev/test Postgres), later images/Helm  |
+| `docs`                   | Plan, claims contract (`claims.md`); architecture later          |
 
 Shared config at the root: `tsconfig.base.json` (strict), `tsconfig.node.json` (NodeNext, Node
 packages), `tsconfig.vite.json` (Bundler resolution, Vite apps), `eslint.config.js`,
@@ -43,7 +43,7 @@ npm run test:e2e       # Playwright (browsers: npm run install-browsers --worksp
 npm run migrate -w apps/server         # migrate as MIGRATION_DATABASE_URL, grant the runtime role
 npm run rewrap-secrets -w apps/server  # after MASTER_KEY rotation: re-wrap secrets, re-index pins
 npm run dev -w apps/server             # broker with reload (migrates on start outside production)
-npm run dev -w apps/mock-idp           # mock upstream IdPs on :4500 (/entra, /bankid)
+npm run dev -w apps/mock-idp           # mock upstream IdPs on :4500 (/entra, /bankid, /saml/*)
 npm run dev -w apps/login              # rebuilds apps/login/dist on change; the server serves it
 ```
 
@@ -53,7 +53,12 @@ issuer `http://localhost:4500/entra` (or `/bankid`), client id `portvakt-dev` an
 from `.env.example`; the mock's default clients accept every redirect URI below
 `http://localhost:3000/t/`. Personas are in `apps/mock-idp/personas.json`; `login_hint=<persona
 id>` (or an employee's email) signs one in without the persona page, and `login_hint=cancel`
-answers `access_denied`.
+answers `access_denied`. SAML: the mock's IdPs are `http://localhost:4500/saml/{bankid,freja,siths}`
+(metadata at `.../metadata`, signed with a key whose certificate is
+`idp.saml(flavour).metadataSigningCertificate`); create the login method with
+`portvakt.samlAdmin.create` (the admin API is M6). The mock fetches the SP metadata from
+`{SP entityID}/metadata` on the first request; its persona page has a test switch select
+(`data-testid="switch"`).
 
 `TEST_LOG_LEVEL=debug npm test` shows the server logs of integration tests (silent by default).
 
@@ -73,10 +78,14 @@ volume init. Two roles: the app runs as the restricted `portvakt_app` (`DATABASE
 | `repositories/` | Parameterised SQL per aggregate; rows mapped to domain types; change events |
 | `oidc/`         | Per-tenant oidc-provider: config, adapter, registry, claims, interactions,  |
 |                 | session policy, acr ranking, login state (session record, grant login)      |
-| `federation/`   | Upstream OIDC (openid-client): discovery cache, client auth, claim mapping  |
-| `login/`        | Login flow routes (interaction API, callback, JWKS), CSRF, login UI shell   |
+| `federation/`   | Upstream OIDC (openid-client): discovery cache, client auth, claim mapping; |
+|                 | `saml/`: upstream SAML: IdP and SP metadata, protocol, signatures, mapping, |
+|                 | ACS and SLO service, admin operations (`SamlLoginMethodAdmin`)              |
+| `login/`        | Login flow routes (interaction API, callback, JWKS, SAML SP endpoints in    |
+|                 | `saml-routes.ts`), CSRF, login UI shell                                     |
 | `keys/`         | `SigningKeyCache` (keys of this replica) and `KeyRotationService`           |
 | `jobs/`         | Advisory-locked `runExclusive` and the `PeriodicTask` scheduler             |
+| `net/`          | `OutboundGuard`: every request to a configured URL (SSRF, redirects, size)  |
 | `logging/`      | pino JSON logger with redaction, request logging                            |
 | `server.ts`     | `createPortvakt()`: composition root, start-up, jobs, graceful shutdown     |
 | `main.ts`       | Process entry: config, migrations, role check, signals                      |
@@ -92,13 +101,20 @@ upstream when one method is acceptable or `login_hint` is an email of a home rea
 upstream -> `GET /t/{slug}/federation/{loginMethodId}/callback` (`federation.callback`: state
 consumed once, code exchange, ID token validation, userinfo, claim mapping, JIT) -> `GET
 .../interaction/{uid}/federation/complete?ref=` (completion consumed once, interaction cookie
-present, `interactions.completeLogin`) -> resume -> application.
+present, `interactions.completeLogin`) -> resume -> application. SAML methods replace the upstream
+hop: `federation.begin` -> `saml.begin` (pending AuthnRequest in `federation_states`; signed
+HTTP-Redirect, or `/t/{slug}/saml/{id}/post` for HTTP-POST) -> IdP -> `POST
+/t/{slug}/saml/{id}/acs` (`saml.acs`: RelayState consumed once, InResponseTo = the stored request
+ID, signature verification with the allowlisted algorithms, decryption, Portvakt's checks, attribute
+mapping, JIT) -> the same completion hop.
 
 Entry points for later milestones: `interactions.completeLogin(ctx, {personId, loginMethodId,
 acr, amr})` (M4 adds the representation step before it), `rotation.rotateNow({actor, reason,
 emergency})` (M6 admin API), the claim contributors in `oidc/claims.ts` (`rep`, M4), the login
-prompt checks in `oidc/provider.ts` (`acr_not_met` is the step-up hook, M4) and
-`FederationService` (SAML login methods, M3b).
+prompt checks in `oidc/provider.ts` (`acr_not_met` is the step-up hook, M4),
+`federation.begin(tp, interaction, method, { principalPin })` (SAML PrincipalSelection for a
+step-up of a known person, M4) and `portvakt.samlAdmin` (create and update SAML login methods,
+SP key rotation, SP certificate expiry: the M6 admin API calls these).
 
 Migrations are plain SQL in `apps/server/migrations/NNNN_name.sql`, applied by our own runner
 (`src/db/migrate.ts`): it is ~150 lines, takes an advisory lock and keeps checksums, which a
@@ -305,5 +321,112 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
   federation JWKS is on localhost in tests. Never do that in the server.
 - oidc-provider answers a scope the client may not request (`pin` without
   `allowedExtraScopes`) with `invalid_scope`; it does not drop it.
+- SAML upstream follows the Swedish eID Framework as published at
+  docs.swedenconnect.se/technical-framework/latest: Deployment Profile 1.8 (2024-12-04), Attribute
+  Specification 1.8 (2024-12-04), Registry for identifiers 1.8 (2024-12-04), Entity Categories 1.9
+  (2024-12-04) and Principal Selection 1.0 (2020-01-17). The default clock skew (60 s) follows the
+  Deployment Profile 1.9 draft (2025-10-16); 1.8 allows 3 to 5 minutes. Identifiers live in
+  `domain/saml.ts`.
+- SAML library: @node-saml/node-saml, because it is an SP library that is maintained and builds
+  and signs AuthnRequests (HTTP-Redirect with SigAlg, HTTP-POST enveloped), LogoutRequests and
+  LogoutResponses; samlify needs a separate schema validator and had a signature-wrapping CVE in 2025. Incoming messages are not validated by node-saml (it cannot restrict algorithms or verify
+  ECDSA): `federation/saml/xml.ts` verifies enveloped signatures with xml-crypto's `SignedXml`,
+  restricted to the allowlist of `algorithms.ts` (RSA and ECDSA with SHA-256/384/512; SHA-1, MD5,
+  HMAC and comment-preserving c14n refused; transforms only exclusive c14n and
+  enveloped-signature, as Sweden Connect IdPs use; the KeyInfo certificate is never used), with
+  structural rules against signature wrapping (exactly one Signature, one Reference to the
+  element itself, its ID carried by no other element as an `ID`/`Id`/`id` attribute in any
+  namespace, found by a linear DOM walk, never XPath), and returns only the signed bytes.
+  Portvakt never canonicalises or verifies signatures itself. `xml.ts` is the only module that
+  imports node-saml's `lib/xml` helpers, so node-saml is pinned to `~5.1.0`.
+- XML parsing is bounded before anything else (`parseXml`): size (Responses 512 KB, logout
+  messages 64 KB, metadata 10 MB), element count (Responses SAML_XML_MAX_ELEMENTS, default 20,000)
+  and depth 64, counted lexically before the DOM is built and exactly after; a DTD is refused. All
+  later walks over the DOM are linear.
+- The XML libraries' typings refer to global DOM types: `src/types/xml-dom.d.ts` (server and mock)
+  declares the members we use. Never import `@xmldom/xmldom` or `xpath` types directly: their
+  typings pull in `lib.dom`, which clashes with that file.
+- SAML decryption is `decrypt.ts` (Node's crypto, not xml-encryption, which falls back to SHA-1
+  for the `xmlenc#sha256` DigestMethod and decrypts 3DES): key transport `rsa-oaep-mgf1p` (SHA-1)
+  or `xmlenc11#rsa-oaep` with an MGF of the same hash as the DigestMethod (Node's OAEP uses one
+  hash for both, so `rsa-oaep-mgf1p` with SHA-256, MGF1-SHA1, is refused); content AES-128/192/256
+  GCM, and CBC only inside a required and verified Response signature (CBC has no integrity of its
+  own; with `requireSignedResponse: false` GCM is mandatory) and unless the method sets
+  `requireGcm`. At most 4 EncryptedKey candidates are tried (more refuse the response before any
+  RSA operation). RSA PKCS#1 v1.5 and 3DES are refused. The SP
+  metadata advertises exactly these.
+- The HTTP-Redirect binding is parsed from the raw query by `redirect.ts`: binding keys only as
+  literally written (an encoded key such as `SAML%52equest`, a duplicate, or two messages refuse
+  the message), the signed octets built from the received tokens, the message decoded from the
+  same token, and the signature verified with the allowlisted algorithms.
+- The SAML ACS checks: the Response signature (required by default) and, from its signed bytes,
+  Issuer, Destination (required when signed) and InResponseTo; exactly one Assertion or
+  EncryptedAssertion; the assertion's own signature; Conditions and every AudienceRestriction;
+  exactly one bearer SubjectConfirmation with Recipient = ACS and InResponseTo = the stored request
+  ID; NotOnOrAfter with the method's skew; an IssueInstant at most 5 minutes old; AuthnInstant
+  (after the request with ForceAuthn, and within `max_age`); the returned AuthnContextClassRef
+  (one of the requested, `exact`; or ranked at least as high, `minimum`; and meeting the method's
+  asserted acr); value lengths (NameID, SessionIndex, attributes; too long refuses the response);
+  and the assertion ID once (`saml_replay_cache`, emptied by the payload cleanup job). A SAML
+  login's `acr` is the level the IdP returned. ForceAuthn is sent for every FRESH_LOGIN_REASONS
+  reason and whenever the application sends `max_age`. `acr_values` narrows RequestedAuthnContext
+  to the levels that satisfy it (step-up).
+- The ACS is reached by a cross-site POST, so no SameSite=Lax cookie arrives there; it correlates
+  the response by RelayState (the `federation_states` row) and InResponseTo only. `FlowDriver`
+  posts SAML forms to Portvakt without cookies (`TestBrowser.request(..., { sendCookies: false })`)
+  to keep that honest, and `holdSamlResponses` stops at a response form so a test can replay it
+  or send it elsewhere.
+- PrincipalSelection (`federation.begin(..., { principalPin })`) is sent only when the IdP's
+  metadata advertises it, and only over HTTP-POST (refused when the IdP has no POST SSO
+  endpoint); the returned pin must match either way. The `/post` page renders a pending request
+  once (`saml_post_rendered_at`).
+- A SAML identity keyed by the personal identity number (subject source `personalIdentityNumber`)
+  has the subject `pin-index:<blind index>`, never the number. Lookups try every master key's
+  index, a login re-keys the subject, and `rewrap-secrets` re-indexes it for identities of such
+  methods only.
+- The framework has no signal for protected identity. It is the configurable
+  `attributeMapping.protectedIdentity` ({ attribute, values }); the mock sends
+  `urn:portvakt:mock:protected-identity` = `true`. orgAffiliation values count only when their
+  scope is a `shibmd:Scope` of the IdP's metadata or one of the method's `orgAffiliationScopes`.
+  employeeHsaId and those values become `hsa_id` and `org_affiliation` (scope `hsa`, ID token).
+- SAML metadata: `login_method_saml.metadata_cache` holds the parsed, signature-checked metadata
+  as JSON. A login never fetches the metadata URL while a cached copy exists. It fails closed
+  (`upstream_unavailable`) once its validUntil has passed or, without validUntil, after
+  SAML_METADATA_MAX_AGE (7 days) without a successful refresh, and an IdP missing from a valid
+  (signed) metadata document is treated as removed (cache dropped). The `saml-metadata-refresh` job
+  (SAML_METADATA_CHECK_INTERVAL, advisory lock) refreshes each method after its
+  `metadataRefreshSeconds`, retries a failure after 5 minutes, keeps the last good copy on any
+  other failure and counts `portvakt_saml_metadata_refresh_total`. Production requires a metadata
+  signing certificate for a metadata URL unless `allowUnsignedMetadata` is set (audited as
+  `login_method.saml_unsigned_metadata_allowed`), and at least one `uiInfo` logo (Deployment
+  Profile). `samlAdmin.warningsFor` lists what the M6 portal should flag.
+- Outbound requests to configured URLs (SAML metadata, upstream OIDC discovery, JWKS, token and
+  userinfo, downstream client `jwks_uri`) go through `net/outbound.ts`: the connection's DNS
+  lookup refuses loopback, private, link-local (169.254.169.254), unique-local, unspecified,
+  multicast and NAT64/6to4 (64:ff9b::/96, 64:ff9b:1::/48, 2002::/16) addresses (also after DNS rebinding), literal IP hosts are checked first, redirects are
+  followed by hand (3 hops, each checked), bodies are capped, and production requires https.
+  The guard uses `undici` (a direct dependency, `~7.29.1`) for its `Agent` and `fetch`, so the
+  connect-time lookup does not depend on the undici version bundled in Node.
+  Development and tests list exceptions in ALLOW_PRIVATE_UPSTREAM_HOSTS (refused in production);
+  without `localhost,127.0.0.1` there, a local mock IdP is unreachable.
+- SAML SP keys (`saml_sp_keys`) are RSA 3072 with self-signed certificates; the private keys are
+  SecretBox envelopes (`saml_sp_key:<id>:private_key`) that `rewrap-secrets` re-wraps. Rotation:
+  `prepareSpKeyRotation` adds a `next` key per purpose, published next to the active one;
+  `rotateSpKeys` makes it active and the old key `previous` (no longer published, still used for
+  decryption until the next rotation or `deletePreviousSpKey`). Requests are signed with the
+  active key.
+- SAML single logout: the session record keeps the upstream session as `upstream`: the NameID's
+  and SessionIndex's blind indexes (HMAC with the blind-index key, per login method) and the
+  values sealed with SecretBox (for the SP-initiated LogoutRequest); never in the clear. The
+  record is indexed by `saml:<loginMethodId>:<NameID index>` (`oidc_payloads.uid`). An
+  RP-initiated logout of the whole session goes through the IdP's SLO after the local logout
+  (HTTP-Redirect, or the `/logout` HTTP-POST page; the `upstreamLogout` hook in
+  `oidc/provider.ts`, never for the session switch during a login), and a LogoutResponse that
+  cannot be verified still ends at the application. A signed IdP-initiated LogoutRequest (its
+  Destination the SP's SLO URL, IssueInstant within 5 minutes plus skew, its ID accepted once)
+  ends the matching sessions (their oidc-provider Session and grants are deleted,
+  `logout.idp_initiated` is audited) and gets a signed LogoutResponse over HTTP-Redirect, or
+  HTTP-POST when the IdP has no Redirect SLO endpoint. Sealed sessions are not re-wrapped by
+  `rewrap-secrets`: keep the old key in MASTER_KEY_PREVIOUS until SESSION_TTL has passed.
 - The init script in `deploy/postgres-init` only runs on a fresh volume. To recreate the databases:
   `docker compose -f deploy/docker-compose.dev.yml down -v` then `npm run db:up`.

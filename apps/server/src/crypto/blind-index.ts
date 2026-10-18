@@ -13,7 +13,7 @@ import { masterKeyId } from "./envelope.js";
  * still found until the re-wrap command re-indexes them under the current key.
  */
 
-export type BlindIndexPurpose = "pin" | "orgnr";
+export type BlindIndexPurpose = "pin" | "orgnr" | "saml";
 
 const INFO = "portvakt/blind-index/v1";
 

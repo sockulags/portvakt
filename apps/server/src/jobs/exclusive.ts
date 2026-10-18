@@ -7,6 +7,7 @@ const LOCK_NAMESPACE = 0x50_56_4a_42;
 export const JOB_LOCKS = {
   payloadCleanup: "payload-cleanup",
   keyRotation: "key-rotation",
+  samlMetadataRefresh: "saml-metadata-refresh",
 } as const;
 export type JobLock = (typeof JOB_LOCKS)[keyof typeof JOB_LOCKS];
 

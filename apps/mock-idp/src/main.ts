@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { parseClients } from "./clients.js";
 import { createMockIdp } from "./app.js";
-import { DEFAULT_PERSONAS_PATH, loadPersonas } from "./personas.js";
+import { DEFAULT_PERSONAS_PATH, loadPersonas, SAML_FLAVOURS } from "./personas.js";
 
 /**
  * Development entry point. Environment:
@@ -27,6 +27,11 @@ async function main(): Promise<void> {
   const idp = await createMockIdp({ publicUrl, personas, clients });
   createServer(idp.app).listen(port, () => {
     console.log(`mock IdP issuers: ${idp.issuer("entra")} and ${idp.issuer("bankid")}`);
+    for (const flavour of [...SAML_FLAVOURS, "ecdsa" as const]) {
+      console.log(
+        `  SAML IdP ${idp.saml(flavour).entityId} (metadata ${idp.saml(flavour).metadataUrl})`,
+      );
+    }
     for (const client of clients) {
       console.log(
         `  client ${client.client_id} at ${client.issuer} (${client.token_endpoint_auth_method})`,

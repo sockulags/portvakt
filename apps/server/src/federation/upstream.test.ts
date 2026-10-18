@@ -1,8 +1,9 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, describe, expect, it } from "vitest";
-import type { LoginMethod } from "../domain/login-method.js";
+import type { OidcLoginMethod } from "../domain/login-method.js";
 import { createLogger } from "../logging/logger.js";
+import { OutboundGuard } from "../net/outbound.js";
 import type { LoginMethodRepository } from "../repositories/login-methods.js";
 import { classifyUpstreamError, UpstreamClients, UpstreamRecentlyFailedError } from "./upstream.js";
 
@@ -20,7 +21,7 @@ const loginMethods = {
   getClientSecret: () => Promise.resolve("upstream-secret"),
 } as unknown as LoginMethodRepository;
 
-const method = (id: string): LoginMethod =>
+const method = (id: string): OidcLoginMethod =>
   ({
     id,
     tenantId: "7d0b5a52-6a43-4f4e-9b8a-0f1d2c3b4a59",
@@ -30,7 +31,7 @@ const method = (id: string): LoginMethod =>
     allowedUpstreamTenants: [],
     clientAssertionAudience: "token_endpoint",
     updatedAt: new Date("2026-10-18T00:00:00Z"),
-  }) as unknown as LoginMethod;
+  }) as unknown as OidcLoginMethod;
 
 const clients = (failureCacheSeconds: number) =>
   new UpstreamClients({
@@ -40,6 +41,11 @@ const clients = (failureCacheSeconds: number) =>
     timeoutSeconds: 2,
     metadataTtlSeconds: 3600,
     failureCacheSeconds,
+    outbound: new OutboundGuard({
+      production: false,
+      allowPrivateHosts: ["127.0.0.1"],
+      timeoutSeconds: 2,
+    }),
   });
 
 describe("UpstreamClients discovery failures", () => {

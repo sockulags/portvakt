@@ -4,7 +4,7 @@ import type { Config } from "../config/index.js";
 import type { LoginMethod } from "../domain/login-method.js";
 import { FederationError, type FederationService } from "../federation/service.js";
 import type { Logger } from "../logging/logger.js";
-import { parseAcrValues, type AcrRanking } from "../oidc/acr.js";
+import { parseAcrValues } from "../oidc/acr.js";
 import {
   InteractionError,
   loadInteraction,
@@ -15,6 +15,7 @@ import {
 import type { TenantProvider } from "../oidc/provider.js";
 import type { Repositories } from "../repositories/index.js";
 import { csrfGuard, csrfToken } from "./csrf.js";
+import { samlRoutes } from "./saml-routes.js";
 import {
   isLoginErrorCode,
   LOGIN_UI_HEADERS,
@@ -30,7 +31,6 @@ export interface LoginRoutesOptions {
   readonly federation: FederationService;
   readonly interactions: InteractionService;
   readonly shell: LoginUiShell;
-  readonly acrRanking: AcrRanking;
   readonly logger: Logger;
   /** The tenant provider `tenantRoutes` resolved for the request. */
   readonly tenantOf: (res: Response) => TenantProvider;
@@ -83,13 +83,14 @@ const looksLikeEmail = (value: string | undefined): value is string =>
  * - `GET  /interaction/{uid}/federation/complete`: finishes an upstream login;
  * - `GET  /federation/{loginMethodId}/callback`: the upstream redirect URI;
  * - `GET  /federation/{loginMethodId}/jwks`: the login method's public client key;
- * - `GET  /login/error`: error view outside an interaction.
+ * - `GET  /login/error`: error view outside an interaction;
+ * - `/saml/{loginMethodId}/...`: the SP endpoints of SAML login methods (`saml-routes.ts`).
  *
  * The POSTs are CSRF-protected (`csrf.ts`); the interaction is bound to the browser by the
  * interaction cookie, which is scoped to `/t/{slug}/interaction/{uid}`.
  */
 export function loginRoutes(options: LoginRoutesOptions): Router {
-  const { config, repos, federation, interactions, shell, acrRanking, tenantOf } = options;
+  const { config, repos, federation, interactions, shell, tenantOf } = options;
   const router = Router();
   const origin = new URL(config.publicUrl).origin;
 
@@ -113,7 +114,7 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
   ): Promise<LoginMethod[]> {
     const requested = parseAcrValues(details.params.acrValues);
     const enabled = await repos.loginMethods.listEnabled(tp.tenant.id);
-    return enabled.filter((method) => acrRanking.satisfiesAny(method.assertedAcr, requested));
+    return enabled.filter((method) => federation.satisfies(method, requested));
   }
 
   /** Home realm discovery: the acceptable method owning the email's domain. */
@@ -374,6 +375,8 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
       return Promise.resolve();
     }),
   );
+
+  router.use(samlRoutes({ federation, shell, tenantOf }));
 
   return router;
 }

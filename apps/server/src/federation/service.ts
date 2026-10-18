@@ -2,10 +2,13 @@ import { randomBytes } from "node:crypto";
 import { decodeProtectedHeader } from "jose";
 import * as client from "openid-client";
 import type { Config } from "../config/index.js";
-import type { LoginMethod } from "../domain/login-method.js";
+import type { KeyRing } from "../crypto/keyring.js";
+import type { LoginMethod, OidcLoginMethod } from "../domain/login-method.js";
+import type { Tenant } from "../domain/tenant.js";
 import type { Logger } from "../logging/logger.js";
 import type { LoginErrorCode } from "../login/ui-shell.js";
 import { METRICS, type Counter, type MetricRegistry } from "../metrics/registry.js";
+import type { OutboundGuard } from "../net/outbound.js";
 import type { AcrRanking } from "../oidc/acr.js";
 import {
   loadInteraction,
@@ -15,7 +18,10 @@ import {
 } from "../oidc/interactions.js";
 import { FRESH_LOGIN_REASONS, type TenantProvider } from "../oidc/provider.js";
 import type { Repositories } from "../repositories/index.js";
+import { asOidc } from "../repositories/login-methods.js";
 import { mapUpstreamClaims } from "./claim-mapping.js";
+import { FederationError, type FailureContext, type UpstreamLoginResult } from "./flow.js";
+import { SamlFederation, type SamlBeginOptions } from "./saml/service.js";
 import {
   classifyUpstreamError,
   UPSTREAM_ID_TOKEN_ALGS,
@@ -24,20 +30,11 @@ import {
   type UpstreamClients,
 } from "./upstream.js";
 
+export { FederationError, type FailureContext, type UpstreamLoginResult } from "./flow.js";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Upstream error codes are recorded only when they look like OAuth error codes. */
 const OAUTH_ERROR_CODE = /^[a-z0-9_]{1,64}$/i;
-
-/** A login that cannot proceed; the code selects the login UI's error view. */
-export class FederationError extends Error {
-  readonly code: LoginErrorCode;
-
-  constructor(code: LoginErrorCode, message: string) {
-    super(message);
-    this.name = "FederationError";
-    this.code = code;
-  }
-}
 
 export interface FederationServiceOptions {
   readonly config: Config;
@@ -47,13 +44,10 @@ export interface FederationServiceOptions {
   readonly acrRanking: AcrRanking;
   readonly interactions: InteractionService;
   readonly metrics: MetricRegistry;
-}
-
-interface FailureContext {
-  readonly tenantId: string;
-  readonly loginMethodId?: string | undefined;
-  readonly clientId?: string | undefined;
-  readonly upstreamError?: string | undefined;
+  /** Master-key material (SAML: sealing and indexing upstream sessions). */
+  readonly keys: KeyRing;
+  /** Outbound requests to administrator-configured URLs (SAML metadata). */
+  readonly outbound: OutboundGuard;
 }
 
 /** Fixed redirect URI of a login method: what the tenant registers at the upstream IdP. */
@@ -65,10 +59,12 @@ export const federationJwksPath = (slug: string, loginMethodId: string): string 
   `/t/${slug}/federation/${loginMethodId}/jwks`;
 
 /**
- * Upstream OIDC federation: sends the browser to the login method's IdP (authorization code
+ * Upstream federation. OIDC: sends the browser to the login method's IdP (authorization code
  * flow with PKCE S256, state and nonce), handles the callback (single-use state, token exchange,
- * full ID token validation, optional userinfo, claim mapping, JIT provisioning) and finishes the
- * login on the interaction path with `completeLogin`.
+ * full ID token validation, optional userinfo, claim mapping, JIT provisioning). SAML: see
+ * {@link SamlFederation} (`saml`), which shares the failure handling, the JIT provisioning and
+ * the completion below. Either way the login is finished on the interaction path with
+ * `completeLogin`.
  *
  * Every failure tied to a real interaction ends in the login UI with an error view and is
  * audited (`login.failure`, written on its own, never inside a transaction that could roll
@@ -80,6 +76,8 @@ export class FederationService {
   readonly #options: FederationServiceOptions;
   readonly #log: Logger;
   readonly #rejected: Counter;
+  /** SAML login methods (Swedish eID Framework). */
+  readonly saml: SamlFederation;
 
   constructor(options: FederationServiceOptions) {
     this.#options = options;
@@ -88,6 +86,22 @@ export class FederationService {
       METRICS.federationCallbackRejected,
       "Upstream callbacks refused before an interaction was known, by reason",
     );
+    this.saml = new SamlFederation({
+      config: options.config,
+      repos: options.repos,
+      logger: options.logger,
+      acrRanking: options.acrRanking,
+      metrics: options.metrics,
+      keys: options.keys,
+      outbound: options.outbound,
+      flow: {
+        errorUrl: (tenant, code, uid) => this.#errorUrl(tenant, code, uid),
+        refuse: (tenant, reason) => this.#refuse(tenant, reason),
+        fail: (tenant, code, context, uid) => this.#fail(tenant, code, context, uid),
+        complete: (result) => this.#completeUpstream(result),
+        recordFailure: (code, context) => this.#auditFailure(code, context),
+      },
+    });
   }
 
   /** Redirect URI of a login method, as registered upstream. */
@@ -96,16 +110,29 @@ export class FederationService {
   }
 
   /**
+   * Whether a login through `method` can satisfy the request's `acr_values`: its asserted acr
+   * does (OIDC), or one of the levels it requests upstream does (SAML, step-up through
+   * RequestedAuthnContext).
+   */
+  satisfies(method: LoginMethod, requested: readonly string[]): boolean {
+    if (method.protocol === "saml") return this.saml.requestedLoa(method, requested).length > 0;
+    return this.#options.acrRanking.satisfiesAny(method.assertedAcr, requested);
+  }
+
+  /**
    * Returns the upstream authorization URL for a login through `method`, reusing the pending
    * request of this interaction and method while it is valid. `prompt=login` is sent when the
    * broker needs a fresh authentication (the session policy or the application asked for one);
    * `max_age`, `login_hint` and `ui_locales` are passed through; `acr_values` carries the
-   * method's asserted acr when the method maps an upstream acr.
+   * method's asserted acr when the method maps an upstream acr. SAML methods send a signed
+   * AuthnRequest instead (`saml.begin`); `options.principalPin` is the PrincipalSelection hook
+   * for a step-up of a known person (M4).
    */
   async begin(
     tenantProvider: TenantProvider,
     interaction: InteractionDetails,
     method: LoginMethod,
+    options: SamlBeginOptions = {},
   ): Promise<string> {
     const { tenant } = tenantProvider;
     const failure = {
@@ -116,6 +143,9 @@ export class FederationService {
     if (!method.enabled || method.tenantId !== tenant.id) {
       await this.#auditFailure("login_method_unavailable", failure);
       throw new FederationError("login_method_unavailable", "Login method not available");
+    }
+    if (method.protocol === "saml") {
+      return this.saml.begin(tenantProvider, interaction, method, options);
     }
     const setup = await this.#setupFor(method, failure);
     const { maxAge, loginHint, uiLocales } = interaction.params;
@@ -160,26 +190,19 @@ export class FederationService {
   ): Promise<string> {
     const { tenant } = tenantProvider;
     const { repos } = this.#options;
-    const base = `${this.#options.config.publicUrl}/t/${tenant.slug}`;
-    const toError = (code: LoginErrorCode, uid?: string): string =>
-      uid === undefined
-        ? `${base}/login/error?code=${code}`
-        : `${base}/interaction/${encodeURIComponent(uid)}?error=${code}`;
-    const refuse = (reason: string): string => {
-      // Unauthenticated noise: counted and logged, never audited.
-      this.#rejected.inc({ reason });
-      this.#log.info({ reason, tenant: tenant.slug }, "upstream callback refused");
-      return toError("state_invalid");
-    };
 
-    if (!UUID.test(loginMethodId)) return refuse("malformed_login_method");
+    if (!UUID.test(loginMethodId)) return this.#refuse(tenant, "malformed_login_method");
     const state = currentUrl.searchParams.get("state") ?? "";
     const pending = await repos.federationStates.consumeCallback(tenant.id, loginMethodId, state);
     if ("reason" in pending) {
-      if (pending.reason === "invalid_state") return refuse("unknown_state");
+      if (pending.reason === "invalid_state") return this.#refuse(tenant, "unknown_state");
       const code = pending.reason === "state_replayed" ? "state_replayed" : "state_expired";
-      await this.#auditFailure(code, { tenantId: tenant.id, loginMethodId });
-      return toError(code, pending.interactionUid);
+      return this.#fail(
+        tenant,
+        code,
+        { tenantId: tenant.id, loginMethodId },
+        pending.interactionUid,
+      );
     }
 
     const uid = pending.interactionUid;
@@ -187,12 +210,12 @@ export class FederationService {
     const clientId =
       typeof interaction?.params.client_id === "string" ? interaction.params.client_id : undefined;
     const failure: FailureContext = { tenantId: tenant.id, loginMethodId, clientId };
-    const fail = async (code: LoginErrorCode, context: FailureContext = failure) => {
-      await this.#auditFailure(code, context);
-      return toError(code, uid);
-    };
+    const fail = (code: LoginErrorCode, context: FailureContext = failure) =>
+      this.#fail(tenant, code, context, uid);
     // The interaction is gone (expired): nothing to finish, so the code is not even redeemed.
     if (interaction === undefined) return fail("interaction_expired");
+    if (pending.protocol !== "oidc")
+      return fail("state_invalid", { ...failure, detail: "protocol" });
 
     const upstreamError = currentUrl.searchParams.get("error");
     if (upstreamError !== null) {
@@ -203,7 +226,7 @@ export class FederationService {
       });
     }
 
-    const method = await repos.loginMethods.findById(tenant.id, loginMethodId);
+    const method = asOidc(await repos.loginMethods.findById(tenant.id, loginMethodId));
     if (method === null || !method.enabled) return fail("login_method_unavailable");
     // A ranked acr needs upstream evidence (enforced at write time; methods saved before that).
     if (
@@ -296,46 +319,16 @@ export class FederationService {
       return fail("insufficient_assurance");
     }
 
-    const jit = await repos.persons.upsertFromLogin(tenant.id, {
-      loginMethodId: method.id,
-      subject: mapped.subject,
+    return this.#completeUpstream({
+      tenant,
+      interactionUid: uid,
+      stateHash: pending.stateHash,
+      method,
+      mapped,
+      subjectFromPin: false,
       acr: method.assertedAcr,
-      attributes: mapped.attributes,
-      ...(mapped.pin === undefined ? {} : { pin: mapped.pin }),
-    });
-    const person = jit.person;
-    if (mapped.groupsOverage) {
-      // Groups are not fetched from Microsoft Graph: rules see no groups for this login.
-      this.#log.warn(
-        { loginMethodId, event: "groups_overage" },
-        "upstream groups overage: groups treated as empty (configure group filtering upstream)",
-      );
-      await this.#audit({
-        tenantId: tenant.id,
-        actor: { type: "person", id: person.id },
-        subject: { type: "person", id: person.id },
-        action: "login.groups_overage",
-        details: { loginMethodId },
-      });
-    }
-    if (jit.created || jit.linked) {
-      await this.#audit({
-        tenantId: tenant.id,
-        actor: { type: "system", id: null },
-        subject: { type: "person", id: person.id },
-        action: jit.created ? "person.created" : "person.identity_linked",
-        details: { loginMethodId },
-      });
-    }
-
-    const completionRef = randomBytes(32).toString("base64url");
-    await repos.federationStates.attachCompletion(tenant.id, pending.stateHash, completionRef, {
-      personId: person.id,
-      acr: method.assertedAcr,
-      amr: mapped.amr,
       authTime,
     });
-    return `${base}/interaction/${encodeURIComponent(uid)}/federation/complete?ref=${completionRef}`;
   }
 
   /**
@@ -365,6 +358,9 @@ export class FederationService {
       acr: completion.acr,
       amr: completion.amr,
       authTime: completion.authTime,
+      ...(completion.upstreamSession === undefined
+        ? {}
+        : { upstreamSession: completion.upstreamSession }),
     });
     await this.#audit({
       tenantId: tenant.id,
@@ -385,7 +381,86 @@ export class FederationService {
     await this.#auditFailure(code, context);
   }
 
-  async #setupFor(method: LoginMethod, failure: FailureContext) {
+  /**
+   * JIT provisioning of an upstream login (OIDC callback or SAML ACS) and the completion hop:
+   * the person is found or created, audits are written, and the browser is sent to the
+   * interaction path with a single-use completion reference.
+   */
+  async #completeUpstream(result: UpstreamLoginResult): Promise<string> {
+    const { tenant, method, mapped } = result;
+    const { repos } = this.#options;
+    const jit = await repos.persons.upsertFromLogin(tenant.id, {
+      loginMethodId: method.id,
+      subject: mapped.subject,
+      subjectFromPin: result.subjectFromPin,
+      // Linking by pin needs the login to have met the method's level, which it has here.
+      acr: method.assertedAcr,
+      attributes: mapped.attributes,
+      ...(mapped.pin === undefined ? {} : { pin: mapped.pin }),
+    });
+    const person = jit.person;
+    if (mapped.groupsOverage) {
+      // Groups are not fetched from Microsoft Graph: rules see no groups for this login.
+      this.#log.warn(
+        { loginMethodId: method.id, event: "groups_overage" },
+        "upstream groups overage: groups treated as empty (configure group filtering upstream)",
+      );
+      await this.#audit({
+        tenantId: tenant.id,
+        actor: { type: "person", id: person.id },
+        subject: { type: "person", id: person.id },
+        action: "login.groups_overage",
+        details: { loginMethodId: method.id },
+      });
+    }
+    if (jit.created || jit.linked) {
+      await this.#audit({
+        tenantId: tenant.id,
+        actor: { type: "system", id: null },
+        subject: { type: "person", id: person.id },
+        action: jit.created ? "person.created" : "person.identity_linked",
+        details: { loginMethodId: method.id },
+      });
+    }
+
+    const completionRef = randomBytes(32).toString("base64url");
+    await repos.federationStates.attachCompletion(tenant.id, result.stateHash, completionRef, {
+      personId: person.id,
+      acr: result.acr,
+      amr: mapped.amr,
+      authTime: result.authTime,
+      ...(result.upstreamSession === undefined ? {} : { upstreamSession: result.upstreamSession }),
+    });
+    const base = `${this.#options.config.publicUrl}/t/${tenant.slug}`;
+    return `${base}/interaction/${encodeURIComponent(result.interactionUid)}/federation/complete?ref=${completionRef}`;
+  }
+
+  #errorUrl(tenant: Tenant, code: LoginErrorCode, uid?: string): string {
+    const base = `${this.#options.config.publicUrl}/t/${tenant.slug}`;
+    return uid === undefined
+      ? `${base}/login/error?code=${code}`
+      : `${base}/interaction/${encodeURIComponent(uid)}?error=${code}`;
+  }
+
+  /** Unauthenticated noise (no interaction known): counted and logged, never audited. */
+  #refuse(tenant: Tenant, reason: string): string {
+    this.#rejected.inc({ reason });
+    this.#log.info({ reason, tenant: tenant.slug }, "upstream callback refused");
+    return this.#errorUrl(tenant, "state_invalid");
+  }
+
+  /** A refused login of a real interaction: audited, then the interaction's error view. */
+  async #fail(
+    tenant: Tenant,
+    code: LoginErrorCode,
+    context: FailureContext,
+    uid: string,
+  ): Promise<string> {
+    await this.#auditFailure(code, context);
+    return this.#errorUrl(tenant, code, uid);
+  }
+
+  async #setupFor(method: OidcLoginMethod, failure: FailureContext) {
     try {
       return await this.#options.upstream.setupFor(method);
     } catch (error) {
@@ -410,7 +485,12 @@ export class FederationService {
 
   async #auditFailure(code: LoginErrorCode, context: FailureContext): Promise<void> {
     this.#log.info(
-      { reason: code, loginMethodId: context.loginMethodId, clientId: context.clientId },
+      {
+        reason: code,
+        loginMethodId: context.loginMethodId,
+        clientId: context.clientId,
+        ...(context.detail === undefined ? {} : { detail: context.detail }),
+      },
       "login failed",
     );
     await this.#audit({
@@ -426,6 +506,7 @@ export class FederationService {
         reason: code,
         ...(context.clientId === undefined ? {} : { clientId: context.clientId }),
         ...(context.upstreamError === undefined ? {} : { upstreamError: context.upstreamError }),
+        ...(context.detail === undefined ? {} : { detail: context.detail }),
       },
     });
   }

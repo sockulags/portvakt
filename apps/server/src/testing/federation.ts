@@ -12,7 +12,7 @@ import * as client from "openid-client";
 import { afterAll } from "vitest";
 import { DEFAULT_ACR_RANKING } from "../config/index.js";
 import { generateClientSecret } from "../crypto/secrets.js";
-import type { CreateLoginMethodInput, LoginMethod } from "../domain/login-method.js";
+import type { CreateLoginMethodInput, OidcLoginMethod } from "../domain/login-method.js";
 import type { Tenant } from "../domain/tenant.js";
 import { federationCallbackPath, federationJwksPath } from "../federation/service.js";
 import type { InteractionDetailsResponse } from "../login/routes.js";
@@ -101,7 +101,7 @@ export async function createFederatedLoginMethod(
   kind: IssuerKind,
   overrides: Partial<CreateLoginMethodInput> = {},
   client: Partial<Pick<MockClientInput, "omit_auth_time">> = {},
-): Promise<LoginMethod> {
+): Promise<OidcLoginMethod> {
   const clientId = `portvakt-${uniqueSuffix()}`;
   const secret = generateClientSecret();
   const method = await ts.db.repos.loginMethods.create(tenant.id, {
@@ -138,6 +138,8 @@ export type Landing =
     }
   /** The mock IdP's persona page. */
   | { readonly kind: "idp_page"; readonly url: string; readonly html: string }
+  /** A SAML response form to Portvakt, held back (`FlowDriver.holdSamlResponses`). */
+  | { readonly kind: "auto_post"; readonly url: string; readonly form: AutoPost }
   | {
       readonly kind: "other";
       readonly url: string;
@@ -155,15 +157,41 @@ const decodeEntities = (value: string): string =>
     .replace(/&gt;/g, ">")
     .replace(/&amp;/g, "&");
 
+/** An auto-submitting SAML form (HTTP-POST binding) the driver posted. */
+export interface AutoPost {
+  readonly action: string;
+  readonly fields: Readonly<Record<string, string>>;
+}
+
+const HIDDEN_INPUT = /<input type="hidden" name="([^"]+)" value="([^"]*)"\s*\/?>/g;
+
+/** The auto-submitting SAML form of a page (Portvakt's POST binding page, the mock's response). */
+function autoPostOf(body: string, base: string): AutoPost | undefined {
+  if (!body.includes("data-pv-autosubmit") && !body.includes('data-testid="saml-post-form"')) {
+    return undefined;
+  }
+  const action = /<form method="post" action="([^"]+)"/.exec(body)?.[1];
+  if (action === undefined) return undefined;
+  const fields: Record<string, string> = {};
+  for (const match of body.matchAll(HIDDEN_INPUT)) fields[match[1]!] = decodeEntities(match[2]!);
+  return { action: new URL(decodeEntities(action), base).href, fields };
+}
+
 /**
  * Drives the browser side of a federated login with a cookie jar, no JavaScript: follows
  * redirects across the application, Portvakt and the mock IdP, and does what the login UI and
- * the persona page would (choose a login method, choose a persona).
+ * the persona page would (choose a login method, choose a persona). Auto-submitting SAML forms
+ * are posted like a browser would; a post to Portvakt (the ACS, SLO) carries no cookies, as a
+ * cross-site POST carries no SameSite=Lax cookie.
  */
 export class FlowDriver {
   readonly browser: TestBrowser;
   /** Every URL requested, in order (to replay a callback, for example). */
   readonly visited: string[] = [];
+  /** The auto-submitting SAML forms posted, in order (to replay a SAML response). */
+  readonly autoPosts: AutoPost[] = [];
+  /** Stop at SAML response forms to Portvakt instead of posting them (an `auto_post` landing). */
+  holdSamlResponses = false;
   readonly #ts: TestServer;
   readonly #idp: TestIdp;
 
@@ -173,11 +201,29 @@ export class FlowDriver {
     this.browser = browser;
   }
 
+  /** Posts an auto-submitting SAML form (again) and follows the flow. */
+  async post(form: AutoPost): Promise<Landing> {
+    this.autoPosts.push(form);
+    return this.follow(
+      form.action,
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(form.fields).toString(),
+      },
+      { sendCookies: new URL(form.action).origin !== this.#ts.baseUrl },
+    );
+  }
+
   /** Requests `url` and follows redirects until a page or the application is reached. */
-  async follow(url: string, init?: RequestInit): Promise<Landing> {
+  async follow(
+    url: string,
+    init?: RequestInit,
+    options: { readonly sendCookies?: boolean } = {},
+  ): Promise<Landing> {
     let current = url;
     this.visited.push(current);
-    let response = await this.browser.request(current, init);
+    let response = await this.browser.request(current, init, options);
     for (let hops = 0; ; hops += 1) {
       if (response.status < 300 || response.status >= 400) break;
       if (hops >= MAX_REDIRECTS) throw new Error("too many redirects");
@@ -191,6 +237,14 @@ export class FlowDriver {
     }
     const body = await response.text();
     const origin = new URL(current).origin;
+    const autoPost = autoPostOf(body, current);
+    if (autoPost !== undefined) {
+      const toPortvakt = new URL(autoPost.action).origin === this.#ts.baseUrl;
+      if (this.holdSamlResponses && toPortvakt && "SAMLResponse" in autoPost.fields) {
+        return { kind: "auto_post", url: current, form: autoPost };
+      }
+      return this.post(autoPost);
+    }
     // oidc-provider's auto-submitting form (a session switch to another person): a browser
     // with JavaScript posts it at once.
     if (body.includes("<title>Submitting Callback</title>")) {
@@ -255,15 +309,25 @@ export class FlowDriver {
     return this.follow(body.redirectTo);
   }
 
-  /** Submits a persona (or `cancel`) on the mock IdP's page and follows the flow. */
-  async persona(landing: Landing, personaId: string): Promise<Landing> {
+  /**
+   * Submits a persona (or `cancel`) on the mock IdP's page and follows the flow; `switch` picks
+   * a test switch of the mock SAML IdPs.
+   */
+  async persona(
+    landing: Landing,
+    personaId: string,
+    options: { readonly switch?: string } = {},
+  ): Promise<Landing> {
     if (landing.kind !== "idp_page") throw new Error(`expected the IdP page, got ${landing.kind}`);
     return personaId === "cancel"
       ? this.follow(`${landing.url}/cancel`, { method: "POST" })
       : this.follow(`${landing.url}/login`, {
           method: "POST",
           headers: { "content-type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ persona: personaId }).toString(),
+          body: new URLSearchParams({
+            persona: personaId,
+            ...(options.switch === undefined ? {} : { switch: options.switch }),
+          }).toString(),
         });
   }
 

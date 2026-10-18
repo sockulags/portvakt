@@ -113,6 +113,36 @@ describe("mock IdP", () => {
     expect(html).toContain("Sven &lt;b&gt;");
   });
 
+  it("publishes signed SAML IdP metadata per flavour, with the SITHS organisation's scope", async () => {
+    for (const flavour of ["bankid", "freja", "siths"] as const) {
+      const res = await request(idp.app).get(`/saml/${flavour}/metadata`);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain(`entityID="http://idp.test/saml/${flavour}"`);
+      expect(res.text).toContain("SignatureValue>");
+      expect(res.text).toContain("SingleSignOnService");
+    }
+    const siths = await request(idp.app).get("/saml/siths/metadata");
+    expect(siths.text).toContain(">2321000016</shibmd:Scope>");
+    expect(idp.saml("siths").personas.map((persona) => persona.id)).toContain("siths-sara");
+  });
+
+  it("renders SAML test switches with stable test ids", () => {
+    const html = renderLoginPage({
+      title: "Mock BankID (SAML)",
+      action: "/saml/bankid/sso/abc",
+      personas: [{ id: "saml-sven", label: "Sven", detail: "loa3" }],
+      switches: ["cancel", "expired"],
+    });
+    expect(html).toContain('data-testid="switch"');
+    expect(html).toContain('data-testid="switch-expired"');
+    expect(html).toContain('data-testid="persona-saml-sven"');
+  });
+
+  it("refuses an unsigned AuthnRequest", async () => {
+    const res = await request(idp.app).get("/saml/bankid/sso").query({ SAMLRequest: "AAAA" });
+    expect(res.status).toBe(400);
+  });
+
   it("parses clients from inline JSON and validates them", () => {
     expect(
       parseClients(

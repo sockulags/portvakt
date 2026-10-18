@@ -9,12 +9,15 @@ import { createDb } from "./db/database.js";
 import { JOB_LOCKS, runExclusive } from "./jobs/exclusive.js";
 import { PeriodicTask } from "./jobs/periodic.js";
 import { SigningKeyCache } from "./keys/key-cache.js";
+import { SamlLoginMethodAdmin } from "./federation/saml/admin.js";
 import { FederationService } from "./federation/service.js";
 import { UpstreamClients } from "./federation/upstream.js";
 import { KeyRotationService, type ScheduledRotationResult } from "./keys/rotation.js";
 import type { Logger } from "./logging/logger.js";
 import { loginRoutes } from "./login/routes.js";
+import { samlAssetRoutes } from "./login/saml-routes.js";
 import { MetricRegistry } from "./metrics/registry.js";
+import { OutboundGuard } from "./net/outbound.js";
 import { LOGIN_UI_BASE, LoginUiShell } from "./login/ui-shell.js";
 import { AcrRanking } from "./oidc/acr.js";
 import { ChangeListener } from "./oidc/change-listener.js";
@@ -28,6 +31,7 @@ import type { ChangeEvent } from "./repositories/change-events.js";
 import { FederationStateRepository } from "./repositories/federation-states.js";
 import { createRepositories, type Repositories } from "./repositories/index.js";
 import { OidcPayloadRepository } from "./repositories/oidc-payloads.js";
+import { SamlRepository } from "./repositories/saml.js";
 
 const READINESS_DB_TIMEOUT_MS = 2000;
 const CLEANUP_BATCH_SIZE = 5000;
@@ -54,8 +58,10 @@ export interface Portvakt {
   readonly rotation: KeyRotationService;
   /** `completeLogin` finishes a login (the federation calls it; M4 adds representation). */
   readonly interactions: InteractionService;
-  /** Upstream OIDC federation (login methods). */
+  /** Upstream federation (OIDC and SAML login methods). */
   readonly federation: FederationService;
+  /** Admin-facing SAML login method operations (the admin API, M6, calls these). */
+  readonly samlAdmin: SamlLoginMethodAdmin;
   /** In-process counters (M8 exposes them to Prometheus). */
   readonly metrics: MetricRegistry;
   readonly readiness: () => Promise<ReadinessReport>;
@@ -64,6 +70,8 @@ export interface Portvakt {
     readonly reload: () => Promise<void>;
     readonly cleanupExpired: () => Promise<number | null>;
     readonly rotateKeys: () => Promise<ScheduledRotationResult>;
+    /** Refreshes due SAML IdP metadata; `null` when another replica is running it. */
+    readonly refreshSamlMetadata: () => Promise<number | null>;
   };
   /** Ensures a signing key exists, loads keys, subscribes to changes and starts the jobs. */
   start(): Promise<void>;
@@ -112,7 +120,16 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     keys: keyCache,
     logger,
     build: (input) =>
-      buildTenantProvider(input, { config, repos, logger, sessionPolicy, acrRanking, pages }),
+      buildTenantProvider(input, {
+        config,
+        repos,
+        logger,
+        sessionPolicy,
+        acrRanking,
+        pages,
+        upstreamLogout: (logout) => federation.saml.startLogout(logout),
+        outbound,
+      }),
   });
 
   const reloadKeys = async (): Promise<void> => {
@@ -128,7 +145,13 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     onChange: reloadKeys,
   });
   const interactions = createInteractionService(repos);
+  const outbound = new OutboundGuard({
+    production: config.isProduction,
+    allowPrivateHosts: config.federation.allowPrivateUpstreamHosts,
+    timeoutSeconds: config.federation.upstreamTimeoutSeconds,
+  });
   const upstream = new UpstreamClients({
+    outbound,
     loginMethods: repos.loginMethods,
     logger,
     production: config.isProduction,
@@ -144,6 +167,13 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     acrRanking,
     interactions,
     metrics,
+    keys,
+    outbound,
+  });
+  const samlAdmin = new SamlLoginMethodAdmin({
+    repos,
+    saml: federation.saml,
+    production: config.isProduction,
   });
 
   const onEvent = async (event: ChangeEvent): Promise<void> => {
@@ -191,16 +221,31 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
             (await new OidcPayloadRepository(tx).deleteExpiredBatch(CLEANUP_BATCH_SIZE)) +
             (await new FederationStateRepository(tx, keys.secrets).deleteExpiredBatch(
               CLEANUP_BATCH_SIZE,
+            )) +
+            (await new SamlRepository(tx, keys.secrets).deleteExpiredReplayBatch(
+              CLEANUP_BATCH_SIZE,
             )),
         );
         if (!result.ran) return batch === 0 ? null : total;
         total += result.value;
         if (result.value < CLEANUP_BATCH_SIZE) break;
       }
-      if (total > 0) logger.info({ deleted: total }, "deleted expired oidc payloads and states");
+      if (total > 0) {
+        logger.info({ deleted: total }, "deleted expired oidc payloads, states and replay entries");
+      }
       return total;
     },
     rotateKeys: () => rotation.runScheduled(),
+    refreshSamlMetadata: async (): Promise<number | null> => {
+      // The lock only elects one replica; the refreshes run on the pool, outside its transaction.
+      const result = await runExclusive(
+        db,
+        JOB_LOCKS.samlMetadataRefresh,
+        { wait: false },
+        async () => federation.saml.refreshDue(),
+      );
+      return result.ran ? result.value : null;
+    },
   };
   const tasks = [
     new PeriodicTask({
@@ -214,6 +259,14 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
       intervalSeconds: config.intervals.payloadCleanupSeconds,
       run: async () => {
         await jobs.cleanupExpired();
+      },
+      logger,
+    }),
+    new PeriodicTask({
+      name: "saml-metadata-refresh",
+      intervalSeconds: config.intervals.samlMetadataCheckSeconds,
+      run: async () => {
+        await jobs.refreshSamlMetadata();
       },
       logger,
     }),
@@ -252,6 +305,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     isDraining: () => closing,
     routes: [
       loginUiAssets(shell.dir, config.isProduction),
+      samlAssetRoutes(),
       tenantRoutes({
         registry,
         interactions,
@@ -264,7 +318,6 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
           federation,
           interactions,
           shell,
-          acrRanking,
           logger,
           tenantOf,
         }),
@@ -286,6 +339,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     rotation,
     interactions,
     federation,
+    samlAdmin,
     metrics,
     readiness,
     jobs,

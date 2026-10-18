@@ -1,7 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { generateClientSecret } from "../crypto/secrets.js";
 import type { Application, CreateApplicationInput } from "../domain/application.js";
-import type { CreateLoginMethodInput, LoginMethod } from "../domain/login-method.js";
+import type {
+  CreateLoginMethodInput,
+  LoginMethod,
+  OidcLoginMethod,
+} from "../domain/login-method.js";
 import type { JitLoginInput, JitLoginResult } from "../domain/person.js";
 import type { Tenant } from "../domain/tenant.js";
 import type { Repositories } from "../repositories/index.js";
@@ -39,7 +43,7 @@ export async function createLoginMethod(
   repos: Repositories,
   tenantId: string,
   overrides: Partial<CreateLoginMethodInput> = {},
-): Promise<LoginMethod> {
+): Promise<OidcLoginMethod> {
   return repos.loginMethods.create(tenantId, {
     kind: "employee",
     displayName: "Mock Entra",

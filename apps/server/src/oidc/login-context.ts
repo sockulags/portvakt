@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { LOGIN_METHOD_KINDS } from "../domain/login-method.js";
+import { upstreamSessionSchema } from "../repositories/federation-states.js";
 import type { OidcPayloadRepository } from "../repositories/oidc-payloads.js";
 
 /**
@@ -45,6 +46,11 @@ export const sessionRecordSchema = z
     clientId: z.string().min(1).max(128),
     /** Epoch seconds of the last authorization or refresh in this session. */
     lastActivityAt: epochSchema,
+    /**
+     * The upstream SAML session of the latest login (NameID, SessionIndex): single logout
+     * towards the IdP, and IdP-initiated logout finds the session by it.
+     */
+    upstream: upstreamSessionSchema.optional(),
   })
   .strict();
 export type SessionRecord = z.infer<typeof sessionRecordSchema>;
@@ -71,7 +77,9 @@ export const loginContextSchema = z
 export type LoginContext = z.infer<typeof loginContextSchema>;
 
 /** What `completeLogin` hands over to the authorization resume, through the interaction result. */
-export const pendingLoginSchema = z.object({ loginMethodId: z.uuid() }).strict();
+export const pendingLoginSchema = z
+  .object({ loginMethodId: z.uuid(), upstream: upstreamSessionSchema.optional() })
+  .strict();
 export type PendingLogin = z.infer<typeof pendingLoginSchema>;
 
 /** Key of the pending login in the interaction result (next to oidc-provider's `login`). */
@@ -82,6 +90,13 @@ export const SESSION_RECORD_KIND = "PortvaktSession";
 export const GRANT_LOGIN_KIND = "PortvaktGrantLogin";
 
 const MAX_ID_LENGTH = 512;
+
+/**
+ * Lookup key (`oidc_payloads.uid`) of the session records of an upstream SAML session: the login
+ * method and the NameID's blind index (the NameID itself is never stored in the clear).
+ */
+export const upstreamSessionKey = (loginMethodId: string, nameIdIndex: string): string =>
+  `saml:${loginMethodId}:${nameIdIndex}`;
 
 const epochNow = (): number => Math.floor(Date.now() / 1000);
 const ttlUntil = (end: number): number => Math.max(1, end - epochNow());
@@ -97,15 +112,75 @@ export class LoginStateStore {
     this.#payloads = payloads;
   }
 
-  /** Stores the session record until `retainUntil` (at least a second, never immortal). */
+  /**
+   * Stores the session record until `retainUntil` (at least a second, never immortal). A record
+   * with an upstream SAML session is indexed by it (`uid` column), for IdP-initiated logout.
+   */
   async saveSession(sessionUid: string, record: SessionRecord): Promise<void> {
+    const parsed = sessionRecordSchema.parse(record);
     await this.#payloads.upsert(
       this.#tenantId,
       SESSION_RECORD_KIND,
       sessionUid,
-      sessionRecordSchema.parse(record),
+      parsed,
       ttlUntil(record.retainUntil),
+      parsed.upstream === undefined
+        ? {}
+        : { uid: upstreamSessionKey(parsed.loginMethodId, parsed.upstream.nameIdIndex) },
     );
+  }
+
+  /**
+   * Ends every broker session whose latest login came through `loginMethodId` with this upstream
+   * NameID (and, when given, one of the SessionIndexes): IdP-initiated single logout. The NameID
+   * and SessionIndexes arrive as their blind indexes under every configured master key. The
+   * oidc-provider session and its grants (with their tokens) are deleted, so the next
+   * authorization needs a login and refresh tokens stop working. Returns how many ended.
+   */
+  async endSessionsOfUpstream(
+    loginMethodId: string,
+    nameIdIndexes: readonly string[],
+    sessionIndexIndexes: readonly string[] | undefined,
+  ): Promise<number> {
+    let ended = 0;
+    for (const nameIdIndex of nameIdIndexes) {
+      for (const { id, payload } of await this.#payloads.listByUid(
+        this.#tenantId,
+        SESSION_RECORD_KIND,
+        upstreamSessionKey(loginMethodId, nameIdIndex),
+      )) {
+        const record = sessionRecordSchema.safeParse(payload);
+        if (!record.success || record.data.loginMethodId !== loginMethodId) continue;
+        const upstream = record.data.upstream;
+        if (upstream === undefined || !nameIdIndexes.includes(upstream.nameIdIndex)) continue;
+        if (
+          sessionIndexIndexes !== undefined &&
+          (upstream.sessionIndexIndex === undefined ||
+            !sessionIndexIndexes.includes(upstream.sessionIndexIndex))
+        ) {
+          continue;
+        }
+        await this.endSession(id);
+        ended += 1;
+      }
+    }
+    return ended;
+  }
+
+  /** Deletes a broker session: oidc-provider's Session, its grants, and the session record. */
+  async endSession(sessionUid: string): Promise<void> {
+    if (!validId(sessionUid)) return;
+    const session = await this.#payloads.findByUid(this.#tenantId, "Session", sessionUid);
+    const authorizations = z
+      .record(z.string(), z.looseObject({ grantId: z.string().min(1).max(512).optional() }))
+      .safeParse(session?.authorizations);
+    if (authorizations.success) {
+      for (const { grantId } of Object.values(authorizations.data)) {
+        if (grantId !== undefined) await this.#payloads.revokeGrant(this.#tenantId, grantId);
+      }
+    }
+    await this.#payloads.destroyByUid(this.#tenantId, "Session", sessionUid);
+    await this.#payloads.destroy(this.#tenantId, SESSION_RECORD_KIND, sessionUid);
   }
 
   /** The record of a live session; `undefined` when unknown, expired or malformed. */

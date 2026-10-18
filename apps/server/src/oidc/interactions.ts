@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { errors } from "oidc-provider";
 import { z } from "zod";
+import { upstreamSessionSchema } from "../repositories/federation-states.js";
 import type { Repositories } from "../repositories/index.js";
 import { PENDING_LOGIN_RESULT_KEY, type PendingLogin } from "./login-context.js";
 import type { TenantProvider } from "./provider.js";
@@ -24,7 +25,10 @@ export const completeLoginInputSchema = z
     personId: z.uuid(),
     /** The login method used; the person must have an identity through it. */
     loginMethodId: z.uuid(),
-    /** The acr Portvakt asserts for this login (the login method's asserted acr). */
+    /**
+     * The acr Portvakt asserts for this login: the login method's asserted acr (OIDC), or the
+     * requested level the IdP returned (SAML).
+     */
     acr: z.string().min(1).max(255),
     /** Authentication methods (RFC 8176 values such as `pwd`, `mfa`, `hwk`). */
     amr: z.array(amrValueSchema).min(1).max(16),
@@ -33,6 +37,8 @@ export const completeLoginInputSchema = z
      * now. Becomes the session login time (`auth_time`, `max_age` checks).
      */
     authTime: z.number().int().positive().optional(),
+    /** The upstream SAML session (NameID, SessionIndex), for single logout. */
+    upstreamSession: upstreamSessionSchema.optional(),
   })
   .strict();
 export type CompleteLoginInput = z.input<typeof completeLoginInputSchema>;
@@ -145,7 +151,10 @@ export function createInteractionService(repos: Repositories): InteractionServic
       ) {
         throw new InteractionError("login_method_unavailable", "Login method not available");
       }
-      const pending: PendingLogin = { loginMethodId: method.id };
+      const pending: PendingLogin = {
+        loginMethodId: method.id,
+        ...(login.upstreamSession === undefined ? {} : { upstream: login.upstreamSession }),
+      };
       const returnTo = await ctx.tenantProvider.provider.interactionResult(
         ctx.req,
         ctx.res,

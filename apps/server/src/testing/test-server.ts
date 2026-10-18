@@ -85,6 +85,8 @@ export async function startTestServer(
     MASTER_KEY_PREVIOUS: testMasterKeys.previous.map((key) => key.toString("base64")).join(","),
     COOKIE_KEYS: TEST_COOKIE_KEYS.join(","),
     SHUTDOWN_DRAIN_DELAY: "0",
+    // The mock IdP and the test server itself are on loopback.
+    ALLOW_PRIVATE_UPSTREAM_HOSTS: "127.0.0.1,localhost",
     LOGIN_UI_DIR: testLoginUiDir(),
     LOG_LEVEL:
       process.env.TEST_LOG_LEVEL ?? (options.logDestination === undefined ? "silent" : "trace"),
@@ -131,12 +133,19 @@ interface StoredCookie {
 export class TestBrowser {
   readonly #cookies = new Map<string, StoredCookie>();
 
-  /** Sends a request without following redirects and records the cookies it sets. */
-  async request(url: string, init: RequestInit = {}): Promise<Response> {
+  /**
+   * Sends a request without following redirects and records the cookies it sets.
+   * `sendCookies: false` models a cross-site POST, where browsers send no SameSite=Lax cookie.
+   */
+  async request(
+    url: string,
+    init: RequestInit = {},
+    options: { readonly sendCookies?: boolean } = {},
+  ): Promise<Response> {
     const target = new URL(url);
     const headers = new Headers(init.headers);
     const cookie = this.#cookieHeader(target.host, target.pathname);
-    if (cookie !== "") headers.set("cookie", cookie);
+    if (cookie !== "" && options.sendCookies !== false) headers.set("cookie", cookie);
     const response = await fetch(target, { ...init, headers, redirect: "manual" });
     for (const header of response.headers.getSetCookie()) {
       this.#store(header, target.host, target.pathname);

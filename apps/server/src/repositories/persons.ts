@@ -6,6 +6,7 @@ import {
   type IdentityAttributes,
   identityAttributesSchema,
   jitLoginInputSchema,
+  PIN_INDEX_SUBJECT_PREFIX,
   type JitLoginInput,
   type JitLoginResult,
   type Person,
@@ -81,6 +82,10 @@ function storableAttributes(attributes: IdentityAttributes): IdentityAttributes 
     groups: attributes.groups,
     protectedIdentity: true,
     ...(attributes.upstreamAcr === undefined ? {} : { upstreamAcr: attributes.upstreamAcr }),
+    ...(attributes.hsaId === undefined ? {} : { hsaId: attributes.hsaId }),
+    ...(attributes.orgAffiliation === undefined
+      ? {}
+      : { orgAffiliation: attributes.orgAffiliation }),
   };
 }
 
@@ -186,6 +191,17 @@ export class PersonRepository {
             candidates: this.#keys.index.candidates("pin", data.pin),
           };
 
+    // A subject that is the personal identity number is stored as its blind index (current
+    // master key) and looked up under every configured key, like any other pin lookup.
+    const subject =
+      data.subjectFromPin && pin !== null
+        ? `${PIN_INDEX_SUBJECT_PREFIX}${pin.stored.index}`
+        : data.subject;
+    const subjectCandidates =
+      data.subjectFromPin && pin !== null
+        ? pin.candidates.map((index) => `${PIN_INDEX_SUBJECT_PREFIX}${index}`)
+        : [data.subject];
+
     return this.#db.transaction(async (tx) => {
       const [method] = await tx.query<{ link_by_pin: boolean; asserted_acr: string }>(
         "SELECT link_by_pin, asserted_acr FROM login_methods WHERE tenant_id = $1 AND id = $2",
@@ -196,17 +212,19 @@ export class PersonRepository {
       const refresh = async (): Promise<IdentityRow | undefined> => {
         const [existing] = await tx.query<{ id: string }>(
           `SELECT id FROM identities
-            WHERE tenant_id = $1 AND login_method_id = $2 AND subject = $3 FOR UPDATE`,
-          [tenantId, data.loginMethodId, data.subject],
+            WHERE tenant_id = $1 AND login_method_id = $2 AND subject = ANY ($3::text[])
+            ORDER BY subject = $4 DESC
+            LIMIT 1 FOR UPDATE`,
+          [tenantId, data.loginMethodId, subjectCandidates, subject],
         );
         if (existing === undefined) return undefined;
         const [row] = await tx.query<IdentityRow>(
           `UPDATE identities
               SET attributes = $2::jsonb, pin_encrypted = $3, pin_index = $4, pin_index_key = $5,
-                  last_login_at = now()
+                  subject = $6, last_login_at = now()
             WHERE id = $1
           RETURNING ${IDENTITY_COLUMNS}`,
-          [existing.id, attributes, ...this.#pinColumns(existing.id, pin)],
+          [existing.id, attributes, ...this.#pinColumns(existing.id, pin), subject],
         );
         return row;
       };
@@ -262,7 +280,7 @@ export class PersonRepository {
               tenantId,
               personId,
               data.loginMethodId,
-              data.subject,
+              subject,
               attributes,
               ...this.#pinColumns(identityId, pin),
             ],

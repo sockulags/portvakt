@@ -8,6 +8,7 @@ import { LoginMethodRepository } from "./login-methods.js";
 import { OidcPayloadRepository } from "./oidc-payloads.js";
 import { PersonRepository } from "./persons.js";
 import { PartyRepository, RepresentationGrantRepository } from "./representation.js";
+import { SamlRepository } from "./saml.js";
 import { SigningKeyRepository } from "./signing-keys.js";
 import { TenantRepository } from "./tenants.js";
 
@@ -23,6 +24,7 @@ export interface Repositories {
   readonly audit: AuditRepository;
   readonly oidcPayloads: OidcPayloadRepository;
   readonly federationStates: FederationStateRepository;
+  readonly saml: SamlRepository;
 }
 
 export interface RepositoryOptions {
@@ -53,6 +55,7 @@ export function createRepositories(
     audit: new AuditRepository(db),
     oidcPayloads: new OidcPayloadRepository(db),
     federationStates: new FederationStateRepository(db, keys.secrets),
+    saml: new SamlRepository(db, keys.secrets),
   };
 }
 
@@ -74,6 +77,7 @@ export {
   type PendingFederation,
 } from "./federation-states.js";
 export {
+  asOidc,
   clientPrivateJwkContext,
   clientSecretContext,
   LoginMethodRepository,
@@ -83,5 +87,16 @@ export { OidcPayloadRepository, type PayloadIndexes, type StoredPayload } from "
 export { identityPinContext, PersonRepository } from "./persons.js";
 export { PartyRepository, RepresentationGrantRepository } from "./representation.js";
 export { rewrapAllSecrets, type RewrapResult } from "./rewrap.js";
+export {
+  SamlRepository,
+  spKeyContext,
+  type ExpiringSpCertificate,
+  type MetadataCacheEntry,
+  type NewSpKey,
+  type SpKey,
+  type SpKeyPair,
+  type SpKeyPurpose,
+  type SpKeyState,
+} from "./saml.js";
 export { privateJwkContext, SigningKeyRepository, type ActivationResult } from "./signing-keys.js";
 export { TenantRepository } from "./tenants.js";

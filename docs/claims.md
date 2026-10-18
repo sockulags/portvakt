@@ -37,6 +37,8 @@ meaning or type, is a breaking change and needs a new contract version; adding a
 | `name`               | with scope `profile`               | no           | Display name from the upstream IdP                                                                        |
 | `email`              | with scope `email`                 | no           | Verified email address from the upstream IdP; never an identifier                                         |
 | `pin`                | with scope `pin`, if allowed       | no           | Personal identity number (personnummer or samordningsnummer), 12 digits `YYYYMMDDNNNC`                    |
+| `hsa_id`             | with scope `hsa`, if allowed       | no           | HSA-id of a SITHS employee (SAML employeeHsaId)                                                           |
+| `org_affiliation`    | with scope `hsa`, if allowed       | no           | Array of `uid@orgnr` organisation affiliations (SAML orgAffiliation, scope-checked)                       |
 | `protected_identity` | `true` when protected, else absent | no           | The person has a protected identity (skyddad identitet)                                                   |
 
 The JWT and OAuth basics (`exp`, `iat`, `jti`, `client_id` in access tokens; `nonce`, `sid`,
@@ -44,9 +46,13 @@ The JWT and OAuth basics (`exp`, `iat`, `jti`, `client_id` in access tokens; `no
 
 ### `acr`
 
-The acr is the login method's configured `assertedAcr`, never a value the upstream IdP chose.
-When the login method maps an upstream acr claim, Portvakt asks the upstream for the asserted
-level (`acr_values`) and refuses the login unless the upstream acr reaches it. Levels are ordered
+For an OIDC login method the acr is the login method's configured `assertedAcr`, never a value
+the upstream IdP chose. When the login method maps an upstream acr claim, Portvakt asks the
+upstream for the asserted level (`acr_values`) and refuses the login unless the upstream acr
+reaches it. For a SAML login method the acr is the level of assurance the IdP returned
+(AuthnContextClassRef), and only a level Portvakt requested is accepted: with the framework's
+`exact` comparison it must be one of the requested LoA URIs, and it must always rank at least as
+high as the method's `assertedAcr` (see "SAML login methods" below). Levels are ordered
 by `ACR_RANKING` (default: the Swedish eID Framework levels
 `http://id.elegnamnden.se/loa/1.0/loa2` < `.../loa3` < `.../loa4`). An application that sends
 `acr_values` is only offered login methods whose acr equals one of the values or ranks at least
@@ -79,6 +85,13 @@ Only in ID tokens, only when the application requested scope `pin` and is allowe
 request it (`invalid_scope`). The value is the canonical 12-digit form; a samordningsnummer keeps
 its day + 60.
 
+### `hsa_id` and `org_affiliation`
+
+Only in ID tokens, only when the application requested scope `hsa` and is allowed it
+(`allowedExtraScopes` contains `hsa`), like `pin`. They come from SAML login methods (SITHS
+style): `hsa_id` is the employeeHsaId, `org_affiliation` the orgAffiliation values whose scope
+Portvakt accepted. `prid` is not issued as a claim.
+
 ### `protected_identity`
 
 Present (`true`) when the person has a protected identity. It is sticky on the person: as soon
@@ -102,6 +115,38 @@ A login method on a multi-tenant issuer (Entra ID `/common`, `/organizations`, `
 any issuer whose discovery returns `{tenantid}`) must list the upstream tenant ids allowed to sign
 in; such a method cannot be saved without the list. The ID token's `tid` must be one of them and
 its issuer must be that tenant's issuer, otherwise the login fails (`account_not_allowed`).
+
+### SAML login methods (Swedish eID Framework)
+
+SAML login methods map the attributes of the Attribute Specification for the Swedish eID
+Framework (version 1.8) to the same claims as OIDC methods. The attribute names below are the
+defaults; each can be changed per login method (`attributeMapping`).
+
+| SAML attribute                                                           | Claim / use                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `urn:oid:1.2.752.29.4.13` personalIdentityNumber                         | `pin` (validated and canonicalised, 12 digits); links identities between citizen methods with `linkByPin`                                                                                                                                          |
+| `urn:oid:2.16.840.1.113730.3.1.241` displayName                          | `name`                                                                                                                                                                                                                                             |
+| `urn:oid:2.5.4.42` givenName, `urn:oid:2.5.4.4` sn                       | `name` when there is no displayName (given name and surname joined)                                                                                                                                                                                |
+| `urn:oid:1.2.752.201.3.4` prid                                           | the identity's subject with subject source `prid` (no claim of its own)                                                                                                                                                                            |
+| `urn:oid:1.2.752.201.3.5` pridPersistence                                | not mapped (prid's stability: A, B or C)                                                                                                                                                                                                           |
+| `urn:oid:1.2.752.29.6.2.1` employeeHsaId                                 | `hsa_id` (scope `hsa`); the identity's subject with subject source `employeeHsaId` (SITHS)                                                                                                                                                         |
+| `urn:oid:1.2.752.201.3.1` orgAffiliation                                 | `org_affiliation` (scope `hsa`) and upstream groups for role rules (`roles`), only values whose scope (after the last `@`) is a `shibmd:Scope` of the IdP's metadata or one of the login method's `orgAffiliationScopes`; other values are dropped |
+| `urn:oid:0.9.2342.19200300.100.1.3` mail                                 | `email`, only when the login method trusts the IdP's addresses (`trustEmail`)                                                                                                                                                                      |
+| NameID (persistent)                                                      | the identity's subject with subject source `nameId`; a transient NameID is refused as a subject                                                                                                                                                    |
+| AuthnContextClassRef                                                     | `acr` (the returned LoA, for example `http://id.elegnamnden.se/loa/1.0/loa3`)                                                                                                                                                                      |
+| AuthnStatement `AuthnInstant`                                            | `auth_time` (never later than now)                                                                                                                                                                                                                 |
+| configurable attribute and values (`attributeMapping.protectedIdentity`) | `protected_identity` (sticky, as above); the framework defines no attribute or status for protected identity                                                                                                                                       |
+
+`amr` is `["fed"]` for SAML logins (SAML carries no RFC 8176 methods). The identity's subject
+follows the login method's subject source: `personalIdentityNumber` (stored as the number's
+blind index, never the number), `prid`, `employeeHsaId` or `nameId`. An attribute used as the
+subject or as `pin` must have exactly one value.
+
+An application that sends `acr_values` is offered a SAML method when one of the levels it
+requests satisfies them, and Portvakt then requests only those levels (step-up through
+RequestedAuthnContext). `prompt=login`, `max_age`, an expired or idle session, a higher acr, and
+`allowSso = false` across applications send ForceAuthn, and the returned AuthnInstant must be
+later than the request; with `max_age` it must also be recent enough.
 
 ### `roles` from upstream groups
 

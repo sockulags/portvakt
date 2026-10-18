@@ -1,7 +1,8 @@
 import { decodeJwt, importJWK } from "jose";
 import * as client from "openid-client";
-import type { LoginMethod } from "../domain/login-method.js";
+import type { OidcLoginMethod } from "../domain/login-method.js";
 import type { Logger } from "../logging/logger.js";
+import type { OutboundGuard } from "../net/outbound.js";
 import type { LoginMethodRepository } from "../repositories/login-methods.js";
 
 /**
@@ -59,6 +60,8 @@ export interface UpstreamClientsOptions {
   readonly metadataTtlSeconds: number;
   /** A failed discovery is not retried for this long (0: always retried). */
   readonly failureCacheSeconds: number;
+  /** Every upstream request (discovery, JWKS, token, userinfo) goes through the SSRF guard. */
+  readonly outbound: OutboundGuard;
 }
 
 /** What a login method talks to upstream with. */
@@ -93,8 +96,6 @@ class CapturedTokenResponse extends Error {
 }
 
 type CustomFetch = (url: string, options: client.CustomFetchOptions) => Promise<Response>;
-
-const realFetch: CustomFetch = (url, options) => fetch(url, options);
 
 /** The upstream tenant (`tid`) of a token response's ID token, read before validation. */
 function unverifiedTenant(body: string): string | undefined {
@@ -131,7 +132,7 @@ export class UpstreamClients {
     this.#options = options;
   }
 
-  async setupFor(method: LoginMethod): Promise<UpstreamSetup> {
+  async setupFor(method: OidcLoginMethod): Promise<UpstreamSetup> {
     // A changed login method (issuer, client, secret, auth method) has a new updatedAt.
     const key = `${method.updatedAt.toISOString()}|${method.clientAuthMethod}`;
     const failure = this.#failures.get(method.id);
@@ -171,7 +172,7 @@ export class UpstreamClients {
    * configuration to use for this login afterwards (userinfo).
    */
   async exchangeCode(
-    method: LoginMethod,
+    method: OidcLoginMethod,
     currentUrl: URL,
     checks: client.AuthorizationCodeGrantChecks,
   ): Promise<{
@@ -197,7 +198,7 @@ export class UpstreamClients {
         ? responseIss
         : template.replace(TENANT_PLACEHOLDER, "common");
     const capture = this.#configuration(method, setup, firstIssuer, async (url, options) => {
-      const response = await realFetch(url, options);
+      const response = await this.#fetch(url, options);
       if (url !== setup.metadata.token_endpoint) return response;
       throw new CapturedTokenResponse(response.status, response.headers, await response.text());
     });
@@ -228,14 +229,14 @@ export class UpstreamClients {
             new Response(captured.body, { status: captured.status, headers: captured.headers }),
           );
         }
-        return realFetch(url, options);
+        return this.#fetch(url, options);
       },
     );
     return { tokens: await client.authorizationCodeGrant(config, currentUrl, checks), config };
   }
 
   #configuration(
-    method: LoginMethod,
+    method: OidcLoginMethod,
     setup: UpstreamSetup,
     issuer: string,
     fetchImpl: CustomFetch,
@@ -251,13 +252,17 @@ export class UpstreamClients {
     return config;
   }
 
+  /** Upstream requests through the outbound guard (SSRF, redirects, size). */
+  readonly #fetch: CustomFetch = (url, options) => this.#options.outbound.fetch(url, options);
+
   #harden(config: client.Configuration, insecure: boolean): void {
+    config[client.customFetch] = this.#fetch;
     if (insecure) client.allowInsecureRequests(config);
     config.timeout = this.#options.timeoutSeconds;
     client.enableNonRepudiationChecks(config);
   }
 
-  async #discover(method: LoginMethod): Promise<UpstreamSetup> {
+  async #discover(method: OidcLoginMethod): Promise<UpstreamSetup> {
     const issuer = new URL(method.issuer);
     const insecure = issuer.protocol === "http:";
     if (insecure && this.#options.production) {
@@ -272,6 +277,7 @@ export class UpstreamClients {
       config = await client.discovery(issuer, method.clientId, undefined, auth, {
         timeout: this.#options.timeoutSeconds,
         execute: insecure ? [client.allowInsecureRequests] : [],
+        [client.customFetch]: this.#fetch,
       });
     } catch (error) {
       const templated = templatedMetadata(error);
@@ -301,7 +307,10 @@ export class UpstreamClients {
     return { config, templated, metadata, auth, insecure };
   }
 
-  async #clientAuth(method: LoginMethod, audience: { value?: string }): Promise<client.ClientAuth> {
+  async #clientAuth(
+    method: OidcLoginMethod,
+    audience: { value?: string },
+  ): Promise<client.ClientAuth> {
     const repo = this.#options.loginMethods;
     switch (method.clientAuthMethod) {
       case "client_secret_basic":

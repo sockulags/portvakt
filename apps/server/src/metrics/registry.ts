@@ -62,4 +62,8 @@ export class MetricRegistry {
 export const METRICS = {
   /** Upstream callbacks refused before any interaction is known (unknown or foreign state). */
   federationCallbackRejected: "portvakt_federation_callback_rejected_total",
+  /** SAML IdP metadata refreshes (`outcome` success or failure, `reason` of a failure). */
+  samlMetadataRefresh: "portvakt_saml_metadata_refresh_total",
+  /** SAML single logout messages (`direction`, `outcome`). */
+  samlLogout: "portvakt_saml_logout_total",
 } as const;

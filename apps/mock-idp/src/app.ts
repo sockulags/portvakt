@@ -7,7 +7,17 @@ import {
   type MockClientInput,
 } from "./clients.js";
 import { createMockIssuer, type MockIssuer } from "./issuer.js";
-import { DEFAULT_PERSONAS_PATH, loadPersonas, type Personas } from "./personas.js";
+import {
+  DEFAULT_PERSONAS_PATH,
+  loadPersonas,
+  SAML_FLAVOURS,
+  type Personas,
+  type SamlFlavour,
+} from "./personas.js";
+import { createMockSamlIdp, type MockSamlIdp } from "./saml/idp.js";
+
+/** The mock's SAML IdPs: one per flavour, and `ecdsa` (ECDSA-signing Freja style). */
+export type SamlIdpName = SamlFlavour | "ecdsa";
 
 export interface MockIdpOptions {
   /** Origin the issuers live under: `{publicUrl}/entra` and `{publicUrl}/bankid`. */
@@ -25,12 +35,19 @@ export interface MockIdp {
   lastClientAssertionAudience(kind: IssuerKind, clientId: string): unknown;
   /** Registers (or replaces) a relying party of an issuer at runtime (tests). */
   registerClient(client: MockClientInput): void;
+  /**
+   * A SAML IdP: a flavour (`/saml/bankid`, `/saml/freja`, `/saml/siths`), or `ecdsa` (Freja
+   * personas, signing with ECDSA P-256).
+   */
+  saml(name: SamlIdpName): MockSamlIdp;
 }
 
 /**
- * Two upstream IdPs in one process, for development and tests only: `/entra` (employees, Entra
+ * Upstream IdPs in one process, for development and tests only: OIDC `/entra` (employees, Entra
  * ID style: `oid`, `groups`, groups overage) and `/bankid` (citizens: personal identity number,
- * Swedish eID levels of assurance, protected identity). Never part of a production image.
+ * Swedish eID levels of assurance, protected identity), and SAML IdPs following the Swedish eID
+ * Framework at `/saml/bankid`, `/saml/freja` (citizens) and `/saml/siths` (employees with an
+ * HSA-id). Never part of a production image.
  */
 export async function createMockIdp(options: MockIdpOptions): Promise<MockIdp> {
   if (process.env.NODE_ENV === "production") {
@@ -54,6 +71,28 @@ export async function createMockIdp(options: MockIdpOptions): Promise<MockIdp> {
     issuerOf(parsed.issuer).registerClient(parsed);
   };
   for (const client of options.clients ?? []) registerClient(client);
+  const samlIdps = new Map<SamlIdpName, MockSamlIdp>();
+  for (const flavour of SAML_FLAVOURS) {
+    samlIdps.set(
+      flavour,
+      await createMockSamlIdp({ flavour, publicUrl, personas: personas.saml[flavour] }),
+    );
+  }
+  samlIdps.set(
+    "ecdsa",
+    await createMockSamlIdp({
+      flavour: "freja",
+      name: "ecdsa",
+      keyType: "ec",
+      publicUrl,
+      personas: personas.saml.freja,
+    }),
+  );
+  const samlOf = (samlName: SamlIdpName): MockSamlIdp => {
+    const found = samlIdps.get(samlName);
+    if (found === undefined) throw new Error(`unknown SAML IdP ${samlName}`);
+    return found;
+  };
 
   const app = express();
   app.disable("x-powered-by");
@@ -63,6 +102,7 @@ export async function createMockIdp(options: MockIdpOptions): Promise<MockIdp> {
   for (const issuer of issuers.values()) {
     for (const path of issuer.mountPaths) app.use(path, issuer.router);
   }
+  for (const idp of samlIdps.values()) app.use(`/saml/${idp.name}`, idp.router);
   app.use((_req, res) => {
     res.status(404).json({ error: "not_found" });
   });
@@ -74,5 +114,6 @@ export async function createMockIdp(options: MockIdpOptions): Promise<MockIdp> {
     lastClientAssertionAudience: (kind, clientId) =>
       issuerOf(kind).lastClientAssertionAudience(clientId),
     registerClient,
+    saml: samlOf,
   };
 }

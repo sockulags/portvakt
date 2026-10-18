@@ -9,7 +9,8 @@ import {
 } from "./schemas.js";
 
 /** Extra scopes an application may be allowed to request beyond the standard OIDC ones. */
-export const EXTRA_SCOPES = ["pin"] as const;
+/** Scopes an application must be allowed: `pin` (personal identity number), `hsa` (SITHS). */
+export const EXTRA_SCOPES = ["pin", "hsa"] as const;
 export type ExtraScope = (typeof EXTRA_SCOPES)[number];
 
 export const SECRET_AUTH_METHODS = ["client_secret_basic", "client_secret_post"] as const;

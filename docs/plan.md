@@ -144,6 +144,7 @@ per scope. The userinfo endpoint is disabled: apps read profile claims from the 
 | `rep` | Present only when representing: `{ "sub": <party UUID>, "type": "person" or "organisation", "name": ... }` |
 | `name`, `email` | ID token only, with `profile` / `email` scopes |
 | `pin` | ID token only: personal identity number, only with scope `pin` and only if X allows it |
+| `hsa_id`, `org_affiliation` | ID token only: SITHS HSA-id and organisation affiliations (SAML), only with scope `hsa` and only if X allows it |
 | `protected_identity` | ID token only: `true` when upstream flags protected identity; apps must then minimise display |
 | `session_exp` | ID token only: absolute broker session end |
 

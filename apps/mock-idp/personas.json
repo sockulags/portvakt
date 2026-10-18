@@ -65,5 +65,91 @@
       "familyName": "Högnivå",
       "acr": "http://id.elegnamnden.se/loa/1.0/loa4"
     }
-  ]
+  ],
+  "saml": {
+    "bankid": [
+      {
+        "id": "saml-sven",
+        "nameId": "bankid-nameid-7f3a9c2e51d84b06",
+        "pin": "191212121212",
+        "givenName": "Sven",
+        "sn": "Medborgare",
+        "displayName": "Sven Medborgare",
+        "prid": "SE:7f3a9c2e51d84b06",
+        "pridPersistence": "A",
+        "loa": ["http://id.elegnamnden.se/loa/1.0/loa3"]
+      },
+      {
+        "id": "saml-skyddad",
+        "nameId": "bankid-nameid-0c4e8b1fa2d37965",
+        "pin": "200001010008",
+        "givenName": "Skyddad",
+        "sn": "Person",
+        "displayName": "Skyddad Person",
+        "loa": ["http://id.elegnamnden.se/loa/1.0/loa3"],
+        "protectedIdentity": true
+      },
+      {
+        "id": "saml-samuel",
+        "nameId": "bankid-nameid-5b9d2e7c1a4f8036",
+        "pin": "199001612382",
+        "givenName": "Samuel",
+        "sn": "Samordning",
+        "loa": ["http://id.elegnamnden.se/loa/1.0/loa3"]
+      }
+    ],
+    "freja": [
+      {
+        "id": "freja-frida",
+        "nameId": "freja-nameid-2a7c9e4b6d1f3058",
+        "pin": "198507099805",
+        "givenName": "Frida",
+        "sn": "Freja",
+        "displayName": "Frida Freja",
+        "loa": ["http://id.elegnamnden.se/loa/1.0/loa3", "http://id.elegnamnden.se/loa/1.0/loa2"]
+      },
+      {
+        "id": "freja-fredrik-loa2",
+        "nameId": "freja-nameid-8e1b3d5f7a9c2046",
+        "pin": "197811234561",
+        "givenName": "Fredrik",
+        "sn": "Basnivå",
+        "displayName": "Fredrik Basnivå",
+        "loa": ["http://id.elegnamnden.se/loa/1.0/loa2"]
+      },
+      {
+        "id": "freja-ingrid-foreign",
+        "nameId": "freja-nameid-4d6f8a1c3e5b7092",
+        "prid": "NO:5068907693",
+        "pridPersistence": "A",
+        "givenName": "Ingrid",
+        "sn": "Nordmann",
+        "displayName": "Ingrid Nordmann",
+        "loa": ["http://id.swedenconnect.se/loa/1.0/loa3-nonresident"]
+      }
+    ],
+    "siths": [
+      {
+        "id": "siths-sara",
+        "nameId": "siths-nameid-9c2e4a6b8d1f3057",
+        "employeeHsaId": "SE2321000016-1003",
+        "pin": "196408233234",
+        "givenName": "Sara",
+        "sn": "Sjuksköterska",
+        "displayName": "Sara Sjuksköterska",
+        "orgAffiliation": ["sara@2321000016"],
+        "loa": ["http://id.elegnamnden.se/loa/1.0/loa3"]
+      },
+      {
+        "id": "siths-lars",
+        "nameId": "siths-nameid-1f3b5d7a9c2e4068",
+        "employeeHsaId": "SE2321000016-2044",
+        "givenName": "Lars",
+        "sn": "Läkare",
+        "displayName": "Lars Läkare",
+        "orgAffiliation": ["lars@2321000016", "lars@9999999999"],
+        "loa": ["http://id.elegnamnden.se/loa/1.0/loa3"]
+      }
+    ]
+  }
 }

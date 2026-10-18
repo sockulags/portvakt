@@ -80,6 +80,34 @@ export class OidcPayloadRepository {
     return this.#findWhere(tenantId, kind, "uid = $3", uid);
   }
 
+  /** Every live payload of a kind with this `uid` index (at most `limit`), newest first. */
+  async listByUid(
+    tenantId: string,
+    kind: string,
+    uid: string,
+    limit = 100,
+  ): Promise<{ readonly id: string; readonly payload: StoredPayload }[]> {
+    requireUuids({ tenantId });
+    const rows = await this.#db.query<{ id: string; payload: unknown }>(
+      `SELECT id, payload FROM oidc_payloads
+        WHERE tenant_id = $1 AND kind = $2 AND uid = $3
+          AND (expires_at IS NULL OR expires_at > now())
+        ORDER BY created_at DESC
+        LIMIT $4`,
+      [tenantId, kind, uid, limit],
+    );
+    return rows.map((row) => ({ id: row.id, payload: payloadSchema.parse(row.payload) }));
+  }
+
+  /** Deletes every payload of a kind with this `uid` index. */
+  async destroyByUid(tenantId: string, kind: string, uid: string): Promise<void> {
+    requireUuids({ tenantId });
+    await this.#db.query(
+      "DELETE FROM oidc_payloads WHERE tenant_id = $1 AND kind = $2 AND uid = $3",
+      [tenantId, kind, uid],
+    );
+  }
+
   async findByUserCode(
     tenantId: string,
     kind: string,

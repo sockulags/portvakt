@@ -238,7 +238,12 @@ describe.skipIf(ts === undefined)("security properties", () => {
     const { person } = await createPerson(repos, world, `p-${uniqueSuffix()}`);
     const publicUrl = "https://login.example.org";
     const production = createPortvakt({
-      config: { ...config, isProduction: true, publicUrl },
+      config: {
+        ...config,
+        isProduction: true,
+        publicUrl,
+        federation: { ...config.federation, allowPrivateUpstreamHosts: [] },
+      },
       pool: db.pool,
       logger: createLogger({ level: "silent" }),
       keys: db.keys,

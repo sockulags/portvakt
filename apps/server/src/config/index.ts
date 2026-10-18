@@ -83,6 +83,11 @@ export interface Config {
     readonly keyRotationCheckSeconds: number;
     /** How often expired oidc-provider rows are deleted. */
     readonly payloadCleanupSeconds: number;
+    /**
+     * How often SAML metadata URLs are checked for a due refresh (each login method refreshes
+     * after its own `metadataRefreshSeconds`).
+     */
+    readonly samlMetadataCheckSeconds: number;
   };
   /** Graceful shutdown: how long in-flight requests may take before connections are closed. */
   readonly shutdownTimeoutSeconds: number;
@@ -122,6 +127,18 @@ export interface Config {
     readonly metadataTtlSeconds: number;
     /** A failed discovery is not retried for this long (0: always retried). */
     readonly failureCacheSeconds: number;
+    /**
+     * Cached SAML metadata without a validUntil is used at most this long after its last
+     * successful refresh (then the login method fails closed until a refresh succeeds).
+     */
+    readonly samlMetadataMaxAgeSeconds: number;
+    /**
+     * Hosts outbound requests may reach although they resolve to loopback or private addresses
+     * (development and tests only; refused in production).
+     */
+    readonly allowPrivateUpstreamHosts: readonly string[];
+    /** Largest element count of a SAML Response Portvakt parses (bounded parsing). */
+    readonly samlXmlMaxElements: number;
   };
   /** Directory of the built login UI (apps/login/dist); `undefined` uses the default location. */
   readonly loginUiDir: string | undefined;
@@ -224,6 +241,7 @@ const envSchema = z.object({
   PROVIDER_RELOAD_INTERVAL: duration("30s"),
   KEY_ROTATION_CHECK_INTERVAL: duration("1h"),
   PAYLOAD_CLEANUP_INTERVAL: duration("15m"),
+  SAML_METADATA_CHECK_INTERVAL: duration("5m"),
   SHUTDOWN_TIMEOUT: duration("15s"),
   SHUTDOWN_DRAIN_DELAY: duration("5s", { allowZero: true }),
   PUBLIC_URL: optionalString,
@@ -277,6 +295,23 @@ const envSchema = z.object({
   UPSTREAM_TIMEOUT: duration("10s"),
   UPSTREAM_METADATA_TTL: duration("1h"),
   UPSTREAM_FAILURE_CACHE: duration("5s", { allowZero: true }),
+  SAML_METADATA_MAX_AGE: duration("7d"),
+  SAML_XML_MAX_ELEMENTS: z.preprocess(
+    emptyToUndefined,
+    z.coerce.number().int().min(100).max(1_000_000).default(20_000),
+  ),
+  ALLOW_PRIVATE_UPSTREAM_HOSTS: z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .default("")
+      .transform(commaList)
+      .pipe(
+        z
+          .array(z.string().regex(/^[A-Za-z0-9.:-]{1,253}$/, "must be a host name or IP address"))
+          .max(50),
+      ),
+  ),
   LOGIN_UI_DIR: optionalString,
 });
 
@@ -330,6 +365,9 @@ function isLowEntropyKey(key: Buffer): boolean {
  */
 function productionIssues(env: Env, publicUrl: URL | undefined): string[] {
   const issues: string[] = [];
+  if (env.ALLOW_PRIVATE_UPSTREAM_HOSTS.length > 0) {
+    issues.push("ALLOW_PRIVATE_UPSTREAM_HOSTS: refused in production");
+  }
 
   if (env.PUBLIC_URL === undefined) {
     issues.push("PUBLIC_URL: required in production");
@@ -504,6 +542,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
       providerReloadSeconds: env.PROVIDER_RELOAD_INTERVAL,
       keyRotationCheckSeconds: env.KEY_ROTATION_CHECK_INTERVAL,
       payloadCleanupSeconds: env.PAYLOAD_CLEANUP_INTERVAL,
+      samlMetadataCheckSeconds: env.SAML_METADATA_CHECK_INTERVAL,
     },
     shutdownTimeoutSeconds: env.SHUTDOWN_TIMEOUT,
     shutdownDrainDelaySeconds: env.SHUTDOWN_DRAIN_DELAY,
@@ -523,6 +562,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
       upstreamTimeoutSeconds: env.UPSTREAM_TIMEOUT,
       metadataTtlSeconds: env.UPSTREAM_METADATA_TTL,
       failureCacheSeconds: env.UPSTREAM_FAILURE_CACHE,
+      samlMetadataMaxAgeSeconds: env.SAML_METADATA_MAX_AGE,
+      allowPrivateUpstreamHosts: env.ALLOW_PRIVATE_UPSTREAM_HOSTS,
+      samlXmlMaxElements: env.SAML_XML_MAX_ELEMENTS,
     },
     loginUiDir: env.LOGIN_UI_DIR,
   };

@@ -88,6 +88,14 @@ const sv: Messages = {
       body: "Välj en annan metod eller försök igen senare.",
     },
     upstream_denied: { title: "Inloggningen avbröts", body: "Du kan försöka igen." },
+    upstream_cancelled: {
+      title: "Du avbröt inloggningen",
+      body: "Inloggningen avbröts i e-legitimationen. Du kan försöka igen när du vill.",
+    },
+    authentication_failed: {
+      title: "Inloggningen kunde inte genomföras",
+      body: "E-legitimationen kunde inte bekräfta vem du är. Försök igen eller välj en annan metod.",
+    },
     upstream_error: {
       title: "Inloggningen misslyckades",
       body: "Inloggningstjänsten kunde inte slutföra inloggningen. Försök igen.",
@@ -95,6 +103,10 @@ const sv: Messages = {
     upstream_unavailable: {
       title: "Inloggningstjänsten svarar inte",
       body: "Försök igen om en stund.",
+    },
+    upstream_response_invalid: {
+      title: "Ogiltigt svar från inloggningstjänsten",
+      body: "Svaret kunde inte godkännas av säkerhetsskäl. Börja om från tjänsten.",
     },
     insufficient_assurance: {
       title: "För låg säkerhetsnivå",
@@ -171,6 +183,14 @@ const en: Messages = {
       body: "Choose another method or try again later.",
     },
     upstream_denied: { title: "The sign-in was cancelled", body: "You can try again." },
+    upstream_cancelled: {
+      title: "You cancelled the sign-in",
+      body: "The sign-in was cancelled in your electronic identification. You can try again whenever you like.",
+    },
+    authentication_failed: {
+      title: "The sign-in could not be completed",
+      body: "Your electronic identification could not confirm who you are. Try again or choose another method.",
+    },
     upstream_error: {
       title: "The sign-in failed",
       body: "The sign-in service could not complete the sign-in. Please try again.",
@@ -178,6 +198,10 @@ const en: Messages = {
     upstream_unavailable: {
       title: "The sign-in service is not responding",
       body: "Please try again in a moment.",
+    },
+    upstream_response_invalid: {
+      title: "Invalid response from the sign-in service",
+      body: "The response could not be accepted for security reasons. Start again from the service.",
     },
     insufficient_assurance: {
       title: "Level of assurance too low",

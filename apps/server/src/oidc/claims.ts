@@ -18,6 +18,7 @@ import type { LoginContext } from "./login-context.js";
  * | `session_exp`         | yes                            | never        |
  * | `name`, `email`       | with `profile` / `email`       | never        |
  * | `pin`                 | with `pin`, if the app may     | never        |
+ * | `hsa_id`, `org_affiliation` | with `hsa`, if the app may | never        |
  * | `protected_identity`  | `true` for a protected person  | never        |
  *
  * `sub` is always the signed-in person (also when representing; `rep` arrives with M4) and is
@@ -45,6 +46,7 @@ export const CLAIMS_BY_SCOPE = {
   profile: ["name"],
   email: ["email"],
   pin: ["pin"],
+  hsa: ["hsa_id", "org_affiliation"],
 } as const;
 
 export type ClaimsTarget = "id_token" | "userinfo" | "access_token";
@@ -129,6 +131,21 @@ const pinClaims: ClaimContributor = async (request, sources, repos) => {
   return pin === null ? {} : { pin };
 };
 
+/**
+ * SITHS identifiers (ID token only, scope `hsa`, only for an application allowed it):
+ * `hsa_id` (employeeHsaId) and `org_affiliation` (the scope-checked orgAffiliation values).
+ */
+const hsaClaims: ClaimContributor = (request, sources) => {
+  if (request.target !== "id_token" || !request.scopes.has("hsa")) return {};
+  if (sources.identity === undefined) return {};
+  if (sources.audience?.allowedExtraScopes.includes("hsa") !== true) return {};
+  const { hsaId, orgAffiliation } = sources.identity.attributes;
+  return {
+    ...(hsaId === undefined ? {} : { hsa_id: hsaId }),
+    ...(orgAffiliation === undefined ? {} : { org_affiliation: [...orgAffiliation] }),
+  };
+};
+
 /** `protected_identity: true` (ID token only) when the person is protected. */
 const protectedIdentityClaims: ClaimContributor = (request, sources) =>
   userInformation(request) && sources.person?.protectedIdentity === true
@@ -141,6 +158,7 @@ const CONTRIBUTORS: readonly ClaimContributor[] = [
   accessClaims,
   profileClaims,
   pinClaims,
+  hsaClaims,
   protectedIdentityClaims,
 ];
 

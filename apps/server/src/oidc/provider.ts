@@ -16,6 +16,7 @@ import type { LoginMethod } from "../domain/login-method.js";
 import type { Tenant } from "../domain/tenant.js";
 import type { LoadedKeys } from "../keys/key-cache.js";
 import type { Logger } from "../logging/logger.js";
+import type { OutboundGuard } from "../net/outbound.js";
 import type { Repositories } from "../repositories/index.js";
 import { parseAcrValues, type AcrRanking } from "./acr.js";
 import { createAdapterFactory } from "./adapter.js";
@@ -55,6 +56,14 @@ export const FRESH_LOGIN_REASONS: ReadonlySet<string> = new Set([
   "acr_not_met",
 ]);
 
+/** RP-initiated logout ended a broker session whose latest login was upstream SAML. */
+export interface UpstreamLogoutInput {
+  readonly tenant: Tenant;
+  readonly record: SessionRecord;
+  /** Where oidc-provider sends the browser after the logout (post_logout_redirect_uri). */
+  readonly returnTo: string;
+}
+
 export interface ProviderDependencies {
   readonly config: Config;
   readonly repos: Repositories;
@@ -62,6 +71,14 @@ export interface ProviderDependencies {
   readonly sessionPolicy: SessionPolicyService;
   readonly acrRanking: AcrRanking;
   readonly pages: ProviderPages;
+  /**
+   * Single logout towards the upstream IdP after the local logout: returns where to send the
+   * browser instead (the IdP's SLO endpoint, which returns to `returnTo`), or `undefined` to
+   * keep oidc-provider's redirect. Must never throw: the local logout has already happened.
+   */
+  readonly upstreamLogout?: (input: UpstreamLogoutInput) => Promise<string | undefined>;
+  /** Fetches of client `jwks_uri` documents go through the outbound guard (SSRF). */
+  readonly outbound?: OutboundGuard;
 }
 
 /** What a tenant's provider is built from (loaded by the registry). */
@@ -129,9 +146,17 @@ export function buildTenantProvider(
   const claims = new ClaimsService(repos);
   const tokens = config.tokens;
   const log = logger.child({ tenant: tenant.slug });
-  // Every value a login can assert: the ranking plus the tenant's login methods' acr values.
+  // Every value a login can assert: the ranking, the tenant's login methods' acr values and
+  // the levels SAML methods request (a SAML login asserts the level the IdP returned).
   const acrValues = [
-    ...new Set([...acrRanking.values, ...input.loginMethods.map((method) => method.assertedAcr)]),
+    ...new Set([
+      ...acrRanking.values,
+      ...input.loginMethods.flatMap((method) =>
+        method.protocol === "saml"
+          ? [method.assertedAcr, ...method.saml.requestedLoa]
+          : [method.assertedAcr],
+      ),
+    ]),
   ];
 
   /** The session record of the request's broker session, cached for the rest of the request. */
@@ -299,6 +324,7 @@ export function buildTenantProvider(
       allowSso: policyOf.allowSso,
       clientId,
       lastActivityAt: now,
+      ...(pending.data.upstream === undefined ? {} : { upstream: pending.data.upstream }),
     };
   }
 
@@ -520,6 +546,19 @@ export function buildTenantProvider(
         getResourceServerInfo,
       },
     },
+    ...(deps.outbound === undefined
+      ? {}
+      : {
+          // Client jwks_uri: the shared outbound guard instead of oidc-provider's dispatcher.
+          fetch: (input: string | URL | Request, init?: RequestInit) => {
+            if (input instanceof Request) throw new TypeError("unexpected Request input");
+            const { dispatcher: _dispatcher, ...rest } = (init ?? {}) as RequestInit & {
+              dispatcher?: unknown;
+            };
+            void _dispatcher;
+            return deps.outbound!.fetch(input, { ...rest, maxBytes: 256 * 1024 });
+          },
+        }),
     findAccount,
     extraTokenClaims,
     loadExistingGrant,
@@ -572,6 +611,33 @@ export function buildTenantProvider(
       ctx.set("Cache-Control", route === "jwks" ? "public, max-age=60" : "public, max-age=300");
     }
   });
+
+  // RP-initiated logout of a whole session (`logout=yes`) whose latest login was upstream SAML:
+  // after oidc-provider ended the session locally, the browser is sent through the IdP's single
+  // logout and back. Not for the session switch during a login (its redirect resumes the
+  // authorization), and never blocking: without an upstream target the redirect stays.
+  const upstreamLogout = deps.upstreamLogout;
+  if (upstreamLogout !== undefined) {
+    provider.use(async (ctx, next) => {
+      await next();
+      const oidc = (ctx as { oidc?: KoaContextWithOIDC["oidc"] }).oidc;
+      if (oidc?.route !== "end_session_confirm" || ctx.status !== 303) return;
+      if ((oidc.params as { logout?: unknown } | undefined)?.logout === undefined) return;
+      const returnTo = ctx.response.get("Location");
+      if (returnTo === "" || returnTo.startsWith(`${issuer}/auth`)) return;
+      try {
+        const record = await loginState.findSession(oidc.session?.uid);
+        if (record?.upstream === undefined) return;
+        const target = await upstreamLogout({ tenant, record, returnTo });
+        if (target !== undefined) {
+          ctx.status = 303;
+          ctx.redirect(target);
+        }
+      } catch (error) {
+        log.warn({ err: error }, "upstream logout skipped");
+      }
+    });
+  }
 
   provider.on("server_error", (_ctx: unknown, error: unknown) => {
     log.error({ err: error }, "oidc provider error");

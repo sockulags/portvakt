@@ -257,6 +257,7 @@ describe("loadConfig: OIDC core settings", () => {
       providerReloadSeconds: 30,
       keyRotationCheckSeconds: 3600,
       payloadCleanupSeconds: 900,
+      samlMetadataCheckSeconds: 300,
     });
     expect(config.shutdownTimeoutSeconds).toBe(15);
     expect(config.shutdownDrainDelaySeconds).toBe(5);
@@ -318,6 +319,9 @@ describe("loadConfig: federation settings", () => {
       upstreamTimeoutSeconds: 10,
       metadataTtlSeconds: 3600,
       failureCacheSeconds: 5,
+      samlMetadataMaxAgeSeconds: 604800,
+      allowPrivateUpstreamHosts: [],
+      samlXmlMaxElements: 20000,
     });
     expect(config.loginUiDir).toBeUndefined();
   });

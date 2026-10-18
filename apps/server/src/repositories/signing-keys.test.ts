@@ -267,6 +267,7 @@ describe.skipIf(testDb === undefined)("SigningKeyRepository", () => {
     expect(await rewrapAllSecrets(db, rotated)).toEqual({
       applicationSecrets: 0,
       loginMethodSecrets: 0,
+      samlSpKeys: 0,
       signingKeys: 0,
       identityPins: 0,
       partyIdentifiers: 0,
