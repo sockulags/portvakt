@@ -1,0 +1,300 @@
+{
+  "$schemaVersion": 1,
+  "name": "Auth-service",
+  "description": "Frosted calm: warm sand and ink neutrals, a single cobalt accent, frosted-glass surfaces, pill buttons, airy spacing and soft, unhurried motion.",
+  "color": {
+    "light": {
+      "bg": "#f4efe6",
+      "surface": "#fbf8f2",
+      "surfaceRaised": "#fffdf9",
+      "surfaceSunken": "#ebe4d7",
+      "border": "#e2d9c9",
+      "borderStrong": "#93876f",
+      "text": "#1f2230",
+      "textMuted": "#5a5446",
+      "textSubtle": "#6f6858",
+      "primary": "#232634",
+      "primaryHover": "#191b26",
+      "primaryActive": "#10121a",
+      "primarySubtle": "#e7e1d5",
+      "onPrimary": "#fbf8f2",
+      "secondary": "#ebe5d9",
+      "secondaryHover": "#e2dacb",
+      "secondaryActive": "#d6ccba",
+      "onSecondary": "#1f2230",
+      "accent": "#2445d6",
+      "onAccent": "#ffffff",
+      "info": "#2445d6",
+      "infoSubtle": "#e6eafb",
+      "infoStrong": "#1a3299",
+      "onInfo": "#ffffff",
+      "success": "#2f7a4f",
+      "successSubtle": "#e3f0e5",
+      "successStrong": "#1d5234",
+      "onSuccess": "#ffffff",
+      "warning": "#bd7f22",
+      "warningSubtle": "#f8ecd5",
+      "warningStrong": "#6b4410",
+      "onWarning": "#1f2230",
+      "danger": "#b93a2a",
+      "dangerHover": "#a33222",
+      "dangerActive": "#8b2a1c",
+      "dangerSubtle": "#f9e6e1",
+      "dangerStrong": "#8b2a1c",
+      "onDanger": "#ffffff",
+      "focusRing": "#2445d6",
+      "overlay": "rgb(31 34 48 / 0.32)",
+      "shadow": "rgb(46 36 22 / 0.4)",
+      "disabledBg": "#ebe5d9",
+      "disabledText": "#9e9583",
+      "selection": "#d3dbf7"
+    },
+    "dark": {
+      "bg": "#16171d",
+      "surface": "#1d1e26",
+      "surfaceRaised": "#262731",
+      "surfaceSunken": "#101116",
+      "border": "#2f303b",
+      "borderStrong": "#6e6a62",
+      "text": "#ede7dc",
+      "textMuted": "#b3ab9c",
+      "textSubtle": "#9a9283",
+      "primary": "#e8dcc6",
+      "primaryHover": "#f1e8d7",
+      "primaryActive": "#dccdb2",
+      "primarySubtle": "#2b2922",
+      "onPrimary": "#1a1b22",
+      "secondary": "#262731",
+      "secondaryHover": "#2e2f3a",
+      "secondaryActive": "#373845",
+      "onSecondary": "#ede7dc",
+      "accent": "#8fa6ff",
+      "onAccent": "#101116",
+      "info": "#8fa6ff",
+      "infoSubtle": "#1a2142",
+      "infoStrong": "#c3cfff",
+      "onInfo": "#101116",
+      "success": "#74c493",
+      "successSubtle": "#13281c",
+      "successStrong": "#b0e2c2",
+      "onSuccess": "#0c1710",
+      "warning": "#e2b25f",
+      "warningSubtle": "#2d2412",
+      "warningStrong": "#f2d59e",
+      "onWarning": "#16171d",
+      "danger": "#f08a78",
+      "dangerHover": "#f4a291",
+      "dangerActive": "#e2735f",
+      "dangerSubtle": "#33150f",
+      "dangerStrong": "#f7b9ad",
+      "onDanger": "#1f0906",
+      "focusRing": "#8fa6ff",
+      "overlay": "rgb(6 6 10 / 0.55)",
+      "shadow": "rgb(4 4 8 / 1)",
+      "disabledBg": "#22232b",
+      "disabledText": "#6a665f",
+      "selection": "#2c3666"
+    }
+  },
+  "typography": {
+    "fontImports": [
+      "https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=Instrument+Sans:wght@400;500;600;700&display=swap"
+    ],
+    "family": {
+      "sans": "\"Instrument Sans\", system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif",
+      "display": "\"Outfit\", \"Instrument Sans\", system-ui, -apple-system, \"Segoe UI\", sans-serif",
+      "mono": "ui-monospace, \"Cascadia Code\", Menlo, Consolas, monospace"
+    },
+    "size": {
+      "xs": "0.75rem",
+      "sm": "0.875rem",
+      "base": "1rem",
+      "lg": "1.125rem",
+      "xl": "1.3125rem",
+      "2xl": "1.625rem",
+      "3xl": "2rem",
+      "4xl": "2.5rem",
+      "5xl": "3.25rem"
+    },
+    "weight": {
+      "regular": "400",
+      "medium": "500",
+      "semibold": "600",
+      "bold": "700"
+    },
+    "leading": {
+      "tight": "1.15",
+      "snug": "1.3",
+      "normal": "1.55",
+      "relaxed": "1.7"
+    },
+    "tracking": {
+      "tight": "-0.02em",
+      "normal": "0em",
+      "wide": "0.01em",
+      "caps": "0.08em"
+    }
+  },
+  "space": {
+    "1": "4px",
+    "2": "8px",
+    "3": "12px",
+    "4": "16px",
+    "5": "20px",
+    "6": "24px",
+    "8": "32px",
+    "10": "40px",
+    "12": "48px",
+    "16": "64px",
+    "20": "80px"
+  },
+  "radius": {
+    "none": "0",
+    "xs": "4px",
+    "sm": "6px",
+    "md": "10px",
+    "lg": "14px",
+    "xl": "20px",
+    "full": "9999px"
+  },
+  "border": {
+    "thin": "1px",
+    "thick": "2px"
+  },
+  "shadow": {
+    "xs": "0 1px 2px color-mix(in srgb, var(--color-shadow) 10%, transparent)",
+    "sm": "0 1px 2px color-mix(in srgb, var(--color-shadow) 12%, transparent), 0 2px 4px color-mix(in srgb, var(--color-shadow) 7.5%, transparent)",
+    "md": "0 2px 4px color-mix(in srgb, var(--color-shadow) 10%, transparent), 0 8px 16px color-mix(in srgb, var(--color-shadow) 12%, transparent)",
+    "lg": "0 4px 8px color-mix(in srgb, var(--color-shadow) 10%, transparent), 0 16px 32px color-mix(in srgb, var(--color-shadow) 16%, transparent)",
+    "xl": "0 8px 16px color-mix(in srgb, var(--color-shadow) 12%, transparent), 0 32px 64px color-mix(in srgb, var(--color-shadow) 28%, transparent)"
+  },
+  "motion": {
+    "duration": {
+      "instant": "70ms",
+      "fast": "120ms",
+      "base": "220ms",
+      "slow": "280ms",
+      "slower": "380ms"
+    },
+    "ease": {
+      "standard": "cubic-bezier(0.2, 0, 0, 1)",
+      "enter": "cubic-bezier(0, 0, 0.2, 1)",
+      "exit": "cubic-bezier(0.4, 0, 1, 1)",
+      "emphasized": "cubic-bezier(0.3, 0, 0, 1)",
+      "spring": "cubic-bezier(0.3, 1.3, 0.5, 1)"
+    }
+  },
+  "focus": {
+    "ringWidth": "2px",
+    "ringOffset": "2px"
+  },
+  "opacity": {
+    "disabled": "0.5",
+    "muted": "0.7"
+  },
+  "components": {
+    "button": {
+      "radius": "var(--radius-full)",
+      "heightSm": "32px",
+      "heightMd": "40px",
+      "heightLg": "48px",
+      "paddingX": "var(--space-6)",
+      "gap": "var(--space-2)",
+      "fontSize": "var(--text-sm)",
+      "fontWeight": "var(--weight-semibold)",
+      "letterSpacing": "var(--tracking-wide)",
+      "textTransform": "none",
+      "borderWidth": "var(--border-thin)",
+      "shadow": "0 0 0 1px color-mix(in oklab, var(--color-text) 6%, transparent), 0 1px 3px color-mix(in srgb, var(--color-shadow) 25%, transparent)",
+      "shadowHover": "0 0 0 1px color-mix(in oklab, var(--color-text) 14%, transparent), 0 3px 8px color-mix(in srgb, var(--color-shadow) 30%, transparent)",
+      "pressScale": "0.98",
+      "transition": "background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-base) var(--ease-standard), transform var(--duration-fast) var(--ease-standard)"
+    },
+    "input": {
+      "radius": "var(--radius-md)",
+      "height": "44px",
+      "paddingX": "var(--space-4)",
+      "fontSize": "var(--text-sm)",
+      "bg": "var(--color-surface)",
+      "borderWidth": "var(--border-thin)",
+      "borderColor": "var(--color-border-strong)",
+      "borderColorHover": "var(--color-text-muted)",
+      "shadow": "var(--shadow-xs)",
+      "transition": "border-color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-base) var(--ease-standard)"
+    },
+    "control": {
+      "size": "18px",
+      "radius": "var(--radius-xs)",
+      "switchWidth": "38px",
+      "switchHeight": "22px",
+      "thumbInset": "2px",
+      "transition": "background-color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard), transform var(--duration-base) var(--ease-spring)"
+    },
+    "card": {
+      "radius": "var(--radius-lg)",
+      "padding": "var(--space-8)",
+      "bg": "color-mix(in oklab, var(--color-surface) 80%, transparent)",
+      "borderWidth": "var(--border-thin)",
+      "shadow": "var(--glass-edge), var(--shadow-sm)",
+      "shadowHover": "var(--glass-edge), var(--shadow-lg)",
+      "liftHover": "-2px",
+      "transition": "box-shadow var(--duration-base) var(--ease-standard), border-color var(--duration-base) var(--ease-standard), transform var(--duration-base) var(--ease-standard)"
+    },
+    "badge": {
+      "radius": "var(--radius-full)",
+      "height": "22px",
+      "paddingX": "var(--space-3)",
+      "fontSize": "var(--text-xs)",
+      "fontWeight": "var(--weight-medium)",
+      "letterSpacing": "var(--tracking-wide)",
+      "textTransform": "none"
+    },
+    "tabs": {
+      "variant": "pill",
+      "radius": "var(--radius-full)",
+      "gap": "var(--space-2)",
+      "fontWeight": "var(--weight-medium)",
+      "indicatorHeight": "2px",
+      "indicatorTransition": "transform var(--duration-slow) var(--ease-emphasized), width var(--duration-slow) var(--ease-emphasized), height var(--duration-slow) var(--ease-emphasized)",
+      "transition": "color var(--duration-fast) var(--ease-standard), background-color var(--duration-fast) var(--ease-standard)"
+    },
+    "alert": {
+      "radius": "var(--radius-lg)",
+      "padding": "var(--space-5)",
+      "borderWidth": "var(--border-thin)",
+      "accentWidth": "0px"
+    },
+    "tooltip": {
+      "radius": "var(--radius-sm)",
+      "bg": "var(--color-text)",
+      "fg": "var(--color-bg)",
+      "fontSize": "var(--text-xs)",
+      "paddingX": "var(--space-3)",
+      "paddingY": "var(--space-2)",
+      "shadow": "var(--shadow-md)"
+    },
+    "toast": {
+      "radius": "var(--radius-lg)",
+      "padding": "var(--space-4)",
+      "shadow": "var(--shadow-lg)",
+      "width": "360px"
+    },
+    "dialog": {
+      "radius": "var(--radius-xl)",
+      "padding": "var(--space-8)",
+      "shadow": "var(--shadow-xl)",
+      "width": "480px",
+      "overlayBlur": "6px"
+    },
+    "progress": {
+      "height": "4px",
+      "radius": "var(--radius-full)"
+    },
+    "glass": {
+      "bg": "color-mix(in oklab, var(--color-surface-raised) 72%, transparent)",
+      "blur": "blur(20px) saturate(1.4)",
+      "border": "color-mix(in oklab, var(--color-border) 75%, transparent)",
+      "edge": "inset 0 1px 0 oklch(from var(--color-surface-raised) calc(l + 0.07) c h / 0.8)"
+    }
+  }
+}

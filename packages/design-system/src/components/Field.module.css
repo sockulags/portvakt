@@ -1,0 +1,109 @@
+.field {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  font-family: var(--font-sans);
+}
+
+.label {
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-snug);
+}
+
+.hint,
+.error {
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+}
+
+.hint {
+  color: var(--color-text-muted);
+}
+
+.error {
+  color: var(--color-danger);
+}
+
+.input {
+  width: 100%;
+  min-width: 0;
+  height: var(--input-height);
+  padding-inline: var(--input-padding-x);
+  border: var(--input-border-width) solid var(--input-border-color);
+  border-radius: var(--input-radius);
+  background: var(--input-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--input-font-size);
+  line-height: var(--leading-normal);
+  box-shadow: var(--input-shadow);
+  outline: none;
+  transition: var(--input-transition);
+}
+
+.input::placeholder {
+  color: var(--color-text-subtle);
+}
+
+.input:hover:not(:disabled, :focus, [readonly]),
+.input[data-force="hover"] {
+  border-color: var(--input-border-color-hover);
+}
+
+.input:focus-visible,
+.input[data-force="focus"] {
+  border-color: var(--color-focus-ring);
+  box-shadow: 0 0 0 var(--focus-ring-width) color-mix(in srgb, var(--color-focus-ring) 30%, transparent);
+}
+
+.input[aria-invalid="true"] {
+  border-color: var(--color-danger);
+}
+
+.input[aria-invalid="true"]:focus-visible,
+.input[aria-invalid="true"][data-force="focus"] {
+  box-shadow: 0 0 0 var(--focus-ring-width) color-mix(in srgb, var(--color-danger) 30%, transparent);
+}
+
+.input:disabled {
+  border-color: var(--color-border);
+  background: var(--color-disabled-bg);
+  color: var(--color-disabled-text);
+  cursor: not-allowed;
+}
+
+.input[readonly] {
+  border-color: var(--color-border);
+  background: var(--color-surface-sunken);
+}
+
+.textarea {
+  height: auto;
+  min-height: 88px;
+  padding-block: var(--space-2);
+  resize: vertical;
+}
+
+.selectWrap {
+  position: relative;
+  display: block;
+  color: var(--color-text-muted);
+}
+
+.select {
+  appearance: none;
+  padding-right: calc(var(--input-padding-x) + 20px);
+  cursor: pointer;
+}
+
+.chevron {
+  position: absolute;
+  top: 50%;
+  right: var(--input-padding-x);
+  width: 16px;
+  height: 16px;
+  translate: 0 -50%;
+  pointer-events: none;
+}

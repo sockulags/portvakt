@@ -1,0 +1,69 @@
+.layout {
+  display: grid;
+  container-type: inline-size;
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+.section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--space-4) var(--space-8);
+  padding-block: var(--space-6);
+  border-bottom: var(--border-thin) solid var(--color-border);
+}
+
+.section:first-child {
+  padding-top: 0;
+}
+
+@container (max-width: 640px) {
+  .section {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.intro {
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+}
+
+.description {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.fields {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-top: var(--space-5);
+}
+
+.note {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.buttons {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}

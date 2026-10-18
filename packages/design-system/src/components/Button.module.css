@@ -1,0 +1,173 @@
+.button {
+  --_bg: var(--color-primary);
+  --_bg-hover: var(--color-primary-hover);
+  --_bg-active: var(--color-primary-active);
+  --_fg: var(--color-on-primary);
+  --_border: transparent;
+  /* the insets are derived from the fill, so they read the same on a navy button in light mode
+     and a periwinkle one in dark mode: a slightly lighter top edge, a slightly darker bottom edge */
+  --_hl: oklch(from var(--_bg) calc(l + 0.08) c h);
+  --_hl-hover: oklch(from var(--_bg) calc(l + 0.12) c h);
+  --_edge: oklch(from var(--_bg) calc(l - 0.05) c h);
+  /* ring and drop shadow come from the tokens: the ring is tinted with the text colour (dark on light,
+     light on dark) so hover reads in both themes, the drop with the theme's overlay colour */
+  --_outer: var(--button-shadow);
+  --_outer-hover: var(--button-shadow-hover);
+  --_sink: color-mix(in oklab, var(--color-overlay) 35%, transparent);
+  --_ring-active: 0 0 0 1px color-mix(in oklab, var(--color-text) 6%, transparent);
+  --_shadow: inset 0 1px 1px var(--_hl), inset 0 -1px 2px var(--_edge), var(--_outer);
+  --_shadow-hover: inset 0 1px 1px var(--_hl-hover), inset 0 -1px 2px var(--_edge), var(--_outer-hover);
+  /* pressed: the highlight turns into a sunken inner shadow; same layer order so it animates */
+  --_shadow-active: inset 0 1px 4px var(--_sink), inset 0 0 0 transparent, var(--_ring-active), 0 0 0 transparent;
+  /* a lighter tint of the fill fading out, so the sheen never glares on a light fill in dark mode */
+  --_sheen: linear-gradient(oklch(from var(--_bg) calc(l + 0.08) c h / 0.5), oklch(from var(--_bg) l c h / 0));
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--button-gap);
+  height: var(--button-height-md);
+  padding-inline: var(--button-padding-x);
+  border: var(--button-border-width) solid var(--_border);
+  border-radius: var(--button-radius);
+  background-color: var(--_bg);
+  background-image: var(--_sheen);
+  /* paint the sheen across the transparent border too, or it tiles a 1px stripe at the edges */
+  background-origin: border-box;
+  color: var(--_fg);
+  font-family: var(--font-sans);
+  font-size: var(--button-font-size);
+  font-weight: var(--button-font-weight);
+  letter-spacing: var(--button-letter-spacing);
+  text-transform: var(--button-text-transform);
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: var(--_shadow);
+  cursor: pointer;
+  user-select: none;
+  transition: var(--button-transition);
+}
+
+.button[data-size="sm"] {
+  height: var(--button-height-sm);
+  padding-inline: calc(var(--button-padding-x) * 0.75);
+}
+
+.button[data-size="lg"] {
+  height: var(--button-height-lg);
+  padding-inline: calc(var(--button-padding-x) * 1.35);
+  font-size: var(--text-base);
+}
+
+.button[data-variant="secondary"] {
+  --_bg: var(--color-secondary);
+  --_bg-hover: var(--color-secondary-hover);
+  --_bg-active: var(--color-secondary-active);
+  --_fg: var(--color-on-secondary);
+  /* primary's layers, tuned for a fill close to the page: the ring uses the theme's border colours,
+     the drop and press stay lighter, and the sheen shades down instead of glowing */
+  --_outer: 0 0 0 1px color-mix(in oklab, var(--color-border), var(--color-border-strong) 30%), 0 1px 3px color-mix(in oklab, var(--color-overlay) 18%, transparent);
+  --_outer-hover: 0 0 0 1px color-mix(in oklab, var(--color-border), var(--color-border-strong) 55%), 0 2px 4px color-mix(in oklab, var(--color-overlay) 22%, transparent);
+  --_sink: color-mix(in oklab, var(--color-overlay) 22%, transparent);
+  --_ring-active: 0 0 0 1px color-mix(in oklab, var(--color-border), var(--color-border-strong) 55%);
+  --_sheen: linear-gradient(transparent, color-mix(in srgb, var(--color-shadow) 7.5%, transparent));
+}
+
+.button[data-variant="outline"] {
+  --_bg: transparent;
+  --_bg-hover: var(--color-secondary);
+  --_bg-active: var(--color-secondary-hover);
+  --_fg: var(--color-text);
+  --_border: var(--color-border-strong);
+  --_shadow: 0 1px 3px color-mix(in oklab, var(--color-overlay) 11%, transparent);
+  --_shadow-hover: 0 2px 6px color-mix(in oklab, var(--color-overlay) 18%, transparent);
+  --_shadow-active: inset 0 1px 3px color-mix(in oklab, var(--color-overlay) 22%, transparent);
+  --_sheen: none;
+}
+
+.button[data-variant="ghost"] {
+  --_bg: transparent;
+  --_bg-hover: var(--color-secondary);
+  --_bg-active: var(--color-secondary-active);
+  --_fg: var(--color-text);
+  --_shadow: none;
+  --_shadow-hover: none;
+  --_shadow-active: inset 0 1px 2px color-mix(in oklab, var(--color-overlay) 22%, transparent);
+  --_sheen: none;
+}
+
+.button[data-variant="danger"] {
+  --_bg: var(--color-danger);
+  --_bg-hover: var(--color-danger-hover);
+  --_bg-active: var(--color-danger-active);
+  --_fg: var(--color-on-danger);
+}
+
+.button:hover:not(:disabled, [data-loading]),
+.button[data-force="hover"] {
+  background-color: var(--_bg-hover);
+  box-shadow: var(--_shadow-hover);
+}
+
+.button:active:not(:disabled, [data-loading]),
+.button[data-force="active"] {
+  background-color: var(--_bg-active);
+  background-image: none;
+  box-shadow: var(--_shadow-active);
+  transform: scale(var(--button-press-scale));
+}
+
+.button:focus-visible,
+.button[data-force="focus"] {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.button:disabled {
+  background-color: var(--color-disabled-bg);
+  background-image: none;
+  color: var(--color-disabled-text);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.button[data-variant="outline"]:disabled {
+  background: transparent;
+  border-color: var(--color-border);
+}
+
+.button[data-variant="ghost"]:disabled {
+  background: transparent;
+}
+
+.button[data-loading] {
+  cursor: progress;
+}
+
+/* opacity, not visibility, so the label stays the button's accessible name while loading */
+.button[data-loading] .label {
+  opacity: 0;
+}
+
+.spinner {
+  position: absolute;
+  width: 1.1em;
+  height: 1.1em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin calc(var(--duration-slower) * 1.6) linear infinite;
+}
+
+.label {
+  display: inline-flex;
+  align-items: center;
+  gap: inherit;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

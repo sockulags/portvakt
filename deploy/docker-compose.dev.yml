@@ -1,0 +1,23 @@
+# Development and test database. Start with `npm run db:up`, stop with `npm run db:down`.
+name: portvakt-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: portvakt
+      POSTGRES_PASSWORD: portvakt
+      POSTGRES_DB: portvakt
+    ports:
+      - "5433:5432"
+    volumes:
+      - portvakt-pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portvakt -d portvakt"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  portvakt-pgdata:

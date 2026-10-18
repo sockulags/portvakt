@@ -1,0 +1,132 @@
+.list {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  gap: var(--tabs-gap);
+  font-family: var(--font-sans);
+}
+
+/* One shared indicator, positioned over the selected tab by Tabs.tsx and slid between tabs. */
+.indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.indicator[data-animate] {
+  transition: var(--tabs-indicator-transition);
+}
+
+.tab {
+  position: relative;
+  z-index: 1;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--tabs-font-weight);
+  line-height: var(--leading-snug);
+  cursor: pointer;
+  transition: var(--tabs-transition);
+}
+
+.tab:hover:not(:disabled),
+.tab[data-force="hover"] {
+  color: var(--color-text);
+}
+
+.tab[aria-selected="true"] {
+  color: var(--color-text);
+}
+
+.tab:focus-visible,
+.tab[data-force="focus"] {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: calc(var(--focus-ring-width) * -1);
+  border-radius: var(--tabs-radius);
+}
+
+.tab:disabled {
+  color: var(--color-disabled-text);
+  cursor: not-allowed;
+}
+
+/* underline */
+
+.list[data-variant="underline"] {
+  border-bottom: var(--border-thin) solid var(--color-border);
+}
+
+.list[data-variant="underline"] .tab::after {
+  content: "";
+  position: absolute;
+  inset: auto var(--space-2) calc(var(--border-thin) * -1);
+  height: var(--tabs-indicator-height);
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  transform: scaleX(0);
+  transition: transform var(--duration-base) var(--ease-emphasized);
+}
+
+.list[data-variant="underline"] .tab:hover:not(:disabled, [aria-selected="true"])::after,
+.list[data-variant="underline"] .tab[data-force="hover"]:not([aria-selected="true"])::after {
+  background: var(--color-border-strong);
+  transform: scaleX(1);
+}
+
+.list[data-variant="underline"] .indicator::after {
+  content: "";
+  position: absolute;
+  inset: auto var(--space-2) calc(var(--border-thin) * -1);
+  height: var(--tabs-indicator-height);
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+}
+
+/* pill */
+
+.list[data-variant="pill"] .tab {
+  border-radius: var(--tabs-radius);
+}
+
+.list[data-variant="pill"] .tab:hover:not(:disabled, [aria-selected="true"]),
+.list[data-variant="pill"] .tab[data-force="hover"]:not([aria-selected="true"]) {
+  background: var(--color-secondary);
+}
+
+.list[data-variant="pill"] .tab[aria-selected="true"] {
+  color: var(--color-primary);
+}
+
+.list[data-variant="pill"] .indicator {
+  border-radius: var(--tabs-radius);
+  background: var(--color-primary-subtle);
+}
+
+/* segmented */
+
+.list[data-variant="segmented"] {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: calc(var(--tabs-radius) + 3px);
+  background: var(--color-surface-sunken);
+}
+
+.list[data-variant="segmented"] .tab {
+  border-radius: var(--tabs-radius);
+}
+
+.list[data-variant="segmented"] .tab:hover:not(:disabled, [aria-selected="true"]),
+.list[data-variant="segmented"] .tab[data-force="hover"]:not([aria-selected="true"]) {
+  background: color-mix(in srgb, var(--color-surface) 50%, transparent);
+}
+
+.list[data-variant="segmented"] .indicator {
+  border-radius: var(--tabs-radius);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-xs);
+}

@@ -1,0 +1,11 @@
+node_modules
+dist
+coverage
+playwright-report
+test-results
+package-lock.json
+# Delivered design system: kept byte-for-byte as generated.
+packages/design-system/src
+packages/design-system/README.md
+# Owner-authored plan: not reformatted.
+docs/plan.md

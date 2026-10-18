@@ -1,0 +1,239 @@
+/* Tone palette shared by badge, alert, status icon and avatar */
+
+[data-color="neutral"] {
+  --_solid: var(--color-text);
+  --_on: var(--color-bg);
+  --_subtle: var(--color-secondary);
+  --_strong: var(--color-text);
+}
+[data-color="primary"] {
+  --_solid: var(--color-primary);
+  --_on: var(--color-on-primary);
+  --_subtle: var(--color-primary-subtle);
+  --_strong: var(--color-primary);
+}
+[data-color="info"] {
+  --_solid: var(--color-info);
+  --_on: var(--color-on-info);
+  --_subtle: var(--color-info-subtle);
+  --_strong: var(--color-info-strong);
+}
+[data-color="success"] {
+  --_solid: var(--color-success);
+  --_on: var(--color-on-success);
+  --_subtle: var(--color-success-subtle);
+  --_strong: var(--color-success-strong);
+}
+[data-color="warning"] {
+  --_solid: var(--color-warning);
+  --_on: var(--color-on-warning);
+  --_subtle: var(--color-warning-subtle);
+  --_strong: var(--color-warning-strong);
+}
+[data-color="danger"] {
+  --_solid: var(--color-danger);
+  --_on: var(--color-on-danger);
+  --_subtle: var(--color-danger-subtle);
+  --_strong: var(--color-danger-strong);
+}
+
+/* Badge */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--badge-height);
+  padding-inline: var(--badge-padding-x);
+  border: var(--border-thin) solid transparent;
+  border-radius: var(--badge-radius);
+  font-family: var(--font-sans);
+  font-size: var(--badge-font-size);
+  font-weight: var(--badge-font-weight);
+  letter-spacing: var(--badge-letter-spacing);
+  text-transform: var(--badge-text-transform);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.badge[data-variant="soft"] {
+  background: var(--_subtle);
+  color: var(--_strong);
+}
+
+.badge[data-variant="solid"] {
+  background: var(--_solid);
+  color: var(--_on);
+}
+
+.badge[data-variant="outline"] {
+  border-color: color-mix(in srgb, var(--_solid) 55%, transparent);
+  color: var(--_strong);
+}
+
+/* Status icon */
+
+.statusIcon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+}
+
+.statusIcon circle {
+  fill: var(--_solid);
+}
+
+.statusIcon g {
+  stroke: var(--_on);
+}
+
+/* Alert */
+
+.alert {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--alert-padding);
+  border: var(--alert-border-width) solid color-mix(in srgb, var(--_solid) 28%, transparent);
+  border-radius: var(--alert-radius);
+  background: var(--_subtle);
+  box-shadow: inset var(--alert-accent-width) 0 0 var(--_solid);
+  font-family: var(--font-sans);
+}
+
+.alertTitle {
+  margin: 0;
+  color: var(--_strong);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+}
+
+.alertBody {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+/* Card */
+
+.card {
+  padding: var(--card-padding);
+  border: var(--card-border-width) solid var(--glass-border);
+  border-radius: var(--card-radius);
+  background: var(--card-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--card-shadow);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  transition: var(--card-transition);
+}
+
+.card[data-interactive] {
+  cursor: pointer;
+  outline: none;
+}
+
+.card[data-interactive]:hover,
+.card[data-force="hover"] {
+  box-shadow: var(--card-shadow-hover);
+  transform: translateY(var(--card-lift-hover));
+}
+
+.card[data-interactive]:focus-visible,
+.card[data-force="focus"] {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.card[data-selected] {
+  border-color: var(--color-primary);
+  box-shadow:
+    0 0 0 1px var(--color-primary),
+    var(--card-shadow);
+}
+
+/* Progress, spinner, skeleton */
+
+.progress {
+  position: relative;
+  overflow: hidden;
+  height: var(--progress-height);
+  border-radius: var(--progress-radius);
+  background: var(--color-surface-sunken);
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
+  transition: width var(--duration-slow) var(--ease-standard);
+}
+
+.progress[data-indeterminate] .progressFill {
+  position: absolute;
+  width: 40%;
+  animation: slide calc(var(--duration-slower) * 3) var(--ease-standard) infinite;
+}
+
+.spinner {
+  display: inline-block;
+  border: 2px solid var(--color-surface-sunken);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin calc(var(--duration-slower) * 1.6) linear infinite;
+}
+
+.skeleton {
+  display: block;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in srgb, var(--color-surface) 70%, transparent) 50%,
+      transparent 100%
+    )
+    var(--color-surface-sunken);
+  background-size: 200% 100%;
+  animation: shimmer calc(var(--duration-slower) * 3) linear infinite;
+}
+
+/* Avatar */
+
+.avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-full);
+  background: var(--_subtle);
+  color: var(--_strong);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes slide {
+  from {
+    left: -40%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}

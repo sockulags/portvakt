@@ -1,0 +1,227 @@
+/* Tooltip */
+
+.tooltipAnchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.tooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  z-index: 2;
+  padding: var(--tooltip-padding-y) var(--tooltip-padding-x);
+  border-radius: var(--tooltip-radius);
+  background: var(--tooltip-bg);
+  box-shadow: var(--tooltip-shadow);
+  color: var(--tooltip-fg);
+  font-family: var(--font-sans);
+  font-size: var(--tooltip-font-size);
+  line-height: var(--leading-snug);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  translate: -50% 4px;
+  transition:
+    opacity var(--duration-fast) var(--ease-exit),
+    translate var(--duration-fast) var(--ease-exit);
+}
+
+.tooltip::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  border: 5px solid transparent;
+  border-top-color: var(--tooltip-bg);
+  translate: -50% 0;
+}
+
+.tooltipAnchor[data-open] .tooltip,
+.tooltipAnchor:hover .tooltip,
+.tooltipAnchor:focus-within .tooltip {
+  opacity: 1;
+  translate: -50% 0;
+  transition:
+    opacity var(--duration-base) var(--ease-enter) var(--duration-fast),
+    translate var(--duration-base) var(--ease-enter) var(--duration-fast);
+}
+
+.tooltipAnchor[data-open] .tooltip {
+  transition: none;
+}
+
+/* Toast */
+
+.toast {
+  display: flex;
+  gap: var(--space-3);
+  width: min(100%, var(--toast-width));
+  padding: var(--toast-padding);
+  border: var(--border-thin) solid var(--glass-border);
+  border-radius: var(--toast-radius);
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-edge), var(--toast-shadow);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+.toastText {
+  flex: 1;
+  min-width: 0;
+}
+
+.toastTitle {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+}
+
+.toastBody {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.toastAction {
+  margin-top: var(--space-3);
+}
+
+.close {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-subtle);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.close:hover {
+  background: var(--color-secondary);
+  color: var(--color-text);
+}
+
+.close:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.close svg {
+  width: 14px;
+  height: 14px;
+}
+
+.enter {
+  animation: toastIn var(--duration-slow) var(--ease-spring) both;
+}
+
+.exit {
+  animation: toastOut var(--duration-base) var(--ease-exit) both;
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.96);
+  }
+}
+
+@keyframes toastOut {
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+/* Dialog */
+
+.stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 320px;
+  padding: var(--space-6);
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  /* soft glows from the roles give the frosted dialog something to blur, in either theme */
+  background:
+    radial-gradient(circle at 22% 28%, color-mix(in oklab, var(--color-accent) 30%, transparent), transparent 45%),
+    radial-gradient(circle at 78% 72%, color-mix(in oklab, var(--color-warning) 26%, transparent), transparent 45%),
+    repeating-linear-gradient(135deg, transparent 0 14px, var(--color-border) 14px 15px),
+    var(--color-bg);
+}
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--color-overlay);
+  backdrop-filter: blur(var(--dialog-overlay-blur));
+}
+
+.dialog {
+  position: relative;
+  width: min(100%, var(--dialog-width));
+  padding: var(--dialog-padding);
+  border: var(--border-thin) solid var(--glass-border);
+  border-radius: var(--dialog-radius);
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-edge), var(--dialog-shadow);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+.dialogTitle {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-tight);
+}
+
+.dialogBody {
+  margin-top: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+}
+
+.dialogFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-6);
+}
+
+.animate .scrim {
+  animation: fadeIn var(--duration-base) var(--ease-standard) both;
+}
+
+.animate .dialog {
+  animation: dialogIn var(--duration-slow) var(--ease-emphasized) both;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes dialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+}

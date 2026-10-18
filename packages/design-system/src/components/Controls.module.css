@@ -1,0 +1,167 @@
+.control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  cursor: pointer;
+  user-select: none;
+}
+
+.control:has(.native:disabled) {
+  color: var(--color-disabled-text);
+  cursor: not-allowed;
+}
+
+.native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Checkbox and radio box */
+
+.box {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: var(--control-size);
+  height: var(--control-size);
+  border: var(--input-border-width) solid var(--input-border-color);
+  border-radius: var(--control-radius);
+  background: var(--input-bg);
+  color: var(--color-on-primary);
+  transition: var(--control-transition);
+}
+
+.radio .box {
+  border-radius: 50%;
+}
+
+.check,
+.dash {
+  grid-area: 1 / 1;
+  width: 80%;
+  height: 80%;
+  opacity: 0;
+  transform: scale(0.5);
+  transition:
+    opacity var(--duration-fast) var(--ease-standard),
+    transform var(--duration-base) var(--ease-spring);
+}
+
+.radio .box::after {
+  content: "";
+  width: 40%;
+  height: 40%;
+  border-radius: 50%;
+  background: currentColor;
+  transform: scale(0);
+  transition: transform var(--duration-base) var(--ease-spring);
+}
+
+.control:hover .native:not(:disabled) + .box,
+.control[data-force="hover"] .box {
+  border-color: var(--input-border-color-hover);
+}
+
+.native:checked + .box,
+.native[type="checkbox"]:indeterminate + .box {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+}
+
+.control:hover .native:is(:checked, [type="checkbox"]:indeterminate):not(:disabled) + .box,
+.control[data-force="hover"] .native:is(:checked, [type="checkbox"]:indeterminate) + .box {
+  border-color: var(--color-primary-hover);
+  background: var(--color-primary-hover);
+}
+
+.native:checked:not([type="checkbox"]:indeterminate) + .box .check,
+.native[type="checkbox"]:indeterminate + .box .dash {
+  opacity: 1;
+  transform: none;
+}
+
+.radio .native:checked + .box::after {
+  transform: scale(1);
+}
+
+.native:focus-visible + .box,
+.native:focus-visible + .track,
+.control[data-force="focus"] .box,
+.control[data-force="focus"] .track {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.native:disabled + .box {
+  border-color: var(--color-border);
+  background: var(--color-disabled-bg);
+  color: var(--color-disabled-text);
+}
+
+/* Switch */
+
+.track {
+  position: relative;
+  flex: none;
+  width: var(--control-switch-width);
+  height: var(--control-switch-height);
+  border: var(--input-border-width) solid var(--input-border-color);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-sunken);
+  transition: var(--control-transition);
+}
+
+.thumb {
+  position: absolute;
+  top: 50%;
+  left: var(--control-thumb-inset);
+  width: calc(var(--control-switch-height) - 2 * var(--control-thumb-inset) - 2 * var(--input-border-width));
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: var(--color-text-subtle);
+  box-shadow: var(--shadow-xs);
+  translate: 0 -50%;
+  transition: var(--control-transition);
+}
+
+.control:hover .native:not(:disabled) + .track,
+.control[data-force="hover"] .track {
+  border-color: var(--input-border-color-hover);
+}
+
+.native:checked + .track {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+}
+
+.control:hover .native:checked:not(:disabled) + .track,
+.control[data-force="hover"] .native:checked + .track {
+  border-color: var(--color-primary-hover);
+  background: var(--color-primary-hover);
+}
+
+.native:checked + .track .thumb {
+  background: var(--color-on-primary);
+  transform: translateX(
+    calc(var(--control-switch-width) - var(--control-switch-height))
+  );
+}
+
+.native:disabled + .track {
+  border-color: var(--color-border);
+  background: var(--color-disabled-bg);
+}
+
+.native:disabled + .track .thumb {
+  background: var(--color-disabled-text);
+  box-shadow: none;
+}
