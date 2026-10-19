@@ -20,9 +20,12 @@ import type { LoginContext } from "./login-context.js";
  * | `pin`                 | with `pin`, if the app may     | never        |
  * | `hsa_id`, `org_affiliation` | with `hsa`, if the app may | never        |
  * | `protected_identity`  | `true` for a protected person  | never        |
+ * | `rep`                 | `{ sub, type, name }`          | `{ sub, type }` |
  *
- * `sub` is always the signed-in person (also when representing; `rep` arrives with M4) and is
- * set by oidc-provider from the account id (the person UUID). In ID tokens oidc-provider sets
+ * `sub` is always the signed-in person (also when representing) and is set by oidc-provider
+ * from the account id (the person UUID). `rep` is the party the grant's login acts for, only
+ * for an application whose representation mode is not `none`; its `name` is ID token only and
+ * never issued for a person party with a protected identity. In ID tokens oidc-provider sets
  * `acr`, `amr` and `auth_time` from the grant's login; for access tokens the contributors below
  * add `acr` and `auth_time`.
  *
@@ -42,6 +45,7 @@ export const CLAIMS_BY_SCOPE = {
     "roles",
     "attrs",
     "protected_identity",
+    "rep",
   ],
   profile: ["name"],
   email: ["email"],
@@ -146,6 +150,29 @@ const hsaClaims: ClaimContributor = (request, sources) => {
   };
 };
 
+/**
+ * `rep`: the party this grant acts for (chosen in the representation chooser), when the
+ * audience application offers representation. Access tokens carry `{ sub, type }` only (data
+ * minimisation); ID tokens add `name`, except for a person party with a protected identity.
+ * The right itself is re-checked at every refresh and re-authorization (provider.ts).
+ */
+const representationClaims: ClaimContributor = async (request, sources, repos) => {
+  const choice = request.login.representation;
+  if (choice?.type !== "party") return {};
+  if (sources.audience === null || sources.audience.representationMode === "none") return {};
+  const party = await repos.parties.findById(request.tenant.id, choice.partyId);
+  if (party === null) return {};
+  const rep: Claims = { sub: party.id, type: party.type };
+  if (userInformation(request)) {
+    const hidden =
+      party.protectedIdentity ||
+      (party.type === "person" &&
+        (await repos.persons.isProtectedByPin(request.tenant.id, party.identifier)));
+    if (!hidden) rep.name = party.displayName;
+  }
+  return { rep };
+};
+
 /** `protected_identity: true` (ID token only) when the person is protected. */
 const protectedIdentityClaims: ClaimContributor = (request, sources) =>
   userInformation(request) && sources.person?.protectedIdentity === true
@@ -160,6 +187,7 @@ const CONTRIBUTORS: readonly ClaimContributor[] = [
   pinClaims,
   hsaClaims,
   protectedIdentityClaims,
+  representationClaims,
 ];
 
 export class ClaimsService {

@@ -54,6 +54,8 @@ const STATUS_BY_CODE: Readonly<Record<InteractionError["code"], number>> = {
   interaction_not_found: 404,
   person_not_found: 403,
   login_method_unavailable: 403,
+  wrong_prompt: 409,
+  step_up_person_mismatch: 403,
 };
 
 function interactionContext(req: Request, res: Response): InteractionContext {

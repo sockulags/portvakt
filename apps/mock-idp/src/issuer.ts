@@ -26,6 +26,8 @@ interface IssuerPersona {
   readonly detail: string;
   readonly subject: string;
   readonly email: string | undefined;
+  /** Personal identity number (citizens): `login_hint` with it signs the persona in. */
+  readonly pin: string | undefined;
   readonly maxAcr: string | undefined;
   readonly claims: () => Record<string, unknown>;
 }
@@ -37,6 +39,7 @@ function employeePersona(employee: Employee): IssuerPersona {
     detail: employee.groupsOverage ? `${employee.email} (groups overage)` : employee.email,
     subject: employee.oid,
     email: employee.email,
+    pin: undefined,
     maxAcr: undefined,
     claims: () => ({
       sub: employee.oid,
@@ -68,6 +71,7 @@ function citizenPersona(citizen: Citizen): IssuerPersona {
     } ${citizen.acr.split("/").at(-1) ?? ""}`,
     subject: citizen.sub,
     email: undefined,
+    pin: citizen.pin,
     maxAcr: citizen.acr,
     claims: () => ({
       sub: citizen.sub,
@@ -140,7 +144,8 @@ const AMR: Record<IssuerKind, string[]> = {
  * One mock upstream IdP (`{publicUrl}/{kind}`) built on oidc-provider: code flow with PKCE,
  * client_secret_basic / client_secret_post / private_key_jwt client authentication, userinfo,
  * and a login page listing the personas. `login_hint` with a persona id (or an employee's
- * email) signs that persona in without the page; `login_hint=cancel` answers `access_denied`.
+ * email, or a citizen's personal identity number) signs that persona in without the page;
+ * `login_hint=cancel` answers `access_denied`.
  */
 export async function createMockIssuer(options: {
   readonly kind: IssuerKind;
@@ -371,7 +376,9 @@ export async function createMockIssuer(options: {
   const byHint = (hint: unknown): IssuerPersona | "cancel" | undefined => {
     if (typeof hint !== "string") return undefined;
     if (hint === "cancel") return "cancel";
-    return personas.find((persona) => persona.id === hint || persona.email === hint);
+    return personas.find(
+      (persona) => persona.id === hint || persona.email === hint || persona.pin === hint,
+    );
   };
 
   router.get("/interaction/:uid", (req, res, next) => {

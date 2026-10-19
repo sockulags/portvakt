@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { auditEvent } from "../../audit/catalogue.js";
 import { certificateInfo, generateSelfSignedKeyPair } from "../../crypto/x509.js";
 import {
   createSamlLoginMethodInputSchema,
@@ -196,13 +197,15 @@ export class SamlLoginMethodAdmin {
   /** Audits the decision to use unsigned metadata (on every save that makes or keeps it). */
   async #auditUnsigned(method: SamlLoginMethod, actor: AdminActor): Promise<void> {
     if (!method.saml.allowUnsignedMetadata) return;
-    await this.#options.repos.audit.append({
-      tenantId: method.tenantId,
-      actor,
-      subject: { type: "login_method", id: method.id },
-      action: "login_method.saml_unsigned_metadata_allowed",
-      details: { loginMethodId: method.id },
-    });
+    await this.#options.repos.audit.append(
+      auditEvent({
+        tenantId: method.tenantId,
+        actor,
+        subject: { type: "login_method", id: method.id },
+        action: "login_method.saml_unsigned_metadata_allowed",
+        details: { loginMethodId: method.id },
+      }),
+    );
   }
 
   /**

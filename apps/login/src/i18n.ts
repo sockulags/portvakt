@@ -29,6 +29,19 @@ export interface Messages {
     readonly or: string;
   };
   readonly redirecting: { readonly title: string; readonly body: string };
+  readonly representation: {
+    readonly heading: string;
+    readonly intro: string;
+    readonly listLabel: string;
+    readonly self: string;
+    readonly selfDetail: string;
+    readonly chooseSelf: string;
+    readonly choose: string;
+    readonly types: Readonly<Record<"person" | "organisation", string>>;
+    readonly organisationNumber: string;
+    readonly personalNumber: string;
+    readonly continuing: string;
+  };
   readonly cancel: string;
   readonly retry: string;
   readonly errorCode: string;
@@ -66,6 +79,19 @@ const sv: Messages = {
   redirecting: {
     title: "Du skickas vidare …",
     body: "Vänta medan vi öppnar inloggningen.",
+  },
+  representation: {
+    heading: "Välj vem du företräder",
+    intro: "Välj om du vill använda {app} för din egen räkning eller som ombud.",
+    listLabel: "Vem du kan företräda",
+    self: "Mig själv",
+    selfDetail: "För din egen räkning",
+    chooseSelf: "Fortsätt som mig själv",
+    choose: "Företräd {name}",
+    types: { person: "Privatperson", organisation: "Organisation" },
+    organisationNumber: "Organisationsnummer {value}",
+    personalNumber: "Personnummer {value}",
+    continuing: "Du skickas vidare till tjänsten …",
   },
   cancel: "Avbryt och gå tillbaka",
   retry: "Försök igen",
@@ -129,6 +155,18 @@ const sv: Messages = {
       body: "Börja om från tjänsten.",
     },
     state_expired: { title: "Inloggningen tog för lång tid", body: "Försök igen." },
+    no_representation_available: {
+      title: "Du kan inte företräda någon här",
+      body: "Tjänsten kräver att du loggar in som ombud, men du har ingen giltig behörighet för den. Kontakta den du ska företräda eller tjänstens support.",
+    },
+    representation_not_allowed: {
+      title: "Valet kan inte användas",
+      body: "Behörigheten gäller inte längre. Välj igen.",
+    },
+    step_up_person_mismatch: {
+      title: "En annan person legitimerade sig",
+      body: "Tjänsten kräver att samma person som redan är inloggad legitimerar sig igen. Du är fortfarande inloggad som tidigare.",
+    },
     request_failed: { title: "Något gick fel", body: "Försök igen senare." },
   },
   logout: {
@@ -162,6 +200,19 @@ const en: Messages = {
     or: "or",
   },
   redirecting: { title: "Redirecting you …", body: "Please wait while we open the sign-in." },
+  representation: {
+    heading: "Choose whom you represent",
+    intro: "Choose whether you use {app} on your own behalf or as a representative.",
+    listLabel: "Whom you can represent",
+    self: "Myself",
+    selfDetail: "On your own behalf",
+    chooseSelf: "Continue as myself",
+    choose: "Represent {name}",
+    types: { person: "Private individual", organisation: "Organisation" },
+    organisationNumber: "Organisation number {value}",
+    personalNumber: "Personal identity number {value}",
+    continuing: "Taking you to the service …",
+  },
   cancel: "Cancel and go back",
   retry: "Try again",
   errorCode: "Error code: {code}",
@@ -224,6 +275,18 @@ const en: Messages = {
       body: "Start again from the service.",
     },
     state_expired: { title: "The sign-in took too long", body: "Please try again." },
+    no_representation_available: {
+      title: "You cannot represent anyone here",
+      body: "The service requires you to sign in as a representative, but you have no valid authorisation for it. Contact the party you represent or the service's support.",
+    },
+    representation_not_allowed: {
+      title: "That choice cannot be used",
+      body: "The authorisation is no longer valid. Please choose again.",
+    },
+    step_up_person_mismatch: {
+      title: "Another person signed in",
+      body: "The service requires the person who is already signed in to identify again. You are still signed in as before.",
+    },
     request_failed: { title: "Something went wrong", body: "Please try again later." },
   },
   logout: {

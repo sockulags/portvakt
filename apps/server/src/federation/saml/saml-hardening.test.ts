@@ -173,7 +173,8 @@ describe.skipIf(ts === undefined)("SAML hardening", () => {
       // Another person's NameID ends nothing.
       const other = await freja.initiateLogout(entity, { nameId: "freja-nameid-8e1b3d5f7a9c2046" });
       expect((await driver.browser.request(other)).status).toBe(303);
-      expect((await audits(w.tenant, "logout.idp_initiated"))[0]?.details).toMatchObject({
+      expect((await audits(w.tenant, "session.logout"))[0]?.details).toMatchObject({
+        initiator: "idp",
         sessions: 0,
       });
       expect(await sessionAlive(w, driver)).toBe(true);
@@ -414,6 +415,10 @@ describe.skipIf(ts === undefined)("SAML hardening", () => {
         prompt: "login",
         reasons: [],
         clientId: w.app.application.clientId,
+        sessionAccountId: undefined,
+        sessionUid: undefined,
+        sessionAcr: undefined,
+        stepUp: false,
         params: {
           acrValues: undefined,
           loginHint: undefined,

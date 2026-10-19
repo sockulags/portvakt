@@ -1,7 +1,11 @@
 import { z } from "zod";
+import type { Db } from "../db/database.js";
+import type { AuditEvent } from "../domain/audit.js";
 import { LOGIN_METHOD_KINDS } from "../domain/login-method.js";
+import { representationChoiceSchema, type RepresentationChoice } from "../domain/representation.js";
+import { AuditRepository } from "../repositories/audit.js";
 import { upstreamSessionSchema } from "../repositories/federation-states.js";
-import type { OidcPayloadRepository } from "../repositories/oidc-payloads.js";
+import { OidcPayloadRepository } from "../repositories/oidc-payloads.js";
 
 /**
  * What Portvakt knows about a broker session and its logins beyond oidc-provider's own Session
@@ -15,7 +19,9 @@ import type { OidcPayloadRepository } from "../repositories/oidc-payloads.js";
  *   for. Claims and token lifetimes of that application read it, so a fresh login for another
  *   application in the same browser never changes this application's claims at its next refresh.
  *
- * M4 extends the grant login with representation.
+ * The grant login also holds the representation the grant was issued with (`representation`,
+ * chosen per application grant, never per browser session), re-checked at every refresh and at
+ * every authorization that reuses the grant.
  */
 
 const acrSchema = z.string().min(1).max(255);
@@ -71,6 +77,11 @@ export const loginContextSchema = z
     clientId: z.string().min(1).max(128),
     /** oidc-provider session uid the grant was issued in. */
     sessionUid: z.string().min(1).max(512),
+    /**
+     * The representation chosen for this grant; absent when the application does not offer
+     * representation or the person had nothing to choose (acting for themselves).
+     */
+    representation: representationChoiceSchema.optional(),
   })
   .strict();
 /** The login an application's grant was issued for: what its claims and lifetimes follow. */
@@ -78,12 +89,20 @@ export type LoginContext = z.infer<typeof loginContextSchema>;
 
 /** What `completeLogin` hands over to the authorization resume, through the interaction result. */
 export const pendingLoginSchema = z
-  .object({ loginMethodId: z.uuid(), upstream: upstreamSessionSchema.optional() })
+  .object({
+    loginMethodId: z.uuid(),
+    upstream: upstreamSessionSchema.optional(),
+    /** The login was a step-up of the session's person (same person, higher acr or fresher). */
+    stepUp: z.object({ previousAcr: acrSchema.optional() }).strict().optional(),
+  })
   .strict();
 export type PendingLogin = z.infer<typeof pendingLoginSchema>;
 
 /** Key of the pending login in the interaction result (next to oidc-provider's `login`). */
 export const PENDING_LOGIN_RESULT_KEY = "portvakt";
+
+/** Key of the representation chosen in the chooser, in the interaction result. */
+export const REPRESENTATION_RESULT_KEY = "portvakt_representation";
 
 /** oidc_payloads kinds; distinct from every oidc-provider model name. */
 export const SESSION_RECORD_KIND = "PortvaktSession";
@@ -103,13 +122,18 @@ const ttlUntil = (end: number): number => Math.max(1, end - epochNow());
 const validId = (id: string | undefined): id is string =>
   id !== undefined && id.length > 0 && id.length <= MAX_ID_LENGTH;
 
+/** Audit writes that commit together with a login state change (success events). */
+export type AuditWrites = (audit: AuditRepository) => Promise<readonly AuditEvent[]>;
+
 export class LoginStateStore {
   readonly #tenantId: string;
+  readonly #db: Db;
   readonly #payloads: OidcPayloadRepository;
 
-  constructor(tenantId: string, payloads: OidcPayloadRepository) {
+  constructor(tenantId: string, db: Db) {
     this.#tenantId = tenantId;
-    this.#payloads = payloads;
+    this.#db = db;
+    this.#payloads = new OidcPayloadRepository(db);
   }
 
   /**
@@ -218,7 +242,43 @@ export class LoginStateStore {
    * fails at the token endpoint, and a code replay must not race the legitimate redemption.
    */
   async saveGrantLogin(grantId: string, login: LoginContext): Promise<void> {
-    await this.#payloads.upsert(
+    await this.#saveGrantLogin(this.#payloads, grantId, login);
+  }
+
+  /**
+   * Stores a grant's login and writes `audit` events in the same transaction (the success
+   * events of what the grant login commits: a representation choice, a step-up). Returns the
+   * events written, for the audit sink once committed.
+   */
+  async saveGrantLoginAudited(
+    grantId: string,
+    login: LoginContext,
+    audit: AuditWrites,
+  ): Promise<readonly AuditEvent[]> {
+    return this.#db.transaction(async (tx) => {
+      await this.#saveGrantLogin(new OidcPayloadRepository(tx), grantId, login);
+      return audit(new AuditRepository(tx));
+    });
+  }
+
+  /**
+   * Revokes an application's grant (its tokens and the grant itself) and writes the audit event
+   * of the revocation in the same transaction. Returns the events written.
+   */
+  async revokeGrantAudited(grantId: string, audit: AuditWrites): Promise<readonly AuditEvent[]> {
+    if (!validId(grantId)) return [];
+    return this.#db.transaction(async (tx) => {
+      await new OidcPayloadRepository(tx).revokeGrant(this.#tenantId, grantId);
+      return audit(new AuditRepository(tx));
+    });
+  }
+
+  async #saveGrantLogin(
+    payloads: OidcPayloadRepository,
+    grantId: string,
+    login: LoginContext,
+  ): Promise<void> {
+    await payloads.upsert(
       this.#tenantId,
       GRANT_LOGIN_KIND,
       grantId,
@@ -256,4 +316,24 @@ export function rememberLoginContext(ctx: object, context: LoginContext): void {
 
 export function rememberedLoginContext(ctx: object | undefined): LoginContext | undefined {
   return ctx === undefined ? undefined : loginPerRequest.get(ctx);
+}
+
+/** The representation decided for the authorization of this request (select_account prompt). */
+export interface RepresentationDecision {
+  /** `undefined`: the application offers no representation or there was nothing to choose. */
+  readonly choice: RepresentationChoice | undefined;
+  /** The choice was made in the chooser of this authorization (audited when the grant saves). */
+  readonly selected: boolean;
+}
+
+const representationPerRequest = new WeakMap<object, RepresentationDecision>();
+
+export function rememberRepresentation(ctx: object, decision: RepresentationDecision): void {
+  representationPerRequest.set(ctx, decision);
+}
+
+export function rememberedRepresentation(
+  ctx: object | undefined,
+): RepresentationDecision | undefined {
+  return ctx === undefined ? undefined : representationPerRequest.get(ctx);
 }

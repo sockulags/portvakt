@@ -521,6 +521,10 @@ describe.skipIf(ts === undefined)("SAML upstream (Swedish eID Framework)", () =>
         prompt: "login",
         reasons: [],
         clientId: w.app.application.clientId,
+        sessionAccountId: undefined,
+        sessionUid: undefined,
+        sessionAcr: undefined,
+        stepUp: false,
         params: {
           acrValues: undefined,
           loginHint: undefined,
@@ -703,7 +707,8 @@ describe.skipIf(ts === undefined)("SAML upstream (Swedish eID Framework)", () =>
       );
       await expect(client.refreshTokenGrant(w.config, tokens.refresh_token!)).rejects.toThrow();
       await expectNoSession(w, driver);
-      expect((await audits(w.tenant, "logout.idp_initiated"))[0]?.details).toMatchObject({
+      expect((await audits(w.tenant, "session.logout"))[0]?.details).toMatchObject({
+        initiator: "idp",
         loginMethodId: method.id,
         sessions: 1,
       });

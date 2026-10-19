@@ -5,6 +5,13 @@ import { displayNameSchema } from "./schemas.js";
 export const PARTY_TYPES = ["person", "organisation"] as const;
 export type PartyType = (typeof PARTY_TYPES)[number];
 
+/**
+ * Where representation rights come from (`RepresentationSource`). v1 has Portvakt's own
+ * register; Bolagsverket and Mina ombud are later sources.
+ */
+export const REPRESENTATION_SOURCE_IDS = ["internal"] as const;
+export type RepresentationSourceId = (typeof REPRESENTATION_SOURCE_IDS)[number];
+
 /** Someone an agent can act for: a person or an organisation. */
 export interface Party {
   readonly id: string;
@@ -16,6 +23,12 @@ export interface Party {
    */
   readonly identifier: string;
   readonly displayName: string;
+  /**
+   * A person party with a protected identity (skyddad identitet), set by an administrator:
+   * its name is never issued in `rep` and the chooser shows no identifier. A party whose
+   * personal identity number belongs to a protected person of the tenant is treated the same.
+   */
+  readonly protectedIdentity: boolean;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -47,6 +60,11 @@ export const createPartyInputSchema = z
     type: z.enum(PARTY_TYPES),
     identifier: z.string().trim().min(1).max(100),
     displayName: displayNameSchema,
+    protectedIdentity: z.boolean().default(false),
+  })
+  .refine((party) => party.type === "person" || !party.protectedIdentity, {
+    message: "only a person party can have a protected identity",
+    path: ["protectedIdentity"],
   })
   .transform((party, ctx) => {
     const schema = party.type === "person" ? personnummerSchema : organisationsnummerSchema;
@@ -97,3 +115,21 @@ export const createGrantInputSchema = z
     { message: "validTo must be after validFrom", path: ["validTo"] },
   );
 export type CreateGrantInput = z.input<typeof createGrantInputSchema>;
+
+/**
+ * The representation an application's grant was issued with (stored in the grant login,
+ * `PortvaktGrantLogin`): the person acts for themselves, or for a party. Ids and codes only.
+ */
+export const representationChoiceSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("self") }).strict(),
+  z
+    .object({
+      type: z.literal("party"),
+      partyId: z.uuid(),
+      partyType: z.enum(PARTY_TYPES),
+      /** The sources that attested the right when it was chosen or last checked. */
+      sources: z.array(z.enum(REPRESENTATION_SOURCE_IDS)).min(1).max(8),
+    })
+    .strict(),
+]);
+export type RepresentationChoice = z.infer<typeof representationChoiceSchema>;

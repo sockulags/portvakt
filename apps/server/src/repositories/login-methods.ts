@@ -8,6 +8,7 @@ import {
   type PublicJwk,
 } from "../crypto/jwk.js";
 import { z } from "zod";
+import { DEFAULT_ACR_RANKING } from "../config/index.js";
 import type { Db } from "../db/database.js";
 import {
   claimMappingSchema,
@@ -21,6 +22,7 @@ import {
   type LoginMethodKind,
   type LoginMethodProtocol,
   loginMethodRuleViolations,
+  pinTrustViolations,
   type OidcLoginMethod,
   type SamlLoginMethod,
   type UpstreamAuthMethod,
@@ -61,6 +63,7 @@ interface LoginMethodRow {
   client_assertion_audience: ClientAssertionAudience;
   allowed_upstream_tenants: string[];
   trust_upstream_email: boolean;
+  pin_login_hint: boolean;
   scopes: string[];
   claim_mapping: unknown;
   asserted_acr: string;
@@ -70,6 +73,7 @@ interface LoginMethodRow {
   idle_seconds: number;
   allow_sso: boolean;
   link_by_pin: boolean;
+  trust_pin_for_representation: boolean;
   enabled: boolean;
   created_at: Date;
   updated_at: Date;
@@ -101,9 +105,9 @@ const SELECT_LOGIN_METHOD = `
   SELECT lm.id, lm.tenant_id, lm.protocol, lm.kind, lm.display_name, lm.issuer, lm.client_id,
          lm.client_secret_encrypted IS NOT NULL AS has_client_secret,
          lm.token_endpoint_auth_method, lm.client_key_kid, lm.use_userinfo,
-         lm.client_assertion_audience, lm.allowed_upstream_tenants, lm.trust_upstream_email, lm.scopes,
+         lm.client_assertion_audience, lm.allowed_upstream_tenants, lm.trust_upstream_email, lm.pin_login_hint, lm.scopes,
          lm.claim_mapping, lm.asserted_acr, lm.secret_expires_at, lm.max_age_seconds,
-         lm.idle_seconds, lm.allow_sso, lm.link_by_pin, lm.enabled, lm.created_at, lm.updated_at,
+         lm.idle_seconds, lm.allow_sso, lm.link_by_pin, lm.trust_pin_for_representation, lm.enabled, lm.created_at, lm.updated_at,
          ARRAY(SELECT d.domain FROM login_method_domains d
                 WHERE d.tenant_id = lm.tenant_id AND d.login_method_id = lm.id
                 ORDER BY d.domain) AS home_realm_domains,
@@ -173,6 +177,7 @@ function toLoginMethod(row: LoginMethodRow): LoginMethod {
       allowSso: row.allow_sso,
     },
     linkByPin: row.link_by_pin,
+    trustPinForRepresentation: row.trust_pin_for_representation,
     enabled: row.enabled,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -190,6 +195,7 @@ function toLoginMethod(row: LoginMethodRow): LoginMethod {
     clientAssertionAudience: row.client_assertion_audience,
     allowedUpstreamTenants: row.allowed_upstream_tenants,
     trustUpstreamEmail: row.trust_upstream_email,
+    pinLoginHint: row.pin_login_hint,
     scopes: row.scopes,
     claimMapping: claimMappingSchema.parse(row.claim_mapping),
   };
@@ -266,9 +272,10 @@ export class LoginMethodRepository {
               claim_mapping, asserted_acr, secret_expires_at, max_age_seconds, idle_seconds,
               allow_sso, link_by_pin, enabled, token_endpoint_auth_method, use_userinfo,
               client_key_kid, client_public_jwk, client_private_jwk_encrypted,
-              client_assertion_audience, allowed_upstream_tenants, trust_upstream_email)
+              client_assertion_audience, allowed_upstream_tenants, trust_upstream_email,
+              pin_login_hint, trust_pin_for_representation)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16,
-                   $17, $18, $19, $20::jsonb, $21, $22, $23, $24)`,
+                   $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26)`,
           [
             id,
             tenantId,
@@ -294,6 +301,8 @@ export class LoginMethodRepository {
             data.clientAssertionAudience,
             data.allowedUpstreamTenants,
             data.trustUpstreamEmail,
+            data.pinLoginHint,
+            data.trustPinForRepresentation,
           ],
         ),
       );
@@ -320,6 +329,8 @@ export class LoginMethodRepository {
       allowedUpstreamTenants: data.allowedUpstreamTenants ?? current.allowedUpstreamTenants,
       assertedAcr: data.assertedAcr ?? current.assertedAcr,
       claimMapping: data.claimMapping ?? current.claimMapping,
+      trustPinForRepresentation:
+        data.trustPinForRepresentation ?? current.trustPinForRepresentation,
     });
     const secretChanged = data.clientSecret !== undefined;
     const encryptedSecret =
@@ -349,7 +360,9 @@ export class LoginMethodRepository {
              use_userinfo = COALESCE($20, use_userinfo),
              client_assertion_audience = COALESCE($21, client_assertion_audience),
              allowed_upstream_tenants = COALESCE($22, allowed_upstream_tenants),
-             trust_upstream_email = COALESCE($23, trust_upstream_email)
+             trust_upstream_email = COALESCE($23, trust_upstream_email),
+             pin_login_hint = COALESCE($24, pin_login_hint),
+             trust_pin_for_representation = COALESCE($25, trust_pin_for_representation)
            WHERE tenant_id = $1 AND id = $2 AND protocol = 'oidc'
            RETURNING id`,
           [
@@ -376,6 +389,8 @@ export class LoginMethodRepository {
             data.clientAssertionAudience ?? null,
             data.allowedUpstreamTenants ?? null,
             data.trustUpstreamEmail ?? null,
+            data.pinLoginHint ?? null,
+            data.trustPinForRepresentation ?? null,
           ],
         ),
       );
@@ -400,16 +415,17 @@ export class LoginMethodRepository {
     requireUuids({ tenantId });
     const data = parseInput(createSamlLoginMethodInputSchema, input);
     this.#checkMaxAge(data.sessionPolicy.maxAgeSeconds);
-    this.#checkSamlRules(data.saml, data.assertedAcr);
+    this.#checkSamlRules(data.saml, data.assertedAcr, data.trustPinForRepresentation);
     const id = randomUUID();
     await this.#db.transaction(async (tx) => {
       await mapDbErrors(() =>
         tx.query(
           `INSERT INTO login_methods
              (id, tenant_id, protocol, kind, display_name, issuer, client_id, scopes, claim_mapping,
-              asserted_acr, max_age_seconds, idle_seconds, allow_sso, link_by_pin, enabled)
+              asserted_acr, max_age_seconds, idle_seconds, allow_sso, link_by_pin, enabled,
+              trust_pin_for_representation)
            VALUES ($1, $2, 'saml', $3, $4, NULL, NULL, ARRAY['openid'], '{}'::jsonb, $5, $6, $7,
-                   $8, $9, $10)`,
+                   $8, $9, $10, $11)`,
           [
             id,
             tenantId,
@@ -421,6 +437,7 @@ export class LoginMethodRepository {
             data.sessionPolicy.allowSso,
             data.linkByPin,
             data.enabled,
+            data.trustPinForRepresentation,
           ],
         ),
       );
@@ -451,7 +468,11 @@ export class LoginMethodRepository {
     const current = await this.#requireSaml(tenantId, id);
     const settings = mergeSamlSettings(current.saml, data.saml ?? {});
     const assertedAcr = data.assertedAcr ?? current.assertedAcr;
-    this.#checkSamlRules(settings, assertedAcr);
+    this.#checkSamlRules(
+      settings,
+      assertedAcr,
+      data.trustPinForRepresentation ?? current.trustPinForRepresentation,
+    );
     await this.#db.transaction(async (tx) => {
       const rows = await mapDbErrors(() =>
         tx.query(
@@ -463,7 +484,8 @@ export class LoginMethodRepository {
              idle_seconds = COALESCE($7, idle_seconds),
              allow_sso = COALESCE($8, allow_sso),
              link_by_pin = COALESCE($9, link_by_pin),
-             enabled = COALESCE($10, enabled)
+             enabled = COALESCE($10, enabled),
+             trust_pin_for_representation = COALESCE($11, trust_pin_for_representation)
            WHERE tenant_id = $1 AND id = $2 AND protocol = 'saml'
            RETURNING id`,
           [
@@ -477,6 +499,7 @@ export class LoginMethodRepository {
             data.sessionPolicy?.allowSso ?? null,
             data.linkByPin ?? null,
             data.enabled ?? null,
+            data.trustPinForRepresentation ?? null,
           ],
         ),
       );
@@ -641,14 +664,40 @@ export class LoginMethodRepository {
     }
   }
 
-  #checkRules(method: Parameters<typeof loginMethodRuleViolations>[0]): void {
-    const issues = loginMethodRuleViolations(method, this.#acrRanking);
+  #checkRules(
+    method: Parameters<typeof loginMethodRuleViolations>[0] & {
+      readonly trustPinForRepresentation: boolean;
+    },
+  ): void {
+    const issues = [
+      ...loginMethodRuleViolations(method, this.#acrRanking),
+      ...pinTrustViolations(
+        { ...method, mapsPin: method.claimMapping.pin !== undefined },
+        this.#pinTrustRanking,
+      ),
+    ];
     if (issues.length > 0) throw new ValidationError(issues);
   }
 
-  #checkSamlRules(settings: ParsedSamlSettings, assertedAcr: string): void {
-    const issues = samlSettingsViolations(settings, assertedAcr, this.#acrRanking);
+  #checkSamlRules(
+    settings: ParsedSamlSettings,
+    assertedAcr: string,
+    trustPinForRepresentation: boolean,
+  ): void {
+    const issues = [
+      ...samlSettingsViolations(settings, assertedAcr, this.#acrRanking),
+      // SAML methods always map personalIdentityNumber (the attribute name is required).
+      ...pinTrustViolations(
+        { trustPinForRepresentation, assertedAcr, mapsPin: true },
+        this.#pinTrustRanking,
+      ),
+    ];
     if (issues.length > 0) throw new ValidationError(issues);
+  }
+
+  /** ACR_RANKING for the pin trust rule; the default ranking when none was configured. */
+  get #pinTrustRanking(): readonly string[] {
+    return this.#acrRanking.length > 0 ? this.#acrRanking : DEFAULT_ACR_RANKING;
   }
 
   async #writeSaml(

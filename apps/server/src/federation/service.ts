@@ -1,8 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { decodeProtectedHeader } from "jose";
 import * as client from "openid-client";
+import type { AuditLog } from "../audit/audit-log.js";
+import type { CatalogueEvent, AuditAction } from "../audit/catalogue.js";
 import type { Config } from "../config/index.js";
 import type { KeyRing } from "../crypto/keyring.js";
+import type { Db } from "../db/database.js";
+import type { AuditEvent } from "../domain/audit.js";
 import type { LoginMethod, OidcLoginMethod } from "../domain/login-method.js";
 import type { Tenant } from "../domain/tenant.js";
 import type { Logger } from "../logging/logger.js";
@@ -17,8 +21,11 @@ import {
   type InteractionService,
 } from "../oidc/interactions.js";
 import { FRESH_LOGIN_REASONS, type TenantProvider } from "../oidc/provider.js";
+import { AuditRepository } from "../repositories/audit.js";
+import { FederationStateRepository } from "../repositories/federation-states.js";
 import type { Repositories } from "../repositories/index.js";
 import { asOidc } from "../repositories/login-methods.js";
+import { PersonRepository } from "../repositories/persons.js";
 import { mapUpstreamClaims } from "./claim-mapping.js";
 import { FederationError, type FailureContext, type UpstreamLoginResult } from "./flow.js";
 import { SamlFederation, type SamlBeginOptions } from "./saml/service.js";
@@ -38,7 +45,10 @@ const OAUTH_ERROR_CODE = /^[a-z0-9_]{1,64}$/i;
 
 export interface FederationServiceOptions {
   readonly config: Config;
+  /** The runtime pool: JIT provisioning commits together with its audit events. */
+  readonly db: Db;
   readonly repos: Repositories;
+  readonly auditLog: AuditLog;
   readonly logger: Logger;
   readonly upstream: UpstreamClients;
   readonly acrRanking: AcrRanking;
@@ -94,6 +104,7 @@ export class FederationService {
       metrics: options.metrics,
       keys: options.keys,
       outbound: options.outbound,
+      auditLog: options.auditLog,
       flow: {
         errorUrl: (tenant, code, uid) => this.#errorUrl(tenant, code, uid),
         refuse: (tenant, reason) => this.#refuse(tenant, reason),
@@ -125,8 +136,13 @@ export class FederationService {
    * broker needs a fresh authentication (the session policy or the application asked for one);
    * `max_age`, `login_hint` and `ui_locales` are passed through; `acr_values` carries the
    * method's asserted acr when the method maps an upstream acr. SAML methods send a signed
-   * AuthnRequest instead (`saml.begin`); `options.principalPin` is the PrincipalSelection hook
-   * for a step-up of a known person (M4).
+   * AuthnRequest instead (`saml.begin`).
+   *
+   * A step-up of a known person (`interaction.stepUp`) names that person upstream when Portvakt
+   * knows their personal identity number: SAML PrincipalSelection (`options.principalPin`, sent
+   * when the IdP advertises it; the returned number must match either way), or for OIDC the
+   * number as `login_hint` when the method accepts one (`pinLoginHint`). The completion then
+   * verifies that the login is the session's person.
    */
   async begin(
     tenantProvider: TenantProvider,
@@ -144,8 +160,17 @@ export class FederationService {
       await this.#auditFailure("login_method_unavailable", failure);
       throw new FederationError("login_method_unavailable", "Login method not available");
     }
+    const stepUpPin =
+      interaction.stepUp &&
+      interaction.sessionAccountId !== undefined &&
+      (method.protocol === "saml" || method.pinLoginHint)
+        ? await this.#options.repos.persons.latestPin(tenant.id, interaction.sessionAccountId)
+        : null;
     if (method.protocol === "saml") {
-      return this.saml.begin(tenantProvider, interaction, method, options);
+      return this.saml.begin(tenantProvider, interaction, method, {
+        ...(stepUpPin === null ? {} : { principalPin: stepUpPin }),
+        ...options,
+      });
     }
     const setup = await this.#setupFor(method, failure);
     const { maxAge, loginHint, uiLocales } = interaction.params;
@@ -174,7 +199,8 @@ export class FederationService {
     }
     if (maxAge !== undefined) params.max_age = String(maxAge);
     if (method.claimMapping.acr !== undefined) params.acr_values = method.assertedAcr;
-    if (loginHint !== undefined) params.login_hint = loginHint;
+    if (stepUpPin !== null) params.login_hint = stepUpPin;
+    else if (loginHint !== undefined) params.login_hint = loginHint;
     if (uiLocales !== undefined) params.ui_locales = uiLocales;
     return client.buildAuthorizationUrl(setup.config, params).href;
   }
@@ -352,7 +378,7 @@ export class FederationService {
       throw new FederationError("state_invalid", "Unknown or used completion reference");
     }
     const { completion, loginMethodId } = found;
-    const { returnTo } = await this.#options.interactions.completeLogin(ctx, {
+    const { returnTo, stepUp } = await this.#options.interactions.completeLogin(ctx, {
       personId: completion.personId,
       loginMethodId,
       acr: completion.acr,
@@ -362,7 +388,7 @@ export class FederationService {
         ? {}
         : { upstreamSession: completion.upstreamSession }),
     });
-    await this.#audit({
+    await this.#options.auditLog.record({
       tenantId: tenant.id,
       actor: { type: "person", id: completion.personId },
       subject: { type: "person", id: completion.personId },
@@ -371,6 +397,7 @@ export class FederationService {
         loginMethodId,
         acr: completion.acr,
         ...(details.clientId === undefined ? {} : { clientId: details.clientId }),
+        ...(stepUp ? { stepUp: true } : {}),
       },
     });
     return returnTo;
@@ -388,49 +415,68 @@ export class FederationService {
    */
   async #completeUpstream(result: UpstreamLoginResult): Promise<string> {
     const { tenant, method, mapped } = result;
-    const { repos } = this.#options;
-    const jit = await repos.persons.upsertFromLogin(tenant.id, {
-      loginMethodId: method.id,
-      subject: mapped.subject,
-      subjectFromPin: result.subjectFromPin,
-      // Linking by pin needs the login to have met the method's level, which it has here.
-      acr: method.assertedAcr,
-      attributes: mapped.attributes,
-      ...(mapped.pin === undefined ? {} : { pin: mapped.pin }),
-    });
-    const person = jit.person;
+    const { db, keys, auditLog } = this.#options;
     if (mapped.groupsOverage) {
       // Groups are not fetched from Microsoft Graph: rules see no groups for this login.
       this.#log.warn(
         { loginMethodId: method.id, event: "groups_overage" },
         "upstream groups overage: groups treated as empty (configure group filtering upstream)",
       );
-      await this.#audit({
-        tenantId: tenant.id,
-        actor: { type: "person", id: person.id },
-        subject: { type: "person", id: person.id },
-        action: "login.groups_overage",
-        details: { loginMethodId: method.id },
-      });
     }
-    if (jit.created || jit.linked) {
-      await this.#audit({
-        tenantId: tenant.id,
-        actor: { type: "system", id: null },
-        subject: { type: "person", id: person.id },
-        action: jit.created ? "person.created" : "person.identity_linked",
-        details: { loginMethodId: method.id },
-      });
-    }
-
     const completionRef = randomBytes(32).toString("base64url");
-    await repos.federationStates.attachCompletion(tenant.id, result.stateHash, completionRef, {
-      personId: person.id,
-      acr: result.acr,
-      amr: mapped.amr,
-      authTime: result.authTime,
-      ...(result.upstreamSession === undefined ? {} : { upstreamSession: result.upstreamSession }),
+    // The person (created, linked or refreshed), the audit events of that, and the completion
+    // the interaction path redeems commit together.
+    const events = await db.transaction(async (tx) => {
+      const audit = new AuditRepository(tx);
+      const written: AuditEvent[] = [];
+      const record = async <A extends AuditAction>(event: CatalogueEvent<A>) => {
+        written.push(await auditLog.recordIn(audit, event));
+      };
+      const jit = await new PersonRepository(tx, keys).upsertFromLogin(tenant.id, {
+        loginMethodId: method.id,
+        subject: mapped.subject,
+        subjectFromPin: result.subjectFromPin,
+        // Linking by pin needs the login to have met the method's level, which it has here.
+        acr: method.assertedAcr,
+        attributes: mapped.attributes,
+        ...(mapped.pin === undefined ? {} : { pin: mapped.pin }),
+      });
+      const person = jit.person;
+      if (mapped.groupsOverage) {
+        await record({
+          action: "login.groups_overage",
+          tenantId: tenant.id,
+          actor: { type: "person", id: person.id },
+          subject: { type: "person", id: person.id },
+          details: { loginMethodId: method.id },
+        });
+      }
+      if (jit.created || jit.linked) {
+        await record({
+          action: jit.created ? "person.created" : "person.identity_linked",
+          tenantId: tenant.id,
+          actor: { type: "system", id: null },
+          subject: { type: "person", id: person.id },
+          details: { loginMethodId: method.id },
+        });
+      }
+      await new FederationStateRepository(tx, keys.secrets).attachCompletion(
+        tenant.id,
+        result.stateHash,
+        completionRef,
+        {
+          personId: person.id,
+          acr: result.acr,
+          amr: mapped.amr,
+          authTime: result.authTime,
+          ...(result.upstreamSession === undefined
+            ? {}
+            : { upstreamSession: result.upstreamSession }),
+        },
+      );
+      return written;
     });
+    auditLog.forward(events);
     const base = `${this.#options.config.publicUrl}/t/${tenant.slug}`;
     return `${base}/interaction/${encodeURIComponent(result.interactionUid)}/federation/complete?ref=${completionRef}`;
   }
@@ -483,6 +529,7 @@ export class FederationService {
     }
   }
 
+  /** `login.failure`, on its own (never inside a transaction); a failed write is only logged. */
   async #auditFailure(code: LoginErrorCode, context: FailureContext): Promise<void> {
     this.#log.info(
       {
@@ -493,7 +540,7 @@ export class FederationService {
       },
       "login failed",
     );
-    await this.#audit({
+    await this.#options.auditLog.record({
       tenantId: context.tenantId,
       actor: { type: "system", id: null },
       subject:
@@ -501,7 +548,6 @@ export class FederationService {
           ? null
           : { type: "login_method", id: context.loginMethodId },
       action: "login.failure",
-      outcome: "failure",
       details: {
         reason: code,
         ...(context.clientId === undefined ? {} : { clientId: context.clientId }),
@@ -509,14 +555,5 @@ export class FederationService {
         ...(context.detail === undefined ? {} : { detail: context.detail }),
       },
     });
-  }
-
-  /** Audit writes never break the login flow; a failed write is logged instead. */
-  async #audit(event: Parameters<Repositories["audit"]["append"]>[0]): Promise<void> {
-    try {
-      await this.#options.repos.audit.append(event);
-    } catch (error) {
-      this.#log.error({ err: error, action: event.action }, "audit event could not be written");
-    }
   }
 }

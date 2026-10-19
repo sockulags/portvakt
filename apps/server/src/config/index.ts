@@ -29,6 +29,11 @@ export const DEFAULT_ACR_RANKING: readonly string[] = [
   "http://id.elegnamnden.se/loa/1.0/loa4",
 ];
 
+/** AUDIT_RETENTION may not be shorter (the database function refuses a later cutoff too). */
+export const MIN_AUDIT_RETENTION_SECONDS = 90 * 24 * 3600;
+/** Default AUDIT_RETENTION: 400 days, a year plus a margin for annual reviews. */
+export const DEFAULT_AUDIT_RETENTION = "400d";
+
 export const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
@@ -142,6 +147,10 @@ export interface Config {
   };
   /** Directory of the built login UI (apps/login/dist); `undefined` uses the default location. */
   readonly loginUiDir: string | undefined;
+  readonly audit: {
+    /** AUDIT_RETENTION: audit events older than this are deleted by `npm run audit:prune`. */
+    readonly retentionSeconds: number;
+  };
 }
 
 export interface DatabaseConfig {
@@ -249,7 +258,8 @@ const envSchema = z.object({
   MIGRATION_DATABASE_URL: optionalString,
   DATABASE_POOL_MAX: z.preprocess(
     emptyToUndefined,
-    z.coerce.number().int().min(1).max(200).default(10),
+    // At least 2: a transaction and a statement outside it (an audit event) may overlap.
+    z.coerce.number().int().min(2).max(200).default(10),
   ),
   MASTER_KEY: z.preprocess(emptyToUndefined, masterKey),
   MASTER_KEY_PREVIOUS: z.preprocess(
@@ -313,6 +323,7 @@ const envSchema = z.object({
       ),
   ),
   LOGIN_UI_DIR: optionalString,
+  AUDIT_RETENTION: duration(DEFAULT_AUDIT_RETENTION),
 });
 
 type Env = z.infer<typeof envSchema>;
@@ -499,6 +510,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
   if (env.REFRESH_TOKEN_TTL > env.SESSION_TTL) {
     issues.push("REFRESH_TOKEN_TTL: must not exceed SESSION_TTL");
   }
+  if (env.AUDIT_RETENTION < MIN_AUDIT_RETENTION_SECONDS) {
+    issues.push("AUDIT_RETENTION: must be at least 90 days");
+  }
   const allMasterKeys = [env.MASTER_KEY, ...env.MASTER_KEY_PREVIOUS];
   const distinct = new Set(allMasterKeys.map((key) => key.toString("base64")));
   if (distinct.size !== allMasterKeys.length) {
@@ -567,6 +581,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
       samlXmlMaxElements: env.SAML_XML_MAX_ELEMENTS,
     },
     loginUiDir: env.LOGIN_UI_DIR,
+    audit: { retentionSeconds: env.AUDIT_RETENTION },
   };
 }
 
@@ -647,4 +662,30 @@ export function loadDatabaseConfig(source: NodeJS.ProcessEnv = process.env): Dat
   const database = resolveDatabase(parsed.data, issues);
   if (issues.length > 0 || database === undefined) throw new ConfigError(issues);
   return database;
+}
+
+/**
+ * Narrow loader for the audit retention CLI (`npm run audit:prune`): the database (it connects
+ * with MIGRATION_DATABASE_URL, the owner) and AUDIT_RETENTION.
+ */
+export function loadAuditPruneConfig(source: NodeJS.ProcessEnv = process.env): {
+  readonly database: DatabaseConfig;
+  readonly retentionSeconds: number;
+} {
+  const schema = envSchema.pick({
+    NODE_ENV: true,
+    DATABASE_URL: true,
+    MIGRATION_DATABASE_URL: true,
+    DATABASE_POOL_MAX: true,
+    AUDIT_RETENTION: true,
+  });
+  const parsed = schema.safeParse(source);
+  if (!parsed.success) throw new ConfigError(formatZodIssues(parsed.error));
+  const issues: string[] = [];
+  const database = resolveDatabase(parsed.data, issues);
+  if (parsed.data.AUDIT_RETENTION < MIN_AUDIT_RETENTION_SECONDS) {
+    issues.push("AUDIT_RETENTION: must be at least 90 days");
+  }
+  if (issues.length > 0 || database === undefined) throw new ConfigError(issues);
+  return { database, retentionSeconds: parsed.data.AUDIT_RETENTION };
 }

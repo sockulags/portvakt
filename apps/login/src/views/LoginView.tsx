@@ -7,8 +7,14 @@ import { Page } from "../components/Page";
 import { format, useI18n } from "../i18n";
 import { ErrorView } from "./ErrorView";
 
-/** Errors after which the chooser cannot help: there is nothing left to try here. */
-const TERMINAL: ReadonlySet<LoginErrorCode> = new Set(["no_acceptable_method"]);
+/**
+ * Errors after which the chooser cannot help: there is nothing left to try here (a step-up of
+ * another person is refused outright; the way back keeps the existing session).
+ */
+const TERMINAL: ReadonlySet<LoginErrorCode> = new Set([
+  "no_acceptable_method",
+  "step_up_person_mismatch",
+]);
 
 type State =
   | { readonly status: "loading" }

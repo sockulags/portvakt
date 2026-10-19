@@ -36,12 +36,13 @@ npm install
 npm run typecheck      # tsc --noEmit in the root and every workspace
 npm run lint           # eslint . (type-aware typescript-eslint, react-hooks for React code)
 npm run format:check   # prettier --check . (npm run format writes)
-npm test               # vitest run over apps/*, packages/*, examples/*
+npm test               # vitest run over apps/*, packages/*, examples/* (6 files at a time)
 npm run build          # vite build for apps/login and apps/admin
 npm run db:up          # Postgres 16 on localhost:5433, waits until healthy; npm run db:down stops it
 npm run test:e2e       # Playwright (browsers: npm run install-browsers --workspace e2e)
 npm run migrate -w apps/server         # migrate as MIGRATION_DATABASE_URL, grant the runtime role
 npm run rewrap-secrets -w apps/server  # after MASTER_KEY rotation: re-wrap secrets, re-index pins
+npm run audit:prune -w apps/server     # delete audit events older than AUDIT_RETENTION (owner role)
 npm run dev -w apps/server             # broker with reload (migrates on start outside production)
 npm run dev -w apps/mock-idp           # mock upstream IdPs on :4500 (/entra, /bankid, /saml/*)
 npm run dev -w apps/login              # rebuilds apps/login/dist on change; the server serves it
@@ -69,27 +70,32 @@ volume init. Two roles: the app runs as the restricted `portvakt_app` (`DATABASE
 
 ## Server modules (`apps/server/src`)
 
-| Module          | Contents                                                                    |
-| --------------- | --------------------------------------------------------------------------- |
-| `config/`       | `loadConfig()`: zod-validated env, typed `Config`, production refusals      |
-| `crypto/`       | `SecretBox` envelopes, `BlindIndex`, `KeyRing`, client secrets, ES256 keys  |
-| `db/`           | `pg` pool, `Db` (query + nested transactions), migration runner and CLIs    |
-| `domain/`       | Domain types, zod input schemas, personnummer/organisationsnummer parsing   |
-| `repositories/` | Parameterised SQL per aggregate; rows mapped to domain types; change events |
-| `oidc/`         | Per-tenant oidc-provider: config, adapter, registry, claims, interactions,  |
-|                 | session policy, acr ranking, login state (session record, grant login)      |
-| `federation/`   | Upstream OIDC (openid-client): discovery cache, client auth, claim mapping; |
-|                 | `saml/`: upstream SAML: IdP and SP metadata, protocol, signatures, mapping, |
-|                 | ACS and SLO service, admin operations (`SamlLoginMethodAdmin`)              |
-| `login/`        | Login flow routes (interaction API, callback, JWKS, SAML SP endpoints in    |
-|                 | `saml-routes.ts`), CSRF, login UI shell                                     |
-| `keys/`         | `SigningKeyCache` (keys of this replica) and `KeyRotationService`           |
-| `jobs/`         | Advisory-locked `runExclusive` and the `PeriodicTask` scheduler             |
-| `net/`          | `OutboundGuard`: every request to a configured URL (SSRF, redirects, size)  |
-| `logging/`      | pino JSON logger with redaction, request logging                            |
-| `server.ts`     | `createPortvakt()`: composition root, start-up, jobs, graceful shutdown     |
-| `main.ts`       | Process entry: config, migrations, role check, signals                      |
-| `testing/`      | Test database, fixtures, test server, cookie-jar browser, RP helpers        |
+| Module            | Contents                                                                    |
+| ----------------- | --------------------------------------------------------------------------- |
+| `config/`         | `loadConfig()`: zod-validated env, typed `Config`, production refusals      |
+| `audit/`          | Event catalogue (`catalogue.ts`, zod details per action), `AuditLog`,       |
+|                   | `AuditSink` (no-op default), retention (`retention.ts`, `prune-cli.ts`)     |
+| `representation/` | `RepresentationSource` (internal register), `RepresentationRegistry`        |
+|                   | (merge per tenant, re-validation, chooser views with masked identifiers)    |
+| `crypto/`         | `SecretBox` envelopes, `BlindIndex`, `KeyRing`, client secrets, ES256 keys  |
+| `db/`             | `pg` pool, `Db` (query + nested transactions), migration runner and CLIs    |
+| `domain/`         | Domain types, zod input schemas, personnummer/organisationsnummer parsing   |
+| `repositories/`   | Parameterised SQL per aggregate; rows mapped to domain types; change events |
+| `oidc/`           | Per-tenant oidc-provider: config, adapter, registry, claims, interactions,  |
+|                   | session policy, acr ranking, login state (session record, grant login),     |
+|                   | the representation chooser prompt (`representation-prompt.ts`)              |
+| `federation/`     | Upstream OIDC (openid-client): discovery cache, client auth, claim mapping; |
+|                   | `saml/`: upstream SAML: IdP and SP metadata, protocol, signatures, mapping, |
+|                   | ACS and SLO service, admin operations (`SamlLoginMethodAdmin`)              |
+| `login/`          | Login flow routes (interaction API, representation chooser API, callback,   |
+|                   | JWKS, SAML SP endpoints in `saml-routes.ts`), CSRF, login UI shell          |
+| `keys/`           | `SigningKeyCache` (keys of this replica) and `KeyRotationService`           |
+| `jobs/`           | Advisory-locked `runExclusive` and the `PeriodicTask` scheduler             |
+| `net/`            | `OutboundGuard`: every request to a configured URL (SSRF, redirects, size)  |
+| `logging/`        | pino JSON logger with redaction, request logging                            |
+| `server.ts`       | `createPortvakt()`: composition root, start-up, jobs, graceful shutdown     |
+| `main.ts`         | Process entry: config, migrations, role check, signals                      |
+| `testing/`        | Test database, fixtures, test server, cookie-jar browser, RP helpers        |
 
 OIDC request path: `app.ts` (health probes) -> `/ui/login/*` (login UI assets) ->
 `oidc/routes.ts` (`/t/:slug`, 404 for unknown or suspended tenants) -> `login/routes.ts` (login
@@ -106,15 +112,20 @@ hop: `federation.begin` -> `saml.begin` (pending AuthnRequest in `federation_sta
 HTTP-Redirect, or `/t/{slug}/saml/{id}/post` for HTTP-POST) -> IdP -> `POST
 /t/{slug}/saml/{id}/acs` (`saml.acs`: RelayState consumed once, InResponseTo = the stored request
 ID, signature verification with the allowlisted algorithms, decryption, Portvakt's checks, attribute
-mapping, JIT) -> the same completion hop.
+mapping, JIT) -> the same completion hop. After the resume, an application whose
+`representationMode` is not `none` gets the `select_account` prompt (the representation
+chooser): `GET .../interaction/{uid}` (bootstrap view `representation`) -> `GET
+.../representation` (parties, masked identifiers, CSRF token) -> `POST .../representation`
+(`{ self: true }` or `{ partyId }`, re-checked against the sources) -> resume -> the consent
+check stores the choice in the grant login.
 
-Entry points for later milestones: `interactions.completeLogin(ctx, {personId, loginMethodId,
-acr, amr})` (M4 adds the representation step before it), `rotation.rotateNow({actor, reason,
-emergency})` (M6 admin API), the claim contributors in `oidc/claims.ts` (`rep`, M4), the login
-prompt checks in `oidc/provider.ts` (`acr_not_met` is the step-up hook, M4),
-`federation.begin(tp, interaction, method, { principalPin })` (SAML PrincipalSelection for a
-step-up of a known person, M4) and `portvakt.samlAdmin` (create and update SAML login methods,
-SP key rotation, SP certificate expiry: the M6 admin API calls these).
+Entry points for later milestones: `rotation.rotateNow({actor, reason, emergency})` (M6 admin
+API), `portvakt.samlAdmin` (create and update SAML login methods, SP key rotation, SP
+certificate expiry), `repos.grants` (`create`, `revoke`, `setApplications`) and
+`repos.parties.setProtectedIdentity` (M6 admin API), `portvakt.representation` (add
+Bolagsverket or Mina ombud as further `RepresentationSource`s in `server.ts` and enable them per
+tenant), and `createPortvakt({ auditSink })` (forwarding audit events to the starter kit's log
+service).
 
 Migrations are plain SQL in `apps/server/migrations/NNNN_name.sql`, applied by our own runner
 (`src/db/migrate.ts`): it is ~150 lines, takes an advisory lock and keeps checksums, which a
@@ -126,7 +137,9 @@ dependency would only wrap.
   representation is `rep: { sub: <party UUID>, type: "person" | "organisation", name }` and there
   is no `act` claim. Access tokens carry only `sub`, `tid`, `idp`, `idp_kind`, `acr`,
   `auth_time`, `roles`, `attrs` and `rep` (plus the JWT/OAuth basics), never `name`, `email`
-  or `pin`; ID tokens carry profile claims per scope. Userinfo stays disabled, so apps read
+  or `pin`; their `rep` has no `name`, and the ID token's `rep` has none for a protected person
+  party. `roles` and `attrs` stay the signed-in person's; applications authorise actions for
+  `rep.sub` with their own rules. ID tokens carry profile claims per scope. Userinfo stays disabled, so apps read
   profile claims from the ID token. New claims go into the contributors in `oidc/claims.ts` and
   into `CLAIMS_BY_SCOPE` (oidc-provider drops unlisted ID token claims); `docs/claims.md` is
   the versioned contract.
@@ -140,7 +153,10 @@ dependency would only wrap.
   (layout only) uses the tokens and lives in a stylesheet file: the login UI's CSP allows no
   inline scripts or style elements.
 - Login UI text lives in `apps/login/src/i18n.ts` (Swedish default, English); interactive
-  elements carry stable `data-testid`s; error codes are shared with `login/ui-shell.ts`.
+  elements carry stable `data-testid`s; error codes are shared with `login/ui-shell.ts`. Views:
+  `login` (`LoginView`), `representation` (`RepresentationView`, `PartyList`: test ids
+  `representation-option-self`, `representation-option-{partyId}`, `cancel-representation`),
+  `error`, `logout`, `logged_out`.
 - Tests live next to the code as `*.test.ts(x)`; the design-system tests live in its `test/`.
 - Every tenant-scoped repository method takes `tenantId` explicitly; tenant-scoped tables carry
   `tenant_id` and reference each other through composite `(tenant_id, id)` foreign keys.
@@ -151,9 +167,15 @@ dependency would only wrap.
   blind index (`*_index` columns), never the plaintext.
 - Id arguments are validated with `requireUuids` before SQL; a malformed id raises
   `InvalidIdError`.
-- Failure audit events (login failures, refused tokens and the like) must be written outside any
-  business transaction that may roll back, so the failure is recorded even when the work is undone.
-  Success events may share the business transaction.
+- Audit events come from the catalogue in `audit/catalogue.ts` (one zod schema per action,
+  strict, ids and reason codes only, never a pin, name, email, NameID, upstream subject, token or
+  request text); add an action there before writing it, and list it in the catalogue's docs.
+  Failure events (refused logins, refused refreshes, denied representations, step-up failures)
+  go through `AuditLog.record`, on their own statement, outside any business transaction that
+  may roll back. Success events are written with `AuditLog.recordIn` through the transaction's
+  repository that commits the change they describe (JIT provisioning with `person.created`, a
+  grant login with `representation.selected` / `step_up.success`, a grant revocation with
+  `grant.revoked`, key transitions), then forwarded to the sink after the commit.
 
 ## Gotchas
 
@@ -180,7 +202,35 @@ deploy/postgres-init/02-create-app-role.sql` (idempotent), or recreate the volum
 - `audit_events` is append-only twice over: the runtime role has only SELECT and INSERT on it, and a
   trigger rejects UPDATE, DELETE and TRUNCATE even for the owner. It has no foreign key to tenants,
   so audit history outlives a deleted tenant. In production, start-up calls
-  `assertRestrictedRuntimeRole` (`main.ts`).
+  `assertRestrictedRuntimeRole` (`main.ts`), which also refuses a runtime role that may execute
+  the retention function.
+- Audit retention (migration 0004): the delete path is `audit_events_prune(cutoff,
+batch_size)`, which refuses a cutoff younger than 90 days, sets a transaction-local cutoff
+  (`portvakt.audit_prune_before`) and deletes one batch. The trigger lets a DELETE through only
+  with that setting, only when the cutoff is at least 90 days old, only for rows older than it,
+  and only by a role that owns the table; a plain DELETE by the owner, or one with a younger
+  cutoff, is refused. The owner can still drop the trigger: the guarantee is against the runtime
+  role and against accidents, not against the owner. EXECUTE is revoked from PUBLIC and the
+  runtime role. `npm run audit:prune` connects with MIGRATION_DATABASE_URL, runs it in batches
+  (one transaction each) for AUDIT_RETENTION (default 400d, at least 90d) and writes
+  `audit.pruned`; schedule it (a daily CronJob).
+- The grants script also revokes TEMPORARY on the database from PUBLIC and the runtime role
+  (only when the migration role owns the database, otherwise a notice): the runtime role creates
+  nothing, not even temporary tables.
+- Audit volume and once-only events: `token.issued` is written for every token endpoint success
+  (code, refresh, client_credentials) from a provider middleware before the response is sent;
+  `token.exchange_denied` / `token.refresh_denied` for a valid code or refresh token whose
+  session or representation ended. Failures a page shows on every reload
+  (`no_acceptable_method` with its `step_up.failure`, `no_representation_available`) are
+  written once per interaction (insert-once marker `PortvaktAuditOnce` in `oidc_payloads`).
+  `step_up.failure.requestedAcr` keeps only values the tenant's provider knows (`acrValues`);
+  unknown ones are only counted.
+- Capacity planning (M9 docs): each replica holds up to DATABASE_POOL_MAX (at least 2, default 10) runtime connections plus one LISTEN connection; the migration job and the audit prune job
+  hold one owner connection each while they run. Keep `replicas × (DATABASE_POOL_MAX + 1) + 2`
+  (plus any admin tooling) below the database's max_connections minus its reserved slots.
+- `AuditSink` (`audit/audit-log.ts`) receives committed events; the default forwards nothing.
+  Events that `SamlLoginMethodAdmin` writes are not forwarded (it has no audit log yet); a real
+  forwarder should rather tail `audit_events` by `seq`, which also covers every transaction.
 - Downstream client secrets are stored encrypted (oidc-provider needs the plaintext to verify
   `client_secret_basic`/`client_secret_post`); read them with `applications.getClientSecret`.
 - Signing key transitions are time-guarded in SQL (`KEY_PUBLISH_AHEAD`, `KEY_RETIRE_AFTER`, passed
@@ -207,6 +257,44 @@ deploy/postgres-init/02-create-app-role.sql` (idempotent), or recreate the volum
   `urn:portvakt:app:{client_id}`); only client_credentials may name another app of the tenant.
   The userinfo endpoint is disabled: oidc-provider only accepts audience-less access tokens there,
   so RPs read claims from the ID token.
+- Representation (`representation/`, `oidc/representation-prompt.ts`): the chooser is the
+  requestable `select_account` prompt between login and consent (oidc-provider's generic
+  "was it requested" check is replaced by ours, which respects `representationMode`). Its check
+  decides per authorization and remembers the decision for the request; the consent check
+  `portvakt_session_activity` stores it in the grant login (`representation`). It reuses a
+  grant's still valid choice unless the person just signed in or the app sent
+  `prompt=select_account`; another app's choice is never read. `loadExistingGrant` ends a grant
+  with its representation: a different choice (`representation_changed`) or one that no longer
+  holds (`representation_invalid`, also `representation.denied`) revokes the grant and its
+  tokens and starts a new grant, so old refresh tokens never switch representation. At the token
+  endpoint `findAccount` re-validates the grant login's representation (revoked, validity window
+  at the app clock, application covered and enabled, mode): otherwise the grant is revoked and
+  the refresh answers `invalid_grant` (`token.refresh_denied`). Validity uses the app clock
+  (`at` is passed to SQL), so fake timers work. Rights are looked up per request through the
+  registry with a `RepresentationAgent` (person and the current login's method; at a refresh the
+  grant login's method). Grants made out to the person id always count; grants made out to a
+  personal identity number count only for the number of the current login's identity, and only
+  when that method has `trustPinForRepresentation` (allowed at save only for methods asserting
+  at least loa3 that map a pin; SAML methods always map one). A pin another identity of the
+  person carries never counts. Re-checking one choice filters by party in SQL, and the protected
+  check of all person parties is one query. A failing source contributes nothing (fail closed). The chooser never receives a full personal identity number: person
+  parties are sent as the date part only, protected ones (party flag, or a protected person with
+  that pin) with no identifier, and the POST only names a party id that is looked up again.
+- Step-up (`isStepUp` in `oidc/interactions.ts`): a login prompt whose only reasons are
+  `acr_not_met` and/or `max_age` with a signed-in session. `federation.begin` then names the
+  person upstream (`persons.latestPin`: SAML PrincipalSelection, or an OIDC `login_hint` when
+  the method sets `pinLoginHint`), `completeLogin` refuses another person
+  (`step_up_person_mismatch`, audited, nothing about the session changes; the login UI treats it
+  as terminal), and the pending login carries `stepUp` so the consent check audits
+  `step_up.success` with the grant login. The session record follows the latest login, so the
+  step-up method's policy (maxAge, idle, allowSso) governs the session from then on (allowSso can
+  flip either way) and a later SSO authorization sees the higher acr; every other
+  application's grant login keeps its own acr and auth_time.
+- After a fresh login the session record is stored as soon as the login prompt has passed
+  (`persistFreshLogin`, called first by the representation prompt), before the chooser or
+  consent, so an abandoned chooser never leaves oidc-provider's session and the record apart.
+  At the token endpoint `findAccount` sets the code's or refresh token's acr, amr and auth_time
+  from the grant login, so the ID token always carries the same login as the access token.
 - Signing: oidc-provider signs with the first matching key of its `jwks`, so `SigningKeyCache`
   orders active, next, retiring. Access tokens also pin `jwt.sign.kid` to the active key.
 - Login state lives in `oidc_payloads` in two kinds (`oidc/login-context.ts`): the session
@@ -260,6 +348,11 @@ deploy/postgres-init/02-create-app-role.sql` (idempotent), or recreate the volum
 - The test-only login route `POST /t/{slug}/interaction/{uid}/__test__/login` exists only with
   NODE_ENV=test. It lives below the interaction path because the interaction cookie is scoped to
   it.
+- `npm test` runs at most 6 test files at once (`--maxWorkers=6` in the root `test` script; a
+  `maxWorkers` in the root vitest.config.ts is not applied to the projects): a server integration
+  file holds up to about twelve Postgres connections and Postgres allows 100 by default. With
+  more workers (plain `npx vitest run` on a many-core machine) requests fail at random with
+  "remaining connection slots are reserved", which surfaces as HTTP 500 in tests.
 - Integration tests that need HTTP use `startTestServer()` (`testing/test-server.ts`): a private
   schema, the real app on 127.0.0.1 with `PUBLIC_URL` pointing at it, and `TestBrowser` for the
   front channel (host-only cookies per host and port). Signing keys are global per schema: tests
@@ -268,7 +361,10 @@ deploy/postgres-init/02-create-app-role.sql` (idempotent), or recreate the volum
 - Federated flows in tests: `startTestIdp()` runs the mock IdP in-process,
   `createFederatedLoginMethod` creates a login method and registers it there as a client, and
   `FlowDriver` (`testing/federation.ts`) follows redirects and does what the login UI and the
-  persona page would; it reads Portvakt pages through their bootstrap block.
+  persona page would (`chooseAndFollow` for login methods, `chooseRepresentationAndFollow` for
+  the representation chooser); it reads Portvakt pages through their bootstrap block. The mock
+  BankID issuer signs a citizen in directly for `login_hint=<persona id or personal identity
+number>`.
 - Server scripts load the root `.env` with `--env-file-if-exists=../../.env`; they print a notice
   when it is missing.
 - Upstream federation: `federation_states` (migration 0002) holds the hashed state, the

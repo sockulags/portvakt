@@ -90,6 +90,12 @@ interface LoginMethodBase {
    * login method with this flag already knows the number (citizen methods only in practice).
    */
   readonly linkByPin: boolean;
+  /**
+   * A login through this method may use representation grants made out to the personal identity
+   * number this login asserted (grants made out to the person id need no such trust). Allowed
+   * only for a method asserting at least loa3 that maps a personal identity number.
+   */
+  readonly trustPinForRepresentation: boolean;
   readonly enabled: boolean;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -134,6 +140,12 @@ export interface OidcLoginMethod extends LoginMethodBase {
    * ID work accounts). Email is never an identifier either way.
    */
   readonly trustUpstreamEmail: boolean;
+  /**
+   * The upstream accepts the personal identity number as `login_hint`: a step-up of a person
+   * whose number Portvakt knows sends it, so the upstream signs in that person only. Off by
+   * default (the number then never leaves Portvakt in a front-channel URL).
+   */
+  readonly pinLoginHint: boolean;
   readonly scopes: readonly string[];
   readonly claimMapping: ClaimMapping;
 }
@@ -166,6 +178,7 @@ export const createLoginMethodInputSchema = z.object({
   clientAssertionAudience: z.enum(CLIENT_ASSERTION_AUDIENCES).default("token_endpoint"),
   allowedUpstreamTenants: upstreamTenantsSchema.default([]),
   trustUpstreamEmail: z.boolean().default(false),
+  pinLoginHint: z.boolean().default(false),
   scopes: scopesSchema.default(["openid"]),
   claimMapping: claimMappingSchema,
   assertedAcr: z.string().min(1).max(255),
@@ -173,6 +186,7 @@ export const createLoginMethodInputSchema = z.object({
   secretExpiresAt: z.date().nullable().default(null),
   sessionPolicy: sessionPolicySchema,
   linkByPin: z.boolean().default(false),
+  trustPinForRepresentation: z.boolean().default(false),
   enabled: z.boolean().default(true),
 });
 export type CreateLoginMethodInput = z.input<typeof createLoginMethodInputSchema>;
@@ -190,6 +204,7 @@ export const updateLoginMethodInputSchema = z
     clientAssertionAudience: z.enum(CLIENT_ASSERTION_AUDIENCES),
     allowedUpstreamTenants: upstreamTenantsSchema,
     trustUpstreamEmail: z.boolean(),
+    pinLoginHint: z.boolean(),
     scopes: scopesSchema,
     claimMapping: claimMappingSchema,
     assertedAcr: z.string().min(1).max(255),
@@ -197,6 +212,7 @@ export const updateLoginMethodInputSchema = z
     secretExpiresAt: z.date().nullable(),
     sessionPolicy: sessionPolicySchema,
     linkByPin: z.boolean(),
+    trustPinForRepresentation: z.boolean(),
     enabled: z.boolean(),
   })
   .partial();
@@ -210,6 +226,7 @@ export const createSamlLoginMethodInputSchema = z.object({
   homeRealmDomains: domainsSchema.default([]),
   sessionPolicy: sessionPolicySchema,
   linkByPin: z.boolean().default(false),
+  trustPinForRepresentation: z.boolean().default(false),
   enabled: z.boolean().default(true),
   saml: samlSettingsInputSchema,
 });
@@ -224,6 +241,7 @@ export const updateSamlLoginMethodInputSchema = z
     homeRealmDomains: domainsSchema,
     sessionPolicy: sessionPolicySchema,
     linkByPin: z.boolean(),
+    trustPinForRepresentation: z.boolean(),
     enabled: z.boolean(),
     saml: samlSettingsPatchSchema,
   })
@@ -270,6 +288,34 @@ export function loginMethodRuleViolations(
     issues.push(
       "claimMapping.acr: required when assertedAcr is a ranked level (the upstream must prove it)",
     );
+  }
+  return issues;
+}
+
+/** The level a method must assert to be trusted with pin-addressed representation grants. */
+export const PIN_REPRESENTATION_MIN_ACR = "http://id.elegnamnden.se/loa/1.0/loa3";
+
+/**
+ * `trustPinForRepresentation` needs a method that maps a personal identity number and asserts
+ * an acr ranked at least loa3 (`acrRanking`: ACR_RANKING). Returns the violation messages.
+ */
+export function pinTrustViolations(
+  method: {
+    readonly trustPinForRepresentation: boolean;
+    readonly assertedAcr: string;
+    readonly mapsPin: boolean;
+  },
+  acrRanking: readonly string[],
+): string[] {
+  if (!method.trustPinForRepresentation) return [];
+  const issues: string[] = [];
+  if (!method.mapsPin) {
+    issues.push("trustPinForRepresentation: the method must map a personal identity number");
+  }
+  const rank = acrRanking.indexOf(method.assertedAcr);
+  const minimum = acrRanking.indexOf(PIN_REPRESENTATION_MIN_ACR);
+  if (minimum < 0 || rank < minimum) {
+    issues.push("trustPinForRepresentation: the method must assert at least loa3");
   }
   return issues;
 }

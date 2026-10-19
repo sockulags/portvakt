@@ -11,12 +11,19 @@ import Provider, {
   type KoaContextWithOIDC,
   type ResourceServer,
 } from "oidc-provider";
+import type { AuditLog } from "../audit/audit-log.js";
+import type { AuditDetails } from "../audit/catalogue.js";
 import type { Config } from "../config/index.js";
+import type { Db } from "../db/database.js";
+import type { AuditEvent } from "../domain/audit.js";
 import type { LoginMethod } from "../domain/login-method.js";
+import { representationChoiceSchema, type RepresentationChoice } from "../domain/representation.js";
 import type { Tenant } from "../domain/tenant.js";
 import type { LoadedKeys } from "../keys/key-cache.js";
 import type { Logger } from "../logging/logger.js";
 import type { OutboundGuard } from "../net/outbound.js";
+import { revalidateChoice, type RepresentationRegistry } from "../representation/registry.js";
+import type { AuditRepository } from "../repositories/audit.js";
 import type { Repositories } from "../repositories/index.js";
 import { parseAcrValues, type AcrRanking } from "./acr.js";
 import { createAdapterFactory } from "./adapter.js";
@@ -26,7 +33,9 @@ import {
   LoginStateStore,
   PENDING_LOGIN_RESULT_KEY,
   pendingLoginSchema,
+  REPRESENTATION_RESULT_KEY,
   rememberedLoginContext,
+  rememberedRepresentation,
   rememberedSessionRecord,
   rememberLoginContext,
   rememberSessionRecord,
@@ -34,6 +43,7 @@ import {
   type SessionRecord,
 } from "./login-context.js";
 import type { ProviderPages } from "./pages.js";
+import { representationPrompt } from "./representation-prompt.js";
 import type { SessionPolicyService } from "./session-policy.js";
 
 const SIGNING_ALG = "ES256";
@@ -66,7 +76,12 @@ export interface UpstreamLogoutInput {
 
 export interface ProviderDependencies {
   readonly config: Config;
+  /** The runtime pool: login state changes that commit together with their audit events. */
+  readonly db: Db;
   readonly repos: Repositories;
+  readonly auditLog: AuditLog;
+  /** Representation sources of the tenants (the chooser, `rep`, re-checks at refresh). */
+  readonly representation: RepresentationRegistry;
   readonly logger: Logger;
   readonly sessionPolicy: SessionPolicyService;
   readonly acrRanking: AcrRanking;
@@ -100,6 +115,8 @@ export interface TenantProvider {
   readonly loginState: LoginStateStore;
   /** Signing key set the provider was built with. */
   readonly keysVersion: string;
+  /** Every acr value a login of this tenant can assert (the provider's `acrValues`). */
+  readonly acrValues: readonly string[];
   /** Tenant, application and login method configuration the provider was built with. */
   readonly fingerprint: string;
   /** Hands a request below `basePath` (already stripped of it) to the provider. */
@@ -138,11 +155,12 @@ export function buildTenantProvider(
   deps: ProviderDependencies,
 ): TenantProvider {
   const { tenant, keys, fingerprint } = input;
-  const { config, repos, logger, sessionPolicy, acrRanking, pages } = deps;
+  const { config, db, repos, logger, sessionPolicy, acrRanking, pages, auditLog } = deps;
+  const registry = deps.representation;
   const basePath = `/t/${tenant.slug}`;
   const issuer = `${config.publicUrl}${basePath}`;
   const issuerPath = new URL(issuer).pathname;
-  const loginState = new LoginStateStore(tenant.id, repos.oidcPayloads);
+  const loginState = new LoginStateStore(tenant.id, db);
   const claims = new ClaimsService(repos);
   const tokens = config.tokens;
   const log = logger.child({ tenant: tenant.slug });
@@ -203,11 +221,27 @@ export function buildTenantProvider(
     let login: LoginContext | undefined;
     if (token !== undefined) {
       const presented = token as { grantId?: string; kind?: string; consumed?: unknown };
+      const refresh = presented.kind === "RefreshToken";
+      const clientId = ctx.oidc.client?.clientId;
       login = await grantLoginFor(ctx, presented.grantId);
       if (login === undefined || login.personId !== sub || login.sessionExpiresAt <= epochNow()) {
+        if (clientId !== undefined) await tokenDenied(refresh, clientId, sub, "session_ended");
         return undefined;
       }
-      if (presented.kind === "RefreshToken" && presented.consumed === undefined) {
+      // The representation the grant was issued with must still hold (not revoked, inside its
+      // validity window, the application still covered): otherwise the grant is revoked.
+      const denial =
+        clientId === undefined ? undefined : await representationDenial(clientId, login);
+      if (denial !== undefined && clientId !== undefined && presented.grantId !== undefined) {
+        await revokeGrant(presented.grantId, clientId, sub, "representation_invalid");
+        await tokenDenied(refresh, clientId, sub, denial);
+        return undefined;
+      }
+      // The ID token (and a rotated refresh token) carries the grant login's acr, amr and
+      // auth_time, exactly like the access token: never values of a later login in the same
+      // browser session.
+      Object.assign(token, { acr: login.acr, amr: [...login.amr], authTime: login.authTime });
+      if (refresh && presented.consumed === undefined) {
         // A refresh is activity: the session's idle timeout starts again.
         await loginState.touchSession(login.sessionUid, sub, login.authTime, epochNow());
       }
@@ -236,6 +270,62 @@ export function buildTenantProvider(
     };
     return account;
   };
+
+  /**
+   * Why the grant login's representation no longer holds for the application, if it does not:
+   * `representation_invalid` (the party's right ended) or `representation_required` (the
+   * application now requires a party and the grant has none).
+   */
+  async function representationDenial(
+    clientId: string,
+    login: LoginContext,
+  ): Promise<AuditDetails<"token.refresh_denied">["reason"] | undefined> {
+    const application = await repos.applications.findEnabledByClientId(tenant.id, clientId);
+    if (application === null || application.representationMode === "none") return undefined;
+    const choice = login.representation;
+    if (choice === undefined) {
+      return application.representationMode === "required" ? "representation_required" : undefined;
+    }
+    const agent = { personId: login.personId, loginMethodId: login.loginMethodId };
+    const valid = await revalidateChoice(registry, tenant, agent, application, choice);
+    if (valid !== null) return undefined;
+    return choice.type === "self" ? "representation_required" : "representation_invalid";
+  }
+
+  /** A refresh (`token.refresh_denied`) or code exchange (`token.exchange_denied`) refused. */
+  async function tokenDenied(
+    refresh: boolean,
+    clientId: string,
+    personId: string,
+    reason: AuditDetails<"token.refresh_denied">["reason"],
+  ): Promise<void> {
+    await auditLog.record({
+      action: refresh ? "token.refresh_denied" : "token.exchange_denied",
+      tenantId: tenant.id,
+      actor: { type: "application", id: clientId },
+      subject: { type: "person", id: personId },
+      details: { clientId, reason },
+    });
+  }
+
+  /** Revokes an application's grant with its tokens; the audit event commits with it. */
+  async function revokeGrant(
+    grantId: string,
+    clientId: string,
+    personId: string,
+    reason: AuditDetails<"grant.revoked">["reason"],
+  ): Promise<void> {
+    const events = await loginState.revokeGrantAudited(grantId, async (audit) => [
+      await auditLog.recordIn(audit, {
+        action: "grant.revoked",
+        tenantId: tenant.id,
+        actor: { type: "system", id: null },
+        subject: { type: "person", id: personId },
+        details: { clientId, reason },
+      }),
+    ]);
+    auditLog.forward(events);
+  }
 
   const extraTokenClaims: NonNullable<Configuration["extraTokenClaims"]> = async (ctx, token) => {
     if (token.kind === "ClientCredentials") return { tid: tenant.slug };
@@ -359,6 +449,7 @@ export function buildTenantProvider(
     // A grant at (or, with clock skew against the database, past) its end would be saved with no
     // time left: it is over, so the authorization starts a new one.
     if (grant?.exp !== undefined && grant.exp <= epochNow()) grant = undefined;
+    if (grant?.jti !== undefined && (await representationEnds(ctx, grant.jti))) grant = undefined;
     grant ??= new ctx.oidc.provider.Grant({
       accountId: session.accountId,
       clientId: client.clientId,
@@ -367,6 +458,68 @@ export function buildTenantProvider(
     await grant.save();
     return grant;
   };
+
+  /**
+   * Right after a login (the resume that completed it) the login prompt has passed: the session
+   * record is stored now, before the representation chooser or consent, so it always matches
+   * oidc-provider's session (whose acr and login time the login just replaced), even when the
+   * person abandons the chooser.
+   */
+  async function persistFreshLogin(ctx: KoaContextWithOIDC): Promise<void> {
+    const { session, result } = ctx.oidc;
+    if (ctx.oidc.route !== "resume" || result?.login === undefined) return;
+    const record = rememberedSessionRecord(ctx);
+    if (session?.accountId === undefined || record?.personId !== session.accountId) return;
+    await loginState.saveSession(session.uid, { ...record, lastActivityAt: epochNow() });
+  }
+
+  /** Two representations are the same (no stored representation: the person acted as self). */
+  const sameRepresentation = (
+    a: RepresentationChoice | undefined,
+    b: RepresentationChoice,
+  ): boolean =>
+    a === undefined || a.type === "self"
+      ? b.type === "self"
+      : b.type === "party" && a.partyId === b.partyId;
+
+  /**
+   * Representation is chosen per grant, so a grant ends with its representation: when the person
+   * just chose another one than the grant was issued with (`representation_changed`), or the
+   * grant's representation no longer holds (`representation_invalid`, audited as
+   * `representation.denied` too). The grant and its tokens are revoked and the authorization
+   * continues with a new grant, so earlier refresh tokens never switch to another
+   * representation. Returns whether the grant was revoked.
+   */
+  async function representationEnds(ctx: KoaContextWithOIDC, grantId: string): Promise<boolean> {
+    const { session, client, result } = ctx.oidc;
+    const personId = session?.accountId;
+    if (personId === undefined || client === undefined) return false;
+    const previous = await loginState.findGrantLogin(grantId);
+    if (previous?.personId !== personId || previous.clientId !== client.clientId) return false;
+    const chosen = representationChoiceSchema.safeParse(result?.[REPRESENTATION_RESULT_KEY]);
+    if (chosen.success) {
+      if (sameRepresentation(previous.representation, chosen.data)) return false;
+      await revokeGrant(grantId, client.clientId, personId, "representation_changed");
+      return true;
+    }
+    if (previous.representation === undefined) return false;
+    if ((await representationDenial(client.clientId, previous)) === undefined) return false;
+    await auditLog.record({
+      action: "representation.denied",
+      tenantId: tenant.id,
+      actor: { type: "person", id: personId },
+      subject: { type: "person", id: personId },
+      details: {
+        clientId: client.clientId,
+        reason: "no_longer_valid",
+        ...(previous.representation.type === "party"
+          ? { partyId: previous.representation.partyId }
+          : {}),
+      },
+    });
+    await revokeGrant(grantId, client.clientId, personId, "representation_invalid");
+    return true;
+  }
 
   /** Whether the session's latest login may serve an authorization of `clientId` right now. */
   const usableFor = (record: SessionRecord, accountId: string, clientId: string): boolean => {
@@ -411,6 +564,11 @@ export function buildTenantProvider(
   if (loginChecks === undefined || consentChecks === undefined) {
     throw new Error("oidc-provider base policy without login or consent prompt");
   }
+  // The representation chooser: after the login, before consent (where the grant login is saved).
+  policy.add(
+    representationPrompt({ tenant, repos, registry, loginState, loginPassed: persistFreshLogin }),
+    policy.findIndex((prompt) => prompt.name === "consent"),
+  );
   loginChecks.add(
     sessionCheck("session_unknown", "the broker session must be established again", () => false),
   );
@@ -450,23 +608,90 @@ export function buildTenantProvider(
       "portvakt_session_activity",
       "records the session activity",
       async (ctx) => {
-        const { session, grant } = ctx.oidc;
+        const { session, grant, client, result } = ctx.oidc;
         const record = rememberedSessionRecord(ctx);
-        const login = rememberedLoginContext(ctx);
+        const remembered = rememberedLoginContext(ctx);
         if (
           session?.accountId === undefined ||
           record?.personId !== session.accountId ||
-          login === undefined ||
-          grant?.jti === undefined
+          remembered === undefined ||
+          grant?.jti === undefined ||
+          client === undefined
         ) {
           throw new errors.AccessDenied("the broker session must be established again");
         }
+        const decision = rememberedRepresentation(ctx);
+        const login: LoginContext = {
+          ...remembered,
+          ...(decision?.choice === undefined ? {} : { representation: decision.choice }),
+        };
+        const pending = pendingLoginSchema.safeParse(result?.[PENDING_LOGIN_RESULT_KEY]);
+        const stepUp =
+          result?.login !== undefined && pending.success ? pending.data.stepUp : undefined;
         await loginState.saveSession(session.uid, { ...record, lastActivityAt: epochNow() });
-        await loginState.saveGrantLogin(grant.jti, login);
+        if (decision?.selected !== true && stepUp === undefined) {
+          await loginState.saveGrantLogin(grant.jti, login);
+          return interactionPolicy.Check.NO_NEED_TO_PROMPT;
+        }
+        // What this grant login commits (a representation choice, a step-up) is audited with it.
+        const events = await loginState.saveGrantLoginAudited(grant.jti, login, (audit) =>
+          grantAudits(audit, client.clientId, login, decision?.selected === true, stepUp),
+        );
+        auditLog.forward(events);
         return interactionPolicy.Check.NO_NEED_TO_PROMPT;
       },
     ),
   );
+
+  /** The success events a grant login commits: the chosen representation, a step-up. */
+  async function grantAudits(
+    audit: AuditRepository,
+    clientId: string,
+    login: LoginContext,
+    selected: boolean,
+    stepUp: { readonly previousAcr?: string | undefined } | undefined,
+  ): Promise<AuditEvent[]> {
+    const events: AuditEvent[] = [];
+    const person = { type: "person", id: login.personId } as const;
+    const choice = login.representation;
+    if (selected && choice !== undefined) {
+      events.push(
+        await auditLog.recordIn(audit, {
+          action: "representation.selected",
+          tenantId: tenant.id,
+          actor: person,
+          subject: choice.type === "party" ? { type: "party", id: choice.partyId } : person,
+          details:
+            choice.type === "party"
+              ? {
+                  clientId,
+                  choice: "party",
+                  partyId: choice.partyId,
+                  partyType: choice.partyType,
+                  sources: [...choice.sources],
+                }
+              : { clientId, choice: "self" },
+        }),
+      );
+    }
+    if (stepUp !== undefined) {
+      events.push(
+        await auditLog.recordIn(audit, {
+          action: "step_up.success",
+          tenantId: tenant.id,
+          actor: person,
+          subject: person,
+          details: {
+            clientId,
+            loginMethodId: login.loginMethodId,
+            acr: login.acr,
+            ...(stepUp.previousAcr === undefined ? {} : { previousAcr: stepUp.previousAcr }),
+          },
+        }),
+      );
+    }
+    return events;
+  }
 
   const configuration: Configuration = {
     adapter: createAdapterFactory({
@@ -612,6 +837,56 @@ export function buildTenantProvider(
     }
   });
 
+  // Every token endpoint success: `token.issued` (grant type and client; never a token value),
+  // written before the response is sent.
+  provider.use(async (ctx, next) => {
+    await next();
+    const oidc = (ctx as { oidc?: KoaContextWithOIDC["oidc"] }).oidc;
+    if (oidc?.route !== "token" || ctx.status !== 200) return;
+    const grantType = (oidc.params as { grant_type?: unknown } | undefined)?.grant_type;
+    const clientId = oidc.client?.clientId;
+    if (
+      clientId === undefined ||
+      (grantType !== "authorization_code" &&
+        grantType !== "refresh_token" &&
+        grantType !== "client_credentials")
+    ) {
+      return;
+    }
+    const personId = oidc.account?.accountId;
+    await auditLog.record({
+      action: "token.issued",
+      tenantId: tenant.id,
+      actor: { type: "application", id: clientId },
+      subject: personId === undefined ? null : { type: "person", id: personId },
+      details: { clientId, grantType },
+    });
+  });
+
+  // RP-initiated logout (the confirmation form): audited as `session.logout` (`rp`), the whole
+  // session (`logout=yes`) or only the application's part. Not the session switch during a
+  // login, whose redirect resumes an authorization.
+  provider.use(async (ctx, next) => {
+    await next();
+    const oidc = (ctx as { oidc?: KoaContextWithOIDC["oidc"] }).oidc;
+    if (oidc?.route !== "end_session_confirm" || ctx.status !== 303) return;
+    const personId = oidc.session?.accountId;
+    if (personId === undefined || ctx.response.get("Location").startsWith(`${issuer}/auth`)) return;
+    const whole = (oidc.params as { logout?: unknown } | undefined)?.logout !== undefined;
+    const clientId = oidc.client?.clientId;
+    await auditLog.record({
+      action: "session.logout",
+      tenantId: tenant.id,
+      actor: { type: "person", id: personId },
+      subject: { type: "person", id: personId },
+      details: {
+        initiator: "rp",
+        scope: whole ? "session" : "application",
+        ...(clientId === undefined ? {} : { clientId }),
+      },
+    });
+  });
+
   // RP-initiated logout of a whole session (`logout=yes`) whose latest login was upstream SAML:
   // after oidc-provider ended the session locally, the browser is sent through the IdP's single
   // logout and back. Not for the session switch during a login (its redirect resumes the
@@ -676,6 +951,7 @@ export function buildTenantProvider(
     provider,
     loginState,
     keysVersion: keys.version,
+    acrValues,
     fingerprint,
     handle: (req, res) => {
       void callback(req, res);

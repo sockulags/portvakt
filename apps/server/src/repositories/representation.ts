@@ -14,7 +14,14 @@ import {
   type RepresentationGrant,
 } from "../domain/representation.js";
 import { displayNameSchema } from "../domain/schemas.js";
-import { ConflictError, mapDbErrors, NotFoundError, parseInput, requireUuids } from "./errors.js";
+import {
+  ConflictError,
+  mapDbErrors,
+  NotFoundError,
+  parseInput,
+  requireUuids,
+  ValidationError,
+} from "./errors.js";
 
 interface PartyRow {
   id: string;
@@ -22,6 +29,7 @@ interface PartyRow {
   type: PartyType;
   identifier_encrypted: string;
   display_name: string;
+  protected_identity: boolean;
   created_at: Date;
   updated_at: Date;
 }
@@ -43,12 +51,13 @@ interface GrantRow {
   party_type: PartyType;
   party_identifier_encrypted: string;
   party_display_name: string;
+  party_protected_identity: boolean;
   party_created_at: Date;
   party_updated_at: Date;
 }
 
 const PARTY_COLUMNS =
-  "id, tenant_id, type, identifier_encrypted, display_name, created_at, updated_at";
+  "id, tenant_id, type, identifier_encrypted, display_name, protected_identity, created_at, updated_at";
 
 const SELECT_GRANT = `
   SELECT g.id, g.tenant_id, g.agent_person_id, g.agent_identifier_index, g.all_applications,
@@ -58,7 +67,8 @@ const SELECT_GRANT = `
                 ORDER BY ga.application_id) AS application_ids,
          p.id AS party_id, p.type AS party_type,
          p.identifier_encrypted AS party_identifier_encrypted,
-         p.display_name AS party_display_name, p.created_at AS party_created_at,
+         p.display_name AS party_display_name, p.protected_identity AS party_protected_identity,
+         p.created_at AS party_created_at,
          p.updated_at AS party_updated_at
     FROM representation_grants g
     JOIN parties p ON p.tenant_id = g.tenant_id AND p.id = g.party_id`;
@@ -125,8 +135,8 @@ export class PartyRepository {
       this.#db.query<PartyRow>(
         `INSERT INTO parties
            (id, tenant_id, type, identifier_encrypted, identifier_index, identifier_index_key,
-            display_name)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+            display_name, protected_identity)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING ${PARTY_COLUMNS}`,
         [
           id,
@@ -136,6 +146,7 @@ export class PartyRepository {
           index.index,
           index.keyId,
           data.displayName,
+          data.protectedIdentity,
         ],
       ),
     );
@@ -192,6 +203,28 @@ export class PartyRepository {
     return this.#toParty(row);
   }
 
+  /**
+   * Marks a person party as protected (skyddad identitet) or clears the mark (an administrator's
+   * decision, M6 admin API). Organisations cannot be protected.
+   */
+  async setProtectedIdentity(
+    tenantId: string,
+    id: string,
+    protectedIdentity: boolean,
+  ): Promise<Party> {
+    requireUuids({ tenantId, id });
+    const [row] = await mapDbErrors(() =>
+      this.#db.query<PartyRow>(
+        `UPDATE parties SET protected_identity = $3
+          WHERE tenant_id = $1 AND id = $2 AND (type = 'person' OR NOT $3)
+         RETURNING ${PARTY_COLUMNS}`,
+        [tenantId, id, protectedIdentity],
+      ),
+    );
+    if (row === undefined) throw new NotFoundError("Person party");
+    return this.#toParty(row);
+  }
+
   /** Deletes the party and every grant to act for it. */
   async delete(tenantId: string, id: string): Promise<boolean> {
     requireUuids({ tenantId, id });
@@ -212,6 +245,7 @@ export class PartyRepository {
         partyIdentifierContext(row.id),
       ),
       displayName: row.display_name,
+      protectedIdentity: row.protected_identity,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -334,14 +368,17 @@ export class RepresentationGrantRepository {
     pinIndexes: readonly string[],
     applicationId: string,
     at?: Date,
+    /** Only grants to act for this party (re-checking one stored choice). */
+    partyId?: string,
   ): Promise<RepresentationGrant[]> {
-    requireUuids({ tenantId, personId, applicationId });
+    requireUuids({ tenantId, personId, applicationId, partyId });
     const rows = await this.#db.query<GrantRow>(
       `${SELECT_GRANT}
         WHERE g.tenant_id = $1
           AND ${usableBy("$2", "$3", "$4", "COALESCE($5::timestamptz, now())")}
+          AND ($6::uuid IS NULL OR g.party_id = $6::uuid)
         ORDER BY p.display_name, g.id`,
-      [tenantId, personId, [...pinIndexes], applicationId, at ?? null],
+      [tenantId, personId, [...pinIndexes], applicationId, at ?? null, partyId ?? null],
     );
     return rows.map((row) => this.#toGrant(row));
   }
@@ -366,6 +403,48 @@ export class RepresentationGrantRepository {
       [tenantId, personId, [...pinIndexes], applicationId, at ?? null, grantId],
     );
     return row === undefined ? null : this.#toGrant(row);
+  }
+
+  /**
+   * Changes which applications a grant covers: every application of the tenant, or the listed
+   * ones (at least one). Every listed application must be attached to the tenant. Takes effect
+   * at the next refresh or authorization of a grant issued with it.
+   */
+  async setApplications(
+    tenantId: string,
+    grantId: string,
+    scope: { readonly allApplications: boolean; readonly applicationIds?: readonly string[] },
+  ): Promise<RepresentationGrant> {
+    requireUuids({ tenantId, grantId });
+    const applicationIds = [...new Set(scope.applicationIds ?? [])];
+    for (const id of applicationIds) requireUuids({ applicationId: id });
+    if (scope.allApplications === applicationIds.length > 0) {
+      throw new ValidationError([
+        "applicationIds: set allApplications, or list at least one application, but not both",
+      ]);
+    }
+    await this.#db.transaction(async (tx) => {
+      const rows = await tx.query(
+        `UPDATE representation_grants SET all_applications = $3
+          WHERE tenant_id = $1 AND id = $2 RETURNING id`,
+        [tenantId, grantId, scope.allApplications],
+      );
+      if (rows.length === 0) throw new NotFoundError("Representation grant");
+      await tx.query(
+        "DELETE FROM representation_grant_applications WHERE tenant_id = $1 AND grant_id = $2",
+        [tenantId, grantId],
+      );
+      if (applicationIds.length > 0) {
+        await mapDbErrors(() =>
+          tx.query(
+            `INSERT INTO representation_grant_applications (tenant_id, grant_id, application_id)
+             SELECT $1, $2, unnest($3::uuid[])`,
+            [tenantId, grantId, applicationIds],
+          ),
+        );
+      }
+    });
+    return this.#require(tenantId, grantId);
   }
 
   /**
@@ -418,6 +497,7 @@ export class RepresentationGrantRepository {
           partyIdentifierContext(row.party_id),
         ),
         displayName: row.party_display_name,
+        protectedIdentity: row.party_protected_identity,
         createdAt: row.party_created_at,
         updatedAt: row.party_updated_at,
       },

@@ -15,7 +15,7 @@ import { generateClientSecret } from "../crypto/secrets.js";
 import type { CreateLoginMethodInput, OidcLoginMethod } from "../domain/login-method.js";
 import type { Tenant } from "../domain/tenant.js";
 import { federationCallbackPath, federationJwksPath } from "../federation/service.js";
-import type { InteractionDetailsResponse } from "../login/routes.js";
+import type { InteractionDetailsResponse, RepresentationDetailsResponse } from "../login/routes.js";
 import type { UiBootstrap } from "../login/ui-shell.js";
 import { EMPLOYEE_ACR, uniqueSuffix } from "./fixtures.js";
 import { TestBrowser, type TestServer } from "./test-server.js";
@@ -331,9 +331,48 @@ export class FlowDriver {
         });
   }
 
-  #interactionUrl(landing: Landing): string {
-    if (landing.kind !== "login_ui" || landing.bootstrap.view !== "login") {
-      throw new Error(`expected the login view, got ${landing.kind}`);
+  /** The representation chooser's details for the interaction of a `representation` view. */
+  async representation(landing: Landing): Promise<RepresentationDetailsResponse> {
+    const response = await this.browser.request(
+      `${this.#interactionUrl(landing, "representation")}/representation`,
+    );
+    if (response.status !== 200)
+      throw new Error(`representation details failed: ${response.status}`);
+    return (await response.json()) as RepresentationDetailsResponse;
+  }
+
+  /** POSTs a representation choice (`{ self: true }` or `{ partyId }`) with its CSRF token. */
+  async chooseRepresentation(
+    landing: Landing,
+    choice: Readonly<Record<string, unknown>>,
+  ): Promise<{ readonly status: number; readonly body: Record<string, unknown> }> {
+    const { csrfToken } = await this.representation(landing);
+    const response = await this.browser.request(
+      `${this.#interactionUrl(landing, "representation")}/representation`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
+        body: JSON.stringify(choice),
+      },
+    );
+    return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  }
+
+  /** Chooses whom to act for and follows the flow from there. */
+  async chooseRepresentationAndFollow(
+    landing: Landing,
+    choice: Readonly<Record<string, unknown>>,
+  ): Promise<Landing> {
+    const { status, body } = await this.chooseRepresentation(landing, choice);
+    if (status !== 200 || typeof body.redirectTo !== "string") {
+      throw new Error(`representation choice refused: ${status} ${JSON.stringify(body)}`);
+    }
+    return this.follow(body.redirectTo);
+  }
+
+  #interactionUrl(landing: Landing, view: "login" | "representation" = "login"): string {
+    if (landing.kind !== "login_ui" || landing.bootstrap.view !== view) {
+      throw new Error(`expected the ${view} view, got ${JSON.stringify(landing)}`);
     }
     return `${this.#ts.baseUrl}/t/${landing.bootstrap.tenant}/interaction/${landing.bootstrap.uid}`;
   }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AuditLog } from "../../audit/audit-log.js";
 import type { Config } from "../../config/index.js";
 import type { KeyRing } from "../../crypto/keyring.js";
 import type { SamlLoginMethod } from "../../domain/login-method.js";
@@ -82,6 +83,7 @@ export interface UpstreamLoginFlow {
 export interface SamlFederationOptions {
   readonly config: Config;
   readonly repos: Repositories;
+  readonly auditLog: AuditLog;
   readonly keys: KeyRing;
   readonly logger: Logger;
   readonly acrRanking: AcrRanking;
@@ -94,8 +96,9 @@ export interface SamlFederationOptions {
 export interface SamlBeginOptions {
   /**
    * PrincipalSelection: the personal identity number of the person expected to sign in (step-up
-   * or signing for a known person, M4). It is sent (over HTTP-POST only) when the IdP's metadata
-   * advertises PrincipalSelection; either way the returned personal identity number must match.
+   * or signing for a known person; `federation.begin` sets it for a step-up). It is sent (over
+   * HTTP-POST only) when the IdP's metadata advertises PrincipalSelection; either way the
+   * returned personal identity number must match.
    */
   readonly principalPin?: string | undefined;
 }
@@ -691,6 +694,19 @@ export class SamlFederation {
         message.issuer === metadata.entityId &&
         message.status?.code === SAML_STATUS.success;
       this.#logouts.inc({ direction: "sp_initiated", outcome: success ? "success" : "failure" });
+      if (pending !== null) {
+        await this.#options.auditLog.record({
+          action: "session.logout",
+          tenantId: tenant.id,
+          actor: { type: "system", id: null },
+          subject: { type: "login_method", id: method.id },
+          details: {
+            initiator: "slo",
+            loginMethodId: method.id,
+            upstream: success ? "success" : "failure",
+          },
+        });
+      }
       if (!success) {
         this.#log.info(
           { loginMethodId, verified: message.verified },
@@ -723,7 +739,13 @@ export class SamlFederation {
         : message.sessionIndexes.flatMap((index) => sessionIndexCandidates(keys, method.id, index)),
     );
     this.#logouts.inc({ direction: "idp_initiated", outcome: "success" });
-    await this.#audit(tenant.id, method.id, ended);
+    await this.#options.auditLog.record({
+      action: "session.logout",
+      tenantId: tenant.id,
+      actor: { type: "system", id: null },
+      subject: { type: "login_method", id: method.id },
+      details: { initiator: "idp", loginMethodId: method.id, sessions: ended },
+    });
     try {
       const response = await buildLogoutResponse(
         sp,
@@ -914,23 +936,6 @@ export class SamlFederation {
 
   async #recordFailure(code: LoginErrorCode, context: FailureContext): Promise<void> {
     await this.#options.flow.recordFailure(code, context);
-  }
-
-  async #audit(tenantId: string, loginMethodId: string, sessions: number): Promise<void> {
-    try {
-      await this.#options.repos.audit.append({
-        tenantId,
-        actor: { type: "system", id: null },
-        subject: { type: "login_method", id: loginMethodId },
-        action: "logout.idp_initiated",
-        details: { loginMethodId, sessions },
-      });
-    } catch (error) {
-      this.#log.error(
-        { err: error, action: "logout.idp_initiated" },
-        "audit event could not be written",
-      );
-    }
   }
 }
 

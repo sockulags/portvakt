@@ -1,7 +1,10 @@
 import { z } from "zod";
+import type { AuditLog } from "../audit/audit-log.js";
+import { auditEvent } from "../audit/catalogue.js";
 import { generateSigningKey } from "../crypto/jwk.js";
 import type { KeyRing } from "../crypto/keyring.js";
 import type { Db } from "../db/database.js";
+import type { AppendAuditEventInput, AuditEvent } from "../domain/audit.js";
 import type { SigningKey } from "../domain/signing-key.js";
 import { JOB_LOCKS, runExclusive } from "../jobs/exclusive.js";
 import type { Logger } from "../logging/logger.js";
@@ -63,6 +66,8 @@ export interface KeyRotationServiceOptions {
   readonly logger: Logger;
   /** Called after a change was committed (reload the local key cache without waiting for NOTIFY). */
   readonly onChange?: () => Promise<void>;
+  /** Hands the committed key events to the audit sink. */
+  readonly auditLog?: AuditLog;
 }
 
 /**
@@ -73,6 +78,8 @@ export interface KeyRotationServiceOptions {
  */
 export class KeyRotationService {
   readonly #options: KeyRotationServiceOptions;
+  /** Audit events written per transaction (by its repositories), forwarded after the commit. */
+  readonly #written = new WeakMap<Repositories, AuditEvent[]>();
 
   constructor(options: KeyRotationServiceOptions) {
     const { publishAheadSeconds, retireAfterSeconds, intervalSeconds } = options.policy;
@@ -183,18 +190,21 @@ export class KeyRotationService {
         await repos.signingKeys.retire(activation.retiring.kid, forced);
         retiredKids.push(activation.retiring.kid);
       }
-      await repos.audit.append({
-        tenantId: null,
-        actor,
-        subject: { type: "signing_key", id: next.kid },
-        action: "key.rotate",
-        details: {
-          reason,
-          emergency,
-          retiringKid: activation.retiring?.kid ?? null,
-          retiredKids,
-        },
-      });
+      await this.#append(
+        repos,
+        auditEvent({
+          tenantId: null,
+          actor,
+          subject: { type: "signing_key", id: next.kid },
+          action: "key.rotate",
+          details: {
+            reason,
+            emergency,
+            retiringKid: activation.retiring?.kid ?? null,
+            retiredKids,
+          },
+        }),
+      );
       return {
         activatedKid: activation.activated.kid,
         retiringKid: emergency ? null : (activation.retiring?.kid ?? null),
@@ -230,28 +240,42 @@ export class KeyRotationService {
     return key;
   }
 
+  /** Key events commit with the transition they describe (the rotation's transaction). */
   async #audit(
     repos: Repositories,
-    action: string,
+    action: "key.create" | "key.activate" | "key.retire",
     kid: string,
-    details: Record<string, boolean | string>,
+    details: { readonly initial?: boolean },
   ): Promise<void> {
-    await repos.audit.append({
-      tenantId: null,
-      actor: SYSTEM_ACTOR,
-      subject: { type: "signing_key", id: kid },
-      action,
-      details,
-    });
+    await this.#append(
+      repos,
+      auditEvent({
+        tenantId: null,
+        actor: SYSTEM_ACTOR,
+        subject: { type: "signing_key", id: kid },
+        action,
+        details,
+      }),
+    );
   }
 
   async #exclusive<T>(
     wait: boolean,
     fn: (repos: Repositories) => Promise<T>,
   ): Promise<T | undefined> {
-    const result = await runExclusive(this.#options.db, JOB_LOCKS.keyRotation, { wait }, (tx) =>
-      fn(createRepositories(tx, this.#options.keys)),
-    );
+    const written: AuditEvent[] = [];
+    const result = await runExclusive(this.#options.db, JOB_LOCKS.keyRotation, { wait }, (tx) => {
+      const repos = createRepositories(tx, this.#options.keys);
+      this.#written.set(repos, written);
+      return fn(repos);
+    });
+    // Committed: the key events go to the audit sink.
+    if (result.ran) this.#options.auditLog?.forward(written);
     return result.ran ? result.value : undefined;
+  }
+
+  async #append(repos: Repositories, input: AppendAuditEventInput): Promise<void> {
+    const stored = await repos.audit.append(input);
+    this.#written.get(repos)?.push(stored);
   }
 }

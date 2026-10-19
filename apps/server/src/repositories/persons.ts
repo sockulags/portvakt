@@ -168,6 +168,85 @@ export class PersonRepository {
   }
 
   /**
+   * Blind indexes (under every master key) of the personal identity number of the person's
+   * identity through one login method, as {@link pinIndexCandidates} for a single identity:
+   * representation by pin counts only the number the current login asserted. Empty when that
+   * identity has no number. Never log the result.
+   */
+  async pinIndexCandidatesOfIdentity(
+    tenantId: string,
+    personId: string,
+    loginMethodId: string,
+  ): Promise<string[]> {
+    requireUuids({ tenantId, personId, loginMethodId });
+    const [row] = await this.#db.query<{ id: string; pin_encrypted: string }>(
+      `SELECT id, pin_encrypted FROM identities
+        WHERE tenant_id = $1 AND person_id = $2 AND login_method_id = $3
+          AND pin_encrypted IS NOT NULL`,
+      [tenantId, personId, loginMethodId],
+    );
+    if (row === undefined) return [];
+    const pin = this.#keys.secrets.decryptString(row.pin_encrypted, identityPinContext(row.id));
+    return this.#keys.index.candidates("pin", pin);
+  }
+
+  /**
+   * The personal identity numbers (canonical) of the given set that belong to a protected person
+   * of the tenant, in one query (each number looked up under every master key's blind index).
+   */
+  async protectedPins(tenantId: string, pins: readonly string[]): Promise<Set<string>> {
+    requireUuids({ tenantId });
+    if (pins.length === 0) return new Set();
+    const byIndex = new Map<string, string>();
+    for (const pin of new Set(pins)) {
+      for (const index of this.#keys.index.candidates("pin", pin)) byIndex.set(index, pin);
+    }
+    const rows = await this.#db.query<{ pin_index: string }>(
+      `SELECT DISTINCT i.pin_index FROM identities i
+         JOIN persons p ON p.tenant_id = i.tenant_id AND p.id = i.person_id
+        WHERE i.tenant_id = $1 AND i.pin_index = ANY ($2::text[]) AND p.protected_identity`,
+      [tenantId, [...byIndex.keys()]],
+    );
+    return new Set(rows.map((row) => byIndex.get(row.pin_index)!));
+  }
+
+  /**
+   * The personal identity number of the person's most recently used identity that carries one
+   * (step-up of a known person: SAML PrincipalSelection, an OIDC pin `login_hint`); `null` when
+   * no identity has one. Personal data: never log it.
+   */
+  async latestPin(tenantId: string, personId: string): Promise<string | null> {
+    requireUuids({ tenantId, personId });
+    const [row] = await this.#db.query<{ id: string; pin_encrypted: string }>(
+      `SELECT id, pin_encrypted FROM identities
+        WHERE tenant_id = $1 AND person_id = $2 AND pin_encrypted IS NOT NULL
+        ORDER BY last_login_at DESC, id
+        LIMIT 1`,
+      [tenantId, personId],
+    );
+    if (row === undefined) return null;
+    return this.#keys.secrets.decryptString(row.pin_encrypted, identityPinContext(row.id));
+  }
+
+  /**
+   * Whether a person of the tenant with a protected identity has an identity with this personal
+   * identity number (looked up under every master key's blind index). A represented person party
+   * is then treated as protected too.
+   */
+  async isProtectedByPin(tenantId: string, pin: string): Promise<boolean> {
+    requireUuids({ tenantId });
+    const [row] = await this.#db.query<{ found: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM identities i
+           JOIN persons p ON p.tenant_id = i.tenant_id AND p.id = i.person_id
+          WHERE i.tenant_id = $1 AND i.pin_index = ANY ($2::text[]) AND p.protected_identity
+       ) AS found`,
+      [tenantId, this.#keys.index.candidates("pin", pin)],
+    );
+    return row?.found === true;
+  }
+
+  /**
    * Just-in-time provisioning at login, in one transaction: finds the identity for (login
    * method, upstream subject) and refreshes its attributes, or creates the identity. A new
    * identity joins an existing person when the login method links by pin, the login reached the

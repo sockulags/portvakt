@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import express, { Router, type Express } from "express";
 import type { Pool } from "pg";
 import { createApp, type ReadinessReport } from "./app.js";
+import { AuditLog, type AuditSink } from "./audit/audit-log.js";
 import type { Config } from "./config/index.js";
 import { createKeyRing, type KeyRing } from "./crypto/keyring.js";
 import { createDb } from "./db/database.js";
@@ -31,6 +32,8 @@ import type { ChangeEvent } from "./repositories/change-events.js";
 import { FederationStateRepository } from "./repositories/federation-states.js";
 import { createRepositories, type Repositories } from "./repositories/index.js";
 import { OidcPayloadRepository } from "./repositories/oidc-payloads.js";
+import { RepresentationRegistry } from "./representation/registry.js";
+import { InternalRepresentationSource } from "./representation/source.js";
 import { SamlRepository } from "./repositories/saml.js";
 
 const READINESS_DB_TIMEOUT_MS = 2000;
@@ -47,6 +50,8 @@ export interface PortvaktOptions {
   readonly listenUrl?: string;
   /** Defaults to the key ring of `config.masterKeys`. */
   readonly keys?: KeyRing;
+  /** Where committed audit events are forwarded besides the table (default: nowhere). */
+  readonly auditSink?: AuditSink;
 }
 
 export interface Portvakt {
@@ -56,8 +61,12 @@ export interface Portvakt {
   readonly keyCache: SigningKeyCache;
   /** `rotateNow` is the entry point for the admin API (M6). */
   readonly rotation: KeyRotationService;
-  /** `completeLogin` finishes a login (the federation calls it; M4 adds representation). */
+  /** `completeLogin` finishes a login (the federation calls it). */
   readonly interactions: InteractionService;
+  /** The audit event catalogue writer (append-only table, then the audit sink). */
+  readonly auditLog: AuditLog;
+  /** Representation sources merged per tenant (the chooser, `rep`, re-checks at refresh). */
+  readonly representation: RepresentationRegistry;
   /** Upstream federation (OIDC and SAML login methods). */
   readonly federation: FederationService;
   /** Admin-facing SAML login method operations (the admin API, M6, calls these). */
@@ -99,6 +108,19 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     acrRanking: config.acrRanking,
   });
   const sessionPolicy = new SessionPolicyService(config.tokens, repos.loginMethods);
+  const auditLog = new AuditLog({
+    audit: repos.audit,
+    logger,
+    ...(options.auditSink === undefined ? {} : { sink: options.auditSink }),
+  });
+  // v1: the internal register. Bolagsverket or Mina ombud are added here as further sources and
+  // enabled per tenant (tenants.representation_sources).
+  const representation = new RepresentationRegistry({
+    sources: [new InternalRepresentationSource(repos.grants)],
+    persons: repos.persons,
+    loginMethods: repos.loginMethods,
+    logger,
+  });
   const acrRanking = new AcrRanking(config.acrRanking);
   const shell = new LoginUiShell({
     dir: config.loginUiDir,
@@ -122,7 +144,10 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     build: (input) =>
       buildTenantProvider(input, {
         config,
+        db,
         repos,
+        auditLog,
+        representation,
         logger,
         sessionPolicy,
         acrRanking,
@@ -143,8 +168,9 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     policy: config.keyRotation,
     logger,
     onChange: reloadKeys,
+    auditLog,
   });
-  const interactions = createInteractionService(repos);
+  const interactions = createInteractionService(repos, auditLog);
   const outbound = new OutboundGuard({
     production: config.isProduction,
     allowPrivateHosts: config.federation.allowPrivateUpstreamHosts,
@@ -161,7 +187,9 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
   });
   const federation = new FederationService({
     config,
+    db,
     repos,
+    auditLog,
     logger,
     upstream,
     acrRanking,
@@ -315,6 +343,8 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
         loginRoutes: loginRoutes({
           config,
           repos,
+          auditLog,
+          representation,
           federation,
           interactions,
           shell,
@@ -338,6 +368,8 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     keyCache,
     rotation,
     interactions,
+    auditLog,
+    representation,
     federation,
     samlAdmin,
     metrics,

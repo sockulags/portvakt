@@ -1,10 +1,33 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { errors } from "oidc-provider";
 import { z } from "zod";
+import type { AuditLog } from "../audit/audit-log.js";
 import { upstreamSessionSchema } from "../repositories/federation-states.js";
 import type { Repositories } from "../repositories/index.js";
 import { PENDING_LOGIN_RESULT_KEY, type PendingLogin } from "./login-context.js";
 import type { TenantProvider } from "./provider.js";
+
+/**
+ * Login prompt reasons of a step-up: the session's person is signed in and the application asks
+ * for a higher acr (`acr_values`) or a fresher authentication (`max_age`). Any other reason
+ * (no session, an expired or idle session, `prompt=login`, another application without SSO)
+ * is an ordinary login, after which another person may sign in.
+ */
+const STEP_UP_REASONS: ReadonlySet<string> = new Set(["acr_not_met", "max_age"]);
+
+/** Whether a login prompt is a step-up of the session's person (see {@link STEP_UP_REASONS}). */
+export function isStepUp(
+  prompt: string,
+  reasons: readonly string[],
+  sessionAccountId: string | undefined,
+): boolean {
+  return (
+    prompt === "login" &&
+    sessionAccountId !== undefined &&
+    reasons.length > 0 &&
+    reasons.every((reason) => STEP_UP_REASONS.has(reason))
+  );
+}
 
 /**
  * The request an interaction runs in: the tenant's provider, the interaction uid from the URL
@@ -44,7 +67,14 @@ export const completeLoginInputSchema = z
 export type CompleteLoginInput = z.input<typeof completeLoginInputSchema>;
 
 export type InteractionErrorCode =
-  "invalid_input" | "interaction_not_found" | "person_not_found" | "login_method_unavailable";
+  | "invalid_input"
+  | "interaction_not_found"
+  | "person_not_found"
+  | "login_method_unavailable"
+  /** The interaction waits for another prompt (the login, or the representation chooser). */
+  | "wrong_prompt"
+  /** A step-up login resolved to another person than the session's; the session is kept. */
+  | "step_up_person_mismatch";
 
 /** A login that cannot complete. The message never contains personal data. */
 export class InteractionError extends Error {
@@ -63,6 +93,14 @@ export interface InteractionDetails {
   /** Why the prompt is required (oidc-provider and Portvakt check reasons, e.g. `max_age`). */
   readonly reasons: readonly string[];
   readonly clientId: string | undefined;
+  /** The person of the browser's broker session, if one is signed in. */
+  readonly sessionAccountId: string | undefined;
+  /** oidc-provider uid of the browser's session (its session record), if one is signed in. */
+  readonly sessionUid: string | undefined;
+  /** The acr of the session's latest login, if one is signed in. */
+  readonly sessionAcr: string | undefined;
+  /** The login prompt is a step-up of the session's person ({@link isStepUp}). */
+  readonly stepUp: boolean;
   /** Authorization request parameters the login flow uses (strings only, as sent). */
   readonly params: {
     readonly acrValues: string | undefined;
@@ -91,11 +129,19 @@ export async function loadInteraction(ctx: InteractionContext): Promise<Interact
   }
   const { params } = details;
   const maxAge = Number(params.max_age);
+  const session = details.session as
+    { accountId?: unknown; acr?: unknown; uid?: unknown } | undefined;
+  const sessionAccountId = typeof session?.accountId === "string" ? session.accountId : undefined;
+  const reasons = [...details.prompt.reasons];
   return {
     uid: details.uid,
     prompt: details.prompt.name,
-    reasons: [...details.prompt.reasons],
+    reasons,
     clientId: stringParam(params.client_id, 128),
+    sessionAccountId,
+    sessionUid: sessionAccountId === undefined ? undefined : stringParam(session?.uid, 512),
+    sessionAcr: stringParam(session?.acr, 255),
+    stepUp: isStepUp(details.prompt.name, reasons, sessionAccountId),
     params: {
       acrValues: stringParam(params.acr_values),
       loginHint: stringParam(params.login_hint, 320),
@@ -115,20 +161,26 @@ export interface InteractionService {
    * with a 303). The broker session and its login context are created there; consent is
    * implicit.
    *
-   * The federation calls this after the upstream login and JIT provisioning; M4 adds the
-   * representation step before it. Checks that the person and the login method belong to the
-   * tenant, the method is enabled, and the person has an identity through it; otherwise throws
+   * The federation calls this after the upstream login and JIT provisioning; the representation
+   * chooser (the `select_account` prompt) follows at the resume when the application offers
+   * representation. Checks that the interaction waits for a login, the person and the login
+   * method belong to the tenant, the method is enabled, and the person has an identity through
+   * it; for a step-up, that the person is the session's person (otherwise
+   * `step_up_person_mismatch` is audited and nothing about the session changes). Throws
    * {@link InteractionError}.
    */
   completeLogin(
     ctx: InteractionContext,
     input: CompleteLoginInput,
-  ): Promise<{ readonly returnTo: string }>;
+  ): Promise<{ readonly returnTo: string; readonly stepUp: boolean }>;
   /** Ends the interaction without a login: the application receives `access_denied`. */
   abort(ctx: InteractionContext): Promise<{ readonly returnTo: string }>;
 }
 
-export function createInteractionService(repos: Repositories): InteractionService {
+export function createInteractionService(
+  repos: Repositories,
+  auditLog: AuditLog,
+): InteractionService {
   return {
     async completeLogin(ctx, input) {
       const parsed = completeLoginInputSchema.safeParse(input);
@@ -136,7 +188,10 @@ export function createInteractionService(repos: Repositories): InteractionServic
         throw new InteractionError("invalid_input", "Invalid login result");
       }
       const login = parsed.data;
-      await loadInteraction(ctx);
+      const details = await loadInteraction(ctx);
+      if (details.prompt !== "login") {
+        throw new InteractionError("wrong_prompt", "The interaction does not wait for a login");
+      }
       const tenantId = ctx.tenantProvider.tenant.id;
       const [person, method, identities] = await Promise.all([
         repos.persons.findById(tenantId, login.personId),
@@ -151,9 +206,33 @@ export function createInteractionService(repos: Repositories): InteractionServic
       ) {
         throw new InteractionError("login_method_unavailable", "Login method not available");
       }
+      if (details.stepUp && details.sessionAccountId !== person.id) {
+        await auditLog.record({
+          action: "step_up.person_mismatch",
+          tenantId,
+          actor: { type: "person", id: person.id },
+          subject:
+            details.sessionAccountId === undefined
+              ? null
+              : { type: "person", id: details.sessionAccountId },
+          details: {
+            loginMethodId: method.id,
+            ...(details.clientId === undefined ? {} : { clientId: details.clientId }),
+          },
+        });
+        throw new InteractionError(
+          "step_up_person_mismatch",
+          "The step-up login is another person than the session's",
+        );
+      }
       const pending: PendingLogin = {
         loginMethodId: method.id,
         ...(login.upstreamSession === undefined ? {} : { upstream: login.upstreamSession }),
+        ...(details.stepUp
+          ? {
+              stepUp: details.sessionAcr === undefined ? {} : { previousAcr: details.sessionAcr },
+            }
+          : {}),
       };
       const returnTo = await ctx.tenantProvider.provider.interactionResult(
         ctx.req,
@@ -170,7 +249,7 @@ export function createInteractionService(repos: Repositories): InteractionServic
         },
         { mergeWithLastSubmission: false },
       );
-      return { returnTo };
+      return { returnTo, stepUp: details.stepUp };
     },
     async abort(ctx) {
       await loadInteraction(ctx);

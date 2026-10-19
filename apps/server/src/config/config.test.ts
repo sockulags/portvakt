@@ -8,6 +8,7 @@ import {
   DEFAULT_ACR_RANKING,
   DEV_COOKIE_KEYS,
   DEV_MASTER_KEYS,
+  loadAuditPruneConfig,
   loadConfig,
   loadDatabaseConfig,
 } from "./index.js";
@@ -334,5 +335,35 @@ describe("loadConfig: federation settings", () => {
     expect(issuesOf({ ...devEnv, ACR_RANKING: "urn:a,urn:a" })).toEqual([
       "ACR_RANKING: acr values must be unique",
     ]);
+  });
+});
+
+describe("AUDIT_RETENTION", () => {
+  it("defaults to 400 days and refuses less than 90 days", () => {
+    expect(loadConfig(devEnv).audit.retentionSeconds).toBe(400 * 24 * 3600);
+    expect(loadConfig({ ...devEnv, AUDIT_RETENTION: "90d" }).audit.retentionSeconds).toBe(
+      90 * 24 * 3600,
+    );
+    expect(issuesOf({ ...devEnv, AUDIT_RETENTION: "89d" })).toContain(
+      "AUDIT_RETENTION: must be at least 90 days",
+    );
+    expect(() => loadAuditPruneConfig({ ...devEnv, AUDIT_RETENTION: "30d" })).toThrow(
+      /AUDIT_RETENTION: must be at least 90 days/,
+    );
+    const prune = loadAuditPruneConfig({
+      ...devEnv,
+      MIGRATION_DATABASE_URL: "postgres://owner:pw@localhost:5433/portvakt",
+    });
+    expect(prune).toMatchObject({
+      retentionSeconds: 400 * 24 * 3600,
+      database: { migrationUrl: "postgres://owner:pw@localhost:5433/portvakt" },
+    });
+  });
+});
+
+describe("DATABASE_POOL_MAX", () => {
+  it("needs room for a transaction and a statement beside it", () => {
+    expect(issuesOf({ ...devEnv, DATABASE_POOL_MAX: "1" }).join("\n")).toMatch(/DATABASE_POOL_MAX/);
+    expect(loadConfig({ ...devEnv, DATABASE_POOL_MAX: "2" }).database.poolMax).toBe(2);
   });
 });

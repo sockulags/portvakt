@@ -1,7 +1,14 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ActionResult, Bootstrap, InteractionDetails, LoginApi } from "./api";
+import type {
+  ActionResult,
+  Bootstrap,
+  InteractionDetails,
+  LoginApi,
+  RepresentationApi,
+  RepresentationDetails,
+} from "./api";
 import { App } from "./App";
 
 const noHints = { uiLocales: [], acceptLanguage: [] };
@@ -176,5 +183,104 @@ describe("other views", () => {
     unmount();
     render(<App bootstrap={null} />);
     expect(screen.getByTestId("error-code").getAttribute("data-error")).toBe("request_failed");
+  });
+});
+
+describe("representation view", () => {
+  const chooserDetails: RepresentationDetails = {
+    tenant: { name: "Kommunen" },
+    application: { name: "Bygglov" },
+    allowSelf: true,
+    parties: [
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        type: "organisation",
+        name: "Bygg AB",
+        identifier: { kind: "organisation_number", value: "5566778899" },
+      },
+    ],
+    csrfToken: "csrf-rep",
+  };
+  const bootstrap = (error?: "no_representation_available"): Bootstrap => ({
+    view: "representation",
+    tenant: "kommunen",
+    uid: "abc",
+    ...(error === undefined ? {} : { error }),
+    locale: noHints,
+  });
+  const choose = vi.fn((): Promise<ActionResult> =>
+    Promise.resolve({ ok: true, redirectTo: "https://app/cb" }),
+  );
+  const abortChooser = vi.fn((): Promise<ActionResult> =>
+    Promise.resolve({ ok: true, redirectTo: "https://app/den" }),
+  );
+  const chooserApi = (overrides: Partial<RepresentationApi> = {}): RepresentationApi => {
+    choose.mockClear();
+    abortChooser.mockClear();
+    return {
+      details: () => Promise.resolve({ ok: true, details: chooserDetails }),
+      choose,
+      abort: abortChooser,
+      ...overrides,
+    };
+  };
+
+  it("lists the choices and leaves with the chosen party", async () => {
+    const api = chooserApi();
+    const navigate = vi.fn();
+    const user = userEvent.setup();
+    render(<App bootstrap={bootstrap()} representationApi={api} navigate={navigate} />);
+    await screen.findByTestId("party-list");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Välj vem du företräder");
+    expect(document.activeElement).toBe(screen.getByRole("heading", { level: 1 }));
+    expect(screen.getByText(/Bygglov/)).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "Företräd Bygg AB" }));
+    expect(choose).toHaveBeenCalledWith(
+      { partyId: "11111111-1111-4111-8111-111111111111" },
+      "csrf-rep",
+    );
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("https://app/cb"));
+  });
+
+  it("shows a refused choice above the list, which stays as the retry", async () => {
+    const api = chooserApi({
+      choose: () => Promise.resolve({ ok: false, error: "representation_not_allowed" }),
+    });
+    const user = userEvent.setup();
+    render(<App bootstrap={bootstrap()} representationApi={api} />);
+    await user.click(await screen.findByTestId("representation-option-self"));
+    const alert = await screen.findByTestId("representation-error");
+    expect(alert.getAttribute("data-error")).toBe("representation_not_allowed");
+    expect(screen.getByTestId("party-list")).toBeDefined();
+  });
+
+  it("offers only the way back when there is nobody to represent", async () => {
+    const api = chooserApi({
+      details: () =>
+        Promise.resolve({
+          ok: true,
+          details: { ...chooserDetails, allowSelf: false, parties: [] },
+        }),
+    });
+    const navigate = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <App
+        bootstrap={{
+          ...bootstrap("no_representation_available"),
+          locale: { uiLocales: ["en"], acceptLanguage: [] },
+        }}
+        representationApi={api}
+        navigate={navigate}
+      />,
+    );
+    expect(await screen.findByRole("heading", { level: 1 })).toBeDefined();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe(
+      "You cannot represent anyone here",
+    );
+    expect(screen.queryByTestId("party-list")).toBeNull();
+    await user.click(screen.getByTestId("cancel-representation"));
+    expect(abortChooser).toHaveBeenCalledWith("csrf-rep");
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("https://app/den"));
   });
 });

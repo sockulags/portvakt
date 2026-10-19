@@ -5,6 +5,7 @@ import type { Db } from "../db/database.js";
 import {
   type Application,
   type ClientAuth,
+  type RepresentationMode,
   clientJwksSchema,
   createApplicationInputSchema,
   type CreateApplicationInput,
@@ -31,6 +32,7 @@ interface ApplicationRow {
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
   allowed_extra_scopes: string[];
+  representation_mode: RepresentationMode;
   roles: unknown;
   attribute_keys: unknown;
   created_at: Date;
@@ -54,7 +56,7 @@ const extraScopesColumnSchema = z.array(z.enum(EXTRA_SCOPES));
 const SELECT_APPLICATION = `
   SELECT a.id, a.client_id, a.name, a.enabled, a.token_endpoint_auth_method,
          a.jwks_uri, a.jwks, a.redirect_uris, a.post_logout_redirect_uris, a.allowed_extra_scopes,
-         a.created_at, a.updated_at,
+         a.representation_mode, a.created_at, a.updated_at,
          COALESCE((SELECT json_agg(json_build_object('role', r.role, 'description', r.description)
                                    ORDER BY r.role)
                      FROM application_roles r WHERE r.application_id = a.id), '[]'::json) AS roles,
@@ -94,6 +96,7 @@ function toApplication(row: ApplicationRow): Application {
     roles: rolesColumnSchema.parse(row.roles),
     attributeKeys: attributeKeysColumnSchema.parse(row.attribute_keys),
     allowedExtraScopes: extraScopesColumnSchema.parse(row.allowed_extra_scopes),
+    representationMode: row.representation_mode,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -139,8 +142,9 @@ export class ApplicationRepository {
         tx.query(
           `INSERT INTO applications
              (id, client_id, name, enabled, token_endpoint_auth_method, client_secret_encrypted,
-              jwks_uri, jwks, redirect_uris, post_logout_redirect_uris, allowed_extra_scopes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)`,
+              jwks_uri, jwks, redirect_uris, post_logout_redirect_uris, allowed_extra_scopes,
+              representation_mode)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12)`,
           [
             id,
             data.clientId,
@@ -153,6 +157,7 @@ export class ApplicationRepository {
             data.redirectUris,
             data.postLogoutRedirectUris,
             data.allowedExtraScopes,
+            data.representationMode,
           ],
         ),
       );
@@ -226,7 +231,8 @@ export class ApplicationRepository {
            jwks = CASE WHEN $4::boolean THEN $8::jsonb ELSE jwks END,
            redirect_uris = COALESCE($9, redirect_uris),
            post_logout_redirect_uris = COALESCE($10, post_logout_redirect_uris),
-           allowed_extra_scopes = COALESCE($11, allowed_extra_scopes)
+           allowed_extra_scopes = COALESCE($11, allowed_extra_scopes),
+           representation_mode = COALESCE($12, representation_mode)
          WHERE id = $1
          RETURNING id`,
           [
@@ -241,6 +247,7 @@ export class ApplicationRepository {
             data.redirectUris ?? null,
             data.postLogoutRedirectUris ?? null,
             data.allowedExtraScopes ?? null,
+            data.representationMode ?? null,
           ],
         ),
       );

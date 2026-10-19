@@ -5,9 +5,10 @@ import type { Logger } from "../logging/logger.js";
 
 /**
  * The login UI (apps/login, a React SPA) is served by the server: every page of the login flow
- * (choose a login method, errors, logout confirmation, signed out) is the SPA's `index.html` with
- * a bootstrap JSON block telling it which view to show. The block is `type="application/json"`,
- * so it is data, never executed, and the strict CSP below needs no inline script.
+ * (choose a login method, choose whom to act for, errors, logout confirmation, signed out) is
+ * the SPA's `index.html` with a bootstrap JSON block telling it which view to show. The block is
+ * `type="application/json"`, so it is data, never executed, and the strict CSP below needs no
+ * inline script.
  *
  * The built assets are served from {@link LOGIN_UI_BASE} (the SPA's Vite `base`).
  */
@@ -31,6 +32,9 @@ export const LOGIN_ERROR_CODES = [
   "state_invalid",
   "state_replayed",
   "state_expired",
+  "no_representation_available",
+  "representation_not_allowed",
+  "step_up_person_mismatch",
   "request_failed",
 ] as const;
 export type LoginErrorCode = (typeof LOGIN_ERROR_CODES)[number];
@@ -51,6 +55,17 @@ export type UiBootstrap = { readonly locale: LocaleHints } & (
       readonly tenant: string;
       readonly uid: string;
       /** Set after a failed upstream login: shown above the methods, with a retry. */
+      readonly error?: LoginErrorCode;
+    }
+  | {
+      /**
+       * Choose whom to act for (representation); the SPA loads
+       * `/t/{slug}/interaction/{uid}/representation`.
+       */
+      readonly view: "representation";
+      readonly tenant: string;
+      readonly uid: string;
+      /** `no_representation_available`: nothing to choose; only the way back is offered. */
       readonly error?: LoginErrorCode;
     }
   | {

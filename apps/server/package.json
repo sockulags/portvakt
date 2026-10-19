@@ -35,6 +35,7 @@
     "start": "tsx --env-file-if-exists=../../.env src/main.ts",
     "migrate": "tsx --env-file-if-exists=../../.env src/db/migrate-cli.ts",
     "rewrap-secrets": "tsx --env-file-if-exists=../../.env src/db/rewrap-cli.ts",
+    "audit:prune": "tsx --env-file-if-exists=../../.env src/audit/prune-cli.ts",
     "typecheck": "tsc -p tsconfig.json"
   }
 }

@@ -8,10 +8,17 @@ import {
   roleNameSchema,
 } from "./schemas.js";
 
-/** Extra scopes an application may be allowed to request beyond the standard OIDC ones. */
 /** Scopes an application must be allowed: `pin` (personal identity number), `hsa` (SITHS). */
 export const EXTRA_SCOPES = ["pin", "hsa"] as const;
 export type ExtraScope = (typeof EXTRA_SCOPES)[number];
+
+/**
+ * Whether the application offers the representation chooser (docs/claims.md, `rep`): `none`
+ * never (no `rep` is issued), `optional` the person may act for themselves or for a party they
+ * hold a valid grant for, `required` the person must act for such a party.
+ */
+export const REPRESENTATION_MODES = ["none", "optional", "required"] as const;
+export type RepresentationMode = (typeof REPRESENTATION_MODES)[number];
 
 export const SECRET_AUTH_METHODS = ["client_secret_basic", "client_secret_post"] as const;
 export type SecretAuthMethod = (typeof SECRET_AUTH_METHODS)[number];
@@ -72,6 +79,7 @@ export interface Application {
   readonly roles: readonly DeclaredRole[];
   readonly attributeKeys: readonly DeclaredAttributeKey[];
   readonly allowedExtraScopes: readonly ExtraScope[];
+  readonly representationMode: RepresentationMode;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -114,6 +122,7 @@ export const createApplicationInputSchema = z.object({
     .default([])
     .refine((keys) => uniqueBy(keys, (k) => k.key), "attribute keys must be unique"),
   allowedExtraScopes: z.array(z.enum(EXTRA_SCOPES)).default([]),
+  representationMode: z.enum(REPRESENTATION_MODES).default("none"),
 });
 export type CreateApplicationInput = z.input<typeof createApplicationInputSchema>;
 
@@ -125,6 +134,7 @@ export const updateApplicationInputSchema = z
     redirectUris: z.array(absoluteUrlSchema).min(1).max(50),
     postLogoutRedirectUris: z.array(absoluteUrlSchema).max(50),
     allowedExtraScopes: z.array(z.enum(EXTRA_SCOPES)),
+    representationMode: z.enum(REPRESENTATION_MODES),
   })
   .partial();
 export type UpdateApplicationInput = z.input<typeof updateApplicationInputSchema>;

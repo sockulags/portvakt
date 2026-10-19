@@ -5,7 +5,7 @@ export interface RuntimeRoleCheck {
   readonly superuser: boolean;
   /** The role owns audit_events (directly or through membership), so it could alter or drop it. */
   readonly ownsAuditEvents: boolean;
-  /** The role can UPDATE or DELETE audit rows. */
+  /** The role can UPDATE or DELETE audit rows, or run the retention function (audit_events_prune). */
   readonly canChangeAuditEvents: boolean;
 }
 
@@ -28,9 +28,12 @@ export async function checkRuntimeRole(db: Db): Promise<RuntimeRoleCheck> {
             r.rolsuper AS superuser,
             pg_has_role(current_user, c.relowner, 'MEMBER') AS owns_audit_events,
             has_table_privilege(c.oid, 'UPDATE') OR has_table_privilege(c.oid, 'DELETE')
-              OR has_table_privilege(c.oid, 'TRUNCATE') AS can_change_audit_events
+              OR has_table_privilege(c.oid, 'TRUNCATE')
+              OR COALESCE(has_function_privilege(f.oid, 'EXECUTE'), false)
+              AS can_change_audit_events
        FROM pg_roles r
        LEFT JOIN pg_class c ON c.oid = to_regclass('audit_events')
+       LEFT JOIN pg_proc f ON f.oid = to_regprocedure('audit_events_prune(timestamptz, integer)')
       WHERE r.rolname = current_user`,
   );
   if (row === undefined) throw new RuntimeRoleError("Could not inspect the database role");

@@ -1,4 +1,6 @@
+import { z } from "zod";
 import type { Db } from "../db/database.js";
+import { REPRESENTATION_SOURCE_IDS } from "../domain/representation.js";
 import {
   createTenantInputSchema,
   type CreateTenantInput,
@@ -16,11 +18,13 @@ interface TenantRow {
   slug: string;
   name: string;
   status: TenantStatus;
+  representation_sources: string[];
   created_at: Date;
   updated_at: Date;
 }
 
-const COLUMNS = "id, slug, name, status, created_at, updated_at";
+const COLUMNS = "id, slug, name, status, representation_sources, created_at, updated_at";
+const sourcesColumnSchema = z.array(z.enum(REPRESENTATION_SOURCE_IDS));
 
 function toTenant(row: TenantRow): Tenant {
   return {
@@ -28,6 +32,7 @@ function toTenant(row: TenantRow): Tenant {
     slug: row.slug,
     name: row.name,
     status: row.status,
+    representationSources: sourcesColumnSchema.parse(row.representation_sources),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -44,8 +49,9 @@ export class TenantRepository {
     const data = parseInput(createTenantInputSchema, input);
     const rows = await mapDbErrors(() =>
       this.#db.query<TenantRow>(
-        `INSERT INTO tenants (slug, name, status) VALUES ($1, $2, $3) RETURNING ${COLUMNS}`,
-        [data.slug, data.name, data.status],
+        `INSERT INTO tenants (slug, name, status, representation_sources) VALUES ($1, $2, $3, $4)
+         RETURNING ${COLUMNS}`,
+        [data.slug, data.name, data.status, data.representationSources],
       ),
     );
     return toTenant(requireRow(rows));
@@ -117,10 +123,11 @@ export class TenantRepository {
       const [updated] = await mapDbErrors(() =>
         tx.query<TenantRow>(
           `UPDATE tenants
-              SET name = COALESCE($2, name), status = COALESCE($3, status)
+              SET name = COALESCE($2, name), status = COALESCE($3, status),
+                  representation_sources = COALESCE($4, representation_sources)
             WHERE id = $1
           RETURNING ${COLUMNS}`,
-          [id, data.name ?? null, data.status ?? null],
+          [id, data.name ?? null, data.status ?? null, data.representationSources ?? null],
         ),
       );
       if (updated === undefined) throw new NotFoundError("Tenant");

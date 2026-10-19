@@ -19,7 +19,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=6",
     "test:watch": "vitest",
     "test:e2e": "npm run test --workspace e2e",
     "build": "npm run build --workspaces --if-present",
