@@ -31,7 +31,7 @@ These were decided with the owner and are not reopened during delivery.
 - **Authorization boundary:** Portvakt owns identity, assurance level, representation, and
   role/attribute _assignment_. Each app declares its roles and decides what they mean.
 - **Runtime:** containers, Kubernetes-friendly (stateless app, Postgres for state, health probes).
-- **Stack:** Node 24, TypeScript (ESM), npm workspaces, Express 5, PostgreSQL 16, `pg` with SQL
+- **Stack:** Node 24, TypeScript (ESM), npm workspaces, Express 5, PostgreSQL 18, `pg` with SQL
   migrations, zod, React 19 + Vite for UIs, Vitest for unit/integration, Playwright for e2e.
 - **SDKs:** TypeScript (Node, Express) and Java (Java 21, Maven; core library plus Spring Boot 3
   starter). Both SDKs implement the same behaviour and are tested against the same scenarios.

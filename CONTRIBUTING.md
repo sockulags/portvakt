@@ -11,7 +11,7 @@ container, no local JDK needed).
 
 ```sh
 npm ci --ignore-scripts
-npm run db:up        # Postgres 16 on localhost:5433
+npm run db:up        # Postgres 18 on localhost:5433
 npm run dev:stack    # the whole local stack (README.md, Quick start)
 ```
 

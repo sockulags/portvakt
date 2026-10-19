@@ -15,8 +15,8 @@ jobs:
 
     services:
       postgres:
-        # postgres:16-alpine, pinned by digest as in deploy/images.Dockerfile (images:check).
-        image: postgres:16-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
+        # postgres:18-alpine, pinned by digest as in deploy/images.Dockerfile (images:check).
+        image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
         env:
           POSTGRES_USER: portvakt
           POSTGRES_PASSWORD: portvakt

@@ -3,8 +3,8 @@ name: portvakt-dev
 
 services:
   postgres:
-    # postgres:16-alpine, pinned by digest as in deploy/images.Dockerfile (npm run images:check).
-    image: postgres:16-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
+    # postgres:18-alpine, pinned by digest as in deploy/images.Dockerfile (npm run images:check).
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
     environment:
       POSTGRES_USER: portvakt
       POSTGRES_PASSWORD: portvakt
@@ -12,7 +12,7 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - portvakt-pgdata:/var/lib/postgresql/data
+      - portvakt-pgdata18:/var/lib/postgresql
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U portvakt -d portvakt"]
@@ -21,4 +21,4 @@ services:
       retries: 30
 
 volumes:
-  portvakt-pgdata:
+  portvakt-pgdata18:
