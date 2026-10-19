@@ -50,7 +50,7 @@ export function createPortvaktClient(input: PortvaktClientConfig): PortvaktClien
   const sources = new Map<string, ServiceTokenSource>();
   return {
     config,
-    bff: (options) => createBff({ config, discovery }, options),
+    bff: (options) => createBff({ config, discovery, jwks }, options),
     requireAccessToken: (requirements) => validator.middleware(requirements),
     verifyAccessToken: (token, audience) => validator.verify(token, audience),
     principal: (req) => accessTokenPrincipal(req),

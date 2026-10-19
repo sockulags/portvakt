@@ -28,7 +28,12 @@ import se.portvakt.sdk.internal.Http;
  *       jwksStaleMaxAge} after their last successful fetch; past that, validation fails as
  *       unavailable, also within the cooldown;
  *   <li>without any keys, a failed fetch is repeated at most once per {@code failureCacheTtl}
- *       (negative cache).
+ *       (negative cache);
+ *   <li>ID tokens the application just received from Portvakt's token endpoint ({@code
+ *       fromTokenEndpoint}) refetch an unknown kid regardless of the cooldown: they come over the
+ *       SDK's own connection to Portvakt, not from a client that could make kids up, and a key a
+ *       manual rotation has just activated must not end the sessions refreshed, or refuse the
+ *       logins made, in the cooldown after the last fetch.
  * </ul>
  *
  * Concurrent callers share one fetch (single flight). Thread-safe.
@@ -78,6 +83,17 @@ public final class PortvaktJwks {
    * @throws PortvaktUnavailableException the keys cannot be fetched, or are too old to trust
    */
   public ECKey keyFor(String kid) {
+    return keyFor(kid, false);
+  }
+
+  /**
+   * The public ES256 key for {@code kid}; {@code fromTokenEndpoint}: the token came straight from
+   * Portvakt's token endpoint, so an unknown kid is refetched also within the cooldown.
+   *
+   * @throws UnknownKeyException the kid is unknown (after a refetch, when one was allowed)
+   * @throws PortvaktUnavailableException the keys cannot be fetched, or are too old to trust
+   */
+  public ECKey keyFor(String kid, boolean fromTokenEndpoint) {
     if (kid == null || kid.isEmpty() || kid.length() > 255) throw new UnknownKeyException();
     Instant now = config.clock().instant();
     Cached keys;
@@ -93,7 +109,7 @@ public final class PortvaktJwks {
       keys = refetch();
     }
     ECKey key = find(keys.keys, kid);
-    if (key == null && mayRefetch(config.clock().instant())) {
+    if (key == null && (fromTokenEndpoint || mayRefetch(config.clock().instant()))) {
       keys = refetch();
       key = find(keys.keys, kid);
     }

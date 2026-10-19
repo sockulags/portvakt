@@ -1,0 +1,18 @@
+{
+  "entra": [
+    {
+      "id": "e2e-emma",
+      "oid": "ad77dde5-683f-4a91-8411-7989d998efb9",
+      "name": "Emma Ek",
+      "email": "emma.ek@kommun.example",
+      "groups": ["grp-handlaggare", "grp-all-staff"]
+    },
+    {
+      "id": "e2e-jonas",
+      "oid": "2e7d4f83-30d8-4a6f-bcbf-feeda3534f81",
+      "name": "Jonas Berg",
+      "email": "jonas.berg@kommun.example",
+      "groups": ["grp-handlaggare", "grp-all-staff"]
+    }
+  ]
+}

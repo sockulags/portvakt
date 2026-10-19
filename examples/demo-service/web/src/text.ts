@@ -14,6 +14,7 @@ export const TEXT = {
     name: "Namn",
     protectedIdentity: "Skyddad identitet",
     unknownName: "Okänt namn",
+    hsaId: "HSA-id",
     roles: "Roller",
     noRoles: "Inga roller",
     acr: "Säkerhetsnivå",

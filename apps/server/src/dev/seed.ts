@@ -1,5 +1,5 @@
 import { generateClientSecret } from "../crypto/secrets.js";
-import type { Application, ClientJwks } from "../domain/application.js";
+import type { Application, ClientJwks, ExtraScope } from "../domain/application.js";
 import type {
   CreateLoginMethodInput,
   CreateSamlLoginMethodInput,
@@ -53,6 +53,8 @@ export interface SeedService {
   readonly jwks?: ClientJwks | undefined;
   /** Enabled in the tenant (Service B stays disabled until e2e scenario 3 enables it). */
   readonly enabled: boolean;
+  /** Extra scopes the application may request (`hsa` for Service A: SITHS, e2e scenario 10). */
+  readonly allowedExtraScopes?: readonly ExtraScope[] | undefined;
 }
 
 export interface DevSeedOptions {
@@ -450,6 +452,7 @@ async function ensureApplication(
     redirectUris: [`${service.url}/auth/callback`],
     postLogoutRedirectUris: [`${service.url}/`],
     representationMode: "optional" as const,
+    allowedExtraScopes: [...(service.allowedExtraScopes ?? [])],
   };
   let application = await repos.applications.findByClientId(service.clientId);
   let created = false;

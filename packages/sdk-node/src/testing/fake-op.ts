@@ -29,6 +29,13 @@ export interface FakeOp {
   refreshDelayMs: number;
   /** Every refresh token grant answers `invalid_grant`. */
   refuseRefresh: boolean;
+  /**
+   * The kid the token endpoint signs ID and access tokens with (default: the first key). Set it
+   * to a key from {@link addKey} to simulate a key rotation that activates a new key at once.
+   */
+  signingKid: string | undefined;
+  /** Kids of keys that sign but are left out of the JWKS. */
+  readonly unpublished: Set<string>;
   /** Token, JWKS and discovery requests fail at the network level (connection reset). */
   down: boolean;
   /** Token, JWKS and discovery requests answer this 5xx with an HTML page (a proxy's error). */
@@ -96,6 +103,8 @@ export async function startFakeOp(): Promise<FakeOp> {
   >();
   const refreshTokens = new Map<string, Record<string, unknown>>();
 
+  const signing = (): Key => keys.find((candidate) => candidate.kid === op.signingKid) ?? keys[0]!;
+
   const op: FakeOp = {
     baseUrl,
     issuer,
@@ -105,19 +114,18 @@ export async function startFakeOp(): Promise<FakeOp> {
     accessTokenTtl: 300,
     refreshDelayMs: 0,
     refuseRefresh: false,
+    signingKid: undefined,
+    unpublished: new Set(),
     down: false,
     serverError: undefined,
     counters: { refresh: 0, jwks: 0, discovery: 0, token: 0, failed: 0 },
     authorizations: [],
     presentedRefreshTokens: [],
     async signAccessToken(claims, options = {}) {
-      const key = keys.find((candidate) => candidate.kid === (options.kid ?? keys[0]!.kid));
+      const kid = options.kid ?? signing().kid;
+      const key = keys.find((candidate) => candidate.kid === kid);
       return new SignJWT(claims)
-        .setProtectedHeader({
-          alg: "ES256",
-          typ: options.typ ?? "at+jwt",
-          kid: options.kid ?? keys[0]!.kid,
-        })
+        .setProtectedHeader({ alg: "ES256", typ: options.typ ?? "at+jwt", kid })
         .sign(options.key ?? key!.privateKey);
     },
     async addKey(kid = `key-${keys.length + 1}`) {
@@ -174,12 +182,12 @@ export async function startFakeOp(): Promise<FakeOp> {
       exp: now() + op.accessTokenTtl,
     });
     const idToken = await new SignJWT({ ...claims, ...(nonce === undefined ? {} : { nonce }) })
-      .setProtectedHeader({ alg: "ES256", kid: keys[0]!.kid })
+      .setProtectedHeader({ alg: "ES256", kid: signing().kid })
       .setIssuer(issuer)
       .setAudience(op.clientId)
       .setIssuedAt()
       .setExpirationTime("5m")
-      .sign(keys[0]!.privateKey);
+      .sign(signing().privateKey);
     const refreshToken = b64url(randomBytes(24));
     refreshTokens.set(refreshToken, claims);
     return {
@@ -229,7 +237,9 @@ export async function startFakeOp(): Promise<FakeOp> {
     }
     if (path === "/jwks") {
       op.counters.jwks += 1;
-      json(res, 200, { keys: keys.map((key) => key.publicJwk) });
+      json(res, 200, {
+        keys: keys.filter((key) => !op.unpublished.has(key.kid)).map((key) => key.publicJwk),
+      });
       return;
     }
     if (path === "/auth") {

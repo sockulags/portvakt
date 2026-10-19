@@ -46,6 +46,7 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
         url: "http://localhost:3100",
         secret: secretA,
         enabled: true,
+        allowedExtraScopes: ["hsa"],
       },
       { clientId: "service-b", name: "Tjänst B", url: "http://localhost:3200", enabled: false },
       { clientId: "service-c", name: "Tjänst C", url: "http://localhost:3300", enabled: true },
@@ -105,6 +106,9 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
     const serviceA = (await repos.applications.findByClientId("service-a"))!;
     expect(serviceA.redirectUris).toEqual(["http://localhost:3100/auth/callback"]);
     expect(serviceA.representationMode).toBe("optional");
+    // Service A may ask for the SITHS claims; the others get no extra scopes.
+    expect(serviceA.allowedExtraScopes).toEqual(["hsa"]);
+    expect(serviceC.allowedExtraScopes).toEqual([]);
 
     const methods = await repos.loginMethods.list(tenantId);
     expect(methods.map((method) => `${method.protocol}:${method.kind}`).sort()).toEqual([

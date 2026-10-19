@@ -10,6 +10,8 @@ e2e/test-results/
 e2e/playwright-report/
 e2e/blob-report/
 e2e/.cache/
+# e2e stack logs, Playwright report, traces (npm run test:e2e)
+e2e/.artifacts/
 # Java (sdk-java, examples/demo-service-java): Maven output
 target/
 .m2-cache/

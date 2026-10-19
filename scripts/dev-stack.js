@@ -195,6 +195,8 @@ function demoEnvironment(which) {
     CLIENT_SECRET: which === "A" ? secrets.a : secrets.b,
     // Cookies on localhost are shared across ports: each instance needs its own name.
     COOKIE_NAME: which === "A" ? "demo_a_session" : "demo_b_session",
+    // Service A shows a SITHS employee's HSA-id (the seed allows it the scope `hsa`).
+    ...(which === "A" ? { SCOPES: "openid profile email hsa" } : {}),
   };
 }
 

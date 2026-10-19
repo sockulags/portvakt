@@ -209,35 +209,35 @@ semantics and its default ranking (`DEFAULT_ACR_RANKING`: loa2 < loa3 < loa4).
 
 ## Configuration reference
 
-| Option                               | Default                    | Meaning                                                                      |
-| ------------------------------------ | -------------------------- | ---------------------------------------------------------------------------- |
-| `issuer`                             | required                   | The tenant issuer `{PUBLIC_URL}/t/{tenant}`, exactly (no trailing slash).    |
-| `clientId`                           | required                   | The application's client_id.                                                 |
-| `clientAuth`                         | required                   | `client_secret_basic`/`client_secret_post` with `clientSecret`, or           |
-|                                      |                            | `private_key_jwt` with `privateJwk` (its public key registered in Portvakt). |
-| `redirectUri`                        | (required for the BFF)     | `{origin}{mountPath}/callback`.                                              |
-| `postLogoutRedirectUri`              | none                       | Registered post-logout URI.                                                  |
-| `scopes`                             | `openid profile email`     | Must include `openid`; `pin`/`hsa` only if the application is allowed them.  |
-| `clockSkewSeconds`                   | 30                         | Tolerance for `exp`, `nbf`, `iat`.                                           |
-| `httpTimeoutSeconds`                 | 10                         | Every request to Portvakt.                                                   |
-| `discoveryCacheSeconds`              | 3600                       | Discovery is refetched after this (stale metadata is kept on failure).       |
-| `jwks.cacheMaxAgeSeconds`            | 600                        | Keys are refetched after this.                                               |
-| `failureCacheSeconds`                | 5                          | With nothing cached, a failed discovery or JWKS fetch is retried after this. |
-| `jwks.cooldownSeconds`               | 30                         | At most one JWKS fetch per this; an unknown `kid` within it is refused.      |
-| `jwks.staleMaxAgeSeconds`            | 86400                      | While refetches fail, keys stay in use until `cacheMaxAgeSeconds` plus this  |
-|                                      |                            | after their last successful fetch; then validation answers 503.              |
-| `outageGraceSeconds`                 | 0                          | See "Session semantics".                                                     |
-| `acrRanking`                         | `DEFAULT_ACR_RANKING`      | Must match Portvakt's `ACR_RANKING`.                                         |
-| `allowInsecureRequests`              | false                      | Allows an `http:` issuer (local development only).                           |
-| `logger`                             | console (warnings, errors) | pino-compatible `{ debug, info, warn, error }(details, message)`.            |
-| `fetch`                              | global fetch               | For proxies and tests.                                                       |
-| `bff.mountPath`                      | `/auth`                    | Where the BFF routes live.                                                   |
-| `bff.idleTimeoutSeconds`             | 1800                       | Idle timeout of the BFF session.                                             |
-| `bff.maxAgeSeconds`                  | 43200                      | The BFF's own cap (the broker's `session_exp` caps it further).              |
-| `bff.defaultReturnTo`                | `/`                        | After login without `returnTo`, after logout without a post-logout URI.      |
-| `bff.loginTimeoutSeconds`            | 600                        | How long a started login may take.                                           |
-| `bff.cookie.*`                       | see above                  | `name` must differ between applications on one host (cookies ignore ports).  |
-| `bff.onError`, `bff.sessionResponse` | built in                   | Custom error page; custom `/auth/session` body.                              |
+| Option                               | Default                    | Meaning                                                                                                                                                                                            |
+| ------------------------------------ | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `issuer`                             | required                   | The tenant issuer `{PUBLIC_URL}/t/{tenant}`, exactly (no trailing slash).                                                                                                                          |
+| `clientId`                           | required                   | The application's client_id.                                                                                                                                                                       |
+| `clientAuth`                         | required                   | `client_secret_basic`/`client_secret_post` with `clientSecret`, or                                                                                                                                 |
+|                                      |                            | `private_key_jwt` with `privateJwk` (its public key registered in Portvakt).                                                                                                                       |
+| `redirectUri`                        | (required for the BFF)     | `{origin}{mountPath}/callback`.                                                                                                                                                                    |
+| `postLogoutRedirectUri`              | none                       | Registered post-logout URI.                                                                                                                                                                        |
+| `scopes`                             | `openid profile email`     | Must include `openid`; `pin`/`hsa` only if the application is allowed them.                                                                                                                        |
+| `clockSkewSeconds`                   | 30                         | Tolerance for `exp`, `nbf`, `iat`.                                                                                                                                                                 |
+| `httpTimeoutSeconds`                 | 10                         | Every request to Portvakt.                                                                                                                                                                         |
+| `discoveryCacheSeconds`              | 3600                       | Discovery is refetched after this (stale metadata is kept on failure).                                                                                                                             |
+| `jwks.cacheMaxAgeSeconds`            | 600                        | Keys are refetched after this.                                                                                                                                                                     |
+| `failureCacheSeconds`                | 5                          | With nothing cached, a failed discovery or JWKS fetch is retried after this.                                                                                                                       |
+| `jwks.cooldownSeconds`               | 30                         | At most one JWKS fetch per this for access tokens; an unknown `kid` within it is refused. ID tokens from the token endpoint always refetch an unknown `kid` (a key rotation never ends a session). |
+| `jwks.staleMaxAgeSeconds`            | 86400                      | While refetches fail, keys stay in use until `cacheMaxAgeSeconds` plus this                                                                                                                        |
+|                                      |                            | after their last successful fetch; then validation answers 503.                                                                                                                                    |
+| `outageGraceSeconds`                 | 0                          | See "Session semantics".                                                                                                                                                                           |
+| `acrRanking`                         | `DEFAULT_ACR_RANKING`      | Must match Portvakt's `ACR_RANKING`.                                                                                                                                                               |
+| `allowInsecureRequests`              | false                      | Allows an `http:` issuer (local development only).                                                                                                                                                 |
+| `logger`                             | console (warnings, errors) | pino-compatible `{ debug, info, warn, error }(details, message)`.                                                                                                                                  |
+| `fetch`                              | global fetch               | For proxies and tests.                                                                                                                                                                             |
+| `bff.mountPath`                      | `/auth`                    | Where the BFF routes live.                                                                                                                                                                         |
+| `bff.idleTimeoutSeconds`             | 1800                       | Idle timeout of the BFF session.                                                                                                                                                                   |
+| `bff.maxAgeSeconds`                  | 43200                      | The BFF's own cap (the broker's `session_exp` caps it further).                                                                                                                                    |
+| `bff.defaultReturnTo`                | `/`                        | After login without `returnTo`, after logout without a post-logout URI.                                                                                                                            |
+| `bff.loginTimeoutSeconds`            | 600                        | How long a started login may take.                                                                                                                                                                 |
+| `bff.cookie.*`                       | see above                  | `name` must differ between applications on one host (cookies ignore ports).                                                                                                                        |
+| `bff.onError`, `bff.sessionResponse` | built in                   | Custom error page; custom `/auth/session` body.                                                                                                                                                    |
 
 ## Security notes
 

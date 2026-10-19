@@ -6,10 +6,12 @@ import express, {
   type Response,
   type Router,
 } from "express";
+import { compactVerify } from "jose";
 import * as client from "openid-client";
 import { z } from "zod";
 import { formatIssues, type ResolvedConfig } from "../config.js";
 import { isUnavailable, type DiscoveryCache } from "../discovery.js";
+import type { JwksCache } from "../jwks.js";
 import {
   LoginFailedError,
   LoginRequiredError,
@@ -245,13 +247,17 @@ const epochNow = (): number => Math.floor(Date.now() / 1000);
 
 /** The BFF: routes, session handling and token refresh. */
 export function createBff(
-  deps: { readonly config: ResolvedConfig; readonly discovery: DiscoveryCache },
+  deps: {
+    readonly config: ResolvedConfig;
+    readonly discovery: DiscoveryCache;
+    readonly jwks: JwksCache;
+  },
   input: BffOptions,
 ): PortvaktBff {
   const parsed = optionsSchema.safeParse(input);
   if (!parsed.success) throw new PortvaktConfigError(formatIssues(parsed.error, "bff"));
   const options = parsed.data;
-  const { config, discovery } = deps;
+  const { config, discovery, jwks } = deps;
   const issues: string[] = [];
   if (config.redirectUri === undefined) issues.push("redirectUri: required for the BFF");
   else if (!new URL(config.redirectUri).pathname.endsWith(`${options.mountPath}/callback`)) {
@@ -265,7 +271,7 @@ export function createBff(
   if (issues.length > 0) throw new PortvaktConfigError(issues);
   const sealer = new Sealer(keys);
   const signer = new CookieSigner(options.cookie.secrets);
-  const engine = new BffEngine(config, discovery, options, sealer, signer);
+  const engine = new BffEngine(config, discovery, jwks, options, sealer, signer);
   return engine.router();
 }
 
@@ -274,6 +280,7 @@ type ParsedOptions = z.output<typeof optionsSchema>;
 class BffEngine {
   readonly #config: ResolvedConfig;
   readonly #discovery: DiscoveryCache;
+  readonly #jwks: JwksCache;
   readonly #options: ParsedOptions;
   readonly #store: SessionStore;
   readonly #sealer: Sealer;
@@ -289,12 +296,14 @@ class BffEngine {
   constructor(
     config: ResolvedConfig,
     discovery: DiscoveryCache,
+    jwks: JwksCache,
     options: ParsedOptions,
     sealer: Sealer,
     signer: CookieSigner,
   ) {
     this.#config = config;
     this.#discovery = discovery;
+    this.#jwks = jwks;
     this.#options = options;
     this.#store = options.sessionStore;
     this.#sealer = sealer;
@@ -522,6 +531,9 @@ class BffEngine {
       this.#config.logger.warn(errorDetails(error), "login callback failed");
       if (isUnavailable(error)) throw new PortvaktUnavailableError(undefined, { cause: error });
       throw new LoginFailedError("login_failed", "the code exchange failed", 400, { cause: error });
+    }
+    if (tokens.id_token !== undefined && !(await this.#signedByPortvakt(tokens.id_token))) {
+      throw new LoginFailedError("login_failed", "the ID token's signature is not Portvakt's", 502);
     }
     const claims = idTokenClaimsSchema.safeParse(tokens.claims());
     if (!claims.success || tokens.id_token === undefined) {
@@ -803,6 +815,40 @@ class BffEngine {
     });
   }
 
+  /**
+   * Whether an ID token from the token endpoint carries Portvakt's signature (ES256, a key of its
+   * JWKS; a kid the cache does not know yet is fetched at once, see `JwksCache`). openid-client
+   * has already checked its claims (issuer, audience, expiry, nonce). Throws
+   * {@link PortvaktUnavailableError} when the keys cannot be fetched.
+   */
+  async #signedByPortvakt(idToken: string): Promise<boolean> {
+    try {
+      await compactVerify(
+        idToken,
+        (header) => this.#jwks.keyFor(header, { fromTokenEndpoint: true }),
+        { algorithms: ["ES256"] },
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof PortvaktUnavailableError) throw error;
+      this.#config.logger.warn(errorDetails(error), "ID token signature not verified");
+      return false;
+    }
+  }
+
+  /**
+   * The refreshed ID token's signature. Portvakt has already rotated the refresh token, so an
+   * unverifiable answer cannot be retried: the session ends either way.
+   */
+  async #refreshSignedByPortvakt(idToken: string): Promise<boolean> {
+    try {
+      return await this.#signedByPortvakt(idToken);
+    } catch (error) {
+      this.#config.logger.warn(errorDetails(error), "Portvakt's keys unavailable after a refresh");
+      return false;
+    }
+  }
+
   /** One refresh (rotation) inside the session lock; the session ends on `invalid_grant`. */
   async #refresh(key: string, current: SessionData): Promise<SessionData> {
     if (current.refreshToken === undefined) {
@@ -833,7 +879,11 @@ class BffEngine {
     let idToken = current.idToken;
     if (response.id_token !== undefined) {
       const parsed = idTokenClaimsSchema.safeParse(response.claims());
-      if (!parsed.success || parsed.data.sub !== current.claims.sub) {
+      if (
+        !parsed.success ||
+        parsed.data.sub !== current.claims.sub ||
+        !(await this.#refreshSignedByPortvakt(response.id_token))
+      ) {
         await this.#store.destroy(key);
         throw new LoginRequiredError("refresh_failed");
       }

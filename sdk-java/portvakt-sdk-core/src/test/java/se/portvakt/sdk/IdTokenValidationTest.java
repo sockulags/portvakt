@@ -70,6 +70,36 @@ class IdTokenValidationTest {
   }
 
   @Test
+  void acceptsAnIdTokenSignedWithAJustActivatedKeyAlsoWithinTheJwksCooldown() throws Exception {
+    // A manual key rotation activates a new key at once: the next refresh (or login) answers
+    // with an ID token signed by a kid the cache has not seen, within the 30 s cooldown of the
+    // last fetch. ID tokens come from the token endpoint, so they refetch anyway (regression:
+    // the session ended and new logins failed with invalid_token, M7 e2e scenario 9).
+    PortvaktClient client = PortvaktClient.create(op.config().build());
+    client.verifier().verifyIdToken(sign(idToken()));
+    int before = op.jwksRequests.get();
+    op.addKey();
+    com.nimbusds.jose.jwk.ECKey rotated = op.keys.get(op.keys.size() - 1);
+    PortvaktTokenVerifier.VerifiedIdToken verified =
+        client.verifier().verifyIdToken(op.sign(idToken(), rotated, JOSEObjectType.JWT));
+    assertThat(verified.principal().sub()).isEqualTo("8a41c2d0-5e3b-4f7a-9c18-6b2e0d4f3a91");
+    assertThat(op.jwksRequests.get()).isEqualTo(before + 1);
+
+    // Bearer tokens keep the cooldown: a kid that appears right after is refused, unfetched.
+    op.addKey();
+    com.nimbusds.jose.jwk.ECKey later = op.keys.get(op.keys.size() - 1);
+    Map<String, Object> access = new HashMap<>(idToken());
+    access.remove("nonce");
+    assertThatThrownBy(
+            () ->
+                client.verifier()
+                    .verifyAccessToken(
+                        op.sign(access, later, new JOSEObjectType("at+jwt")), FakeOp.CLIENT_ID))
+        .isInstanceOf(AccessTokenException.class);
+    assertThat(op.jwksRequests.get()).isEqualTo(before + 1);
+  }
+
+  @Test
   void dropsNameAndEmailForAProtectedIdentity() throws Exception {
     PortvaktPrincipal principal =
         portvakt.verifier()

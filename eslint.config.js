@@ -20,6 +20,7 @@ export default tseslint.config(
       "**/target/**",
       "e2e/test-results/**",
       "e2e/playwright-report/**",
+      "e2e/.artifacts/**",
     ],
   },
   js.configs.recommended,

@@ -148,6 +148,9 @@ function SignedIn({
 
   const rows: readonly { label: string; value: ReactNode; testId: string }[] = [
     { label: TEXT.signedIn.name, value: displayName(principal), testId: "user-name" },
+    ...(principal.hsaId === undefined
+      ? []
+      : [{ label: TEXT.signedIn.hsaId, value: principal.hsaId, testId: "user-hsa-id" }]),
     {
       label: TEXT.signedIn.roles,
       value:

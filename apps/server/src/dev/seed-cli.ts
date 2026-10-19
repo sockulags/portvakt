@@ -52,6 +52,8 @@ async function main(): Promise<void> {
       url: value("DEMO_SERVICE_A_URL", "http://localhost:3100").replace(/\/+$/, ""),
       secret: optional("DEMO_SERVICE_A_CLIENT_SECRET"),
       enabled: true,
+      // SITHS employees: hsa_id and org_affiliation in the ID token (e2e scenario 10).
+      allowedExtraScopes: ["hsa"],
     },
     {
       clientId: "service-b",

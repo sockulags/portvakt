@@ -347,8 +347,9 @@ export function CopyValue({
       <span className="pv-copy-label" id={id}>
         {label}
       </span>
-      <div className="pv-copy-row">
-        <code className="pv-code" aria-labelledby={id} data-testid={`${testId}-value`}>
+      {/* The group carries the label: `code` may not be named (ARIA prohibits it for its role). */}
+      <div className="pv-copy-row" role="group" aria-labelledby={id}>
+        <code className="pv-code" data-testid={`${testId}-value`}>
           {value}
         </code>
         <CopyButton value={value} testId={`${testId}-copy`} />

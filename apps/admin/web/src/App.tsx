@@ -335,12 +335,17 @@ function Portal({
   const footer = (
     <div className="pv-user">
       <Avatar initials={initials(name)} />
+      {/* A plain span cannot carry aria-label (ARIA prohibits naming the generic role): the
+          full "Inloggad som ..." is visually hidden text, the short visible name is hidden from
+          screen readers so it is not read twice. */}
       <span
         className="pv-user-name"
         title={format(t.nav.signedInAs, { name: name ?? me.personId })}
-        aria-label={format(t.nav.signedInAs, { name: name ?? me.personId })}
       >
-        {name ?? me.personId.slice(0, 8)}
+        <span className="pv-visually-hidden">
+          {format(t.nav.signedInAs, { name: name ?? me.personId })}
+        </span>
+        <span aria-hidden="true">{name ?? me.personId.slice(0, 8)}</span>
       </span>
       <Button
         variant="ghost"

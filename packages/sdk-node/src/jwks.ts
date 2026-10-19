@@ -31,6 +31,11 @@ interface CachedKeys {
  * successful fetch, so a Portvakt outage does not stop token validation at once; past that limit
  * validation fails as unavailable, also within the cooldown. Without any keys, a failed fetch is
  * repeated at most once per `failureCacheSeconds`.
+ *
+ * ID tokens the BFF just received from Portvakt's token endpoint (`fromTokenEndpoint`) refetch
+ * an unknown kid regardless of the cooldown: they come over the SDK's own connection to
+ * Portvakt, not from a client that could make kids up, and a key that a manual rotation has just
+ * activated must not end the sessions refreshed in the cooldown after the last fetch.
  */
 export class JwksCache {
   readonly #config: ResolvedConfig;
@@ -47,7 +52,10 @@ export class JwksCache {
   }
 
   /** The verification key for a token header (jose's key resolver). */
-  async keyFor(header: JWSHeaderParameters): Promise<CryptoKey> {
+  async keyFor(
+    header: JWSHeaderParameters,
+    options: { readonly fromTokenEndpoint?: boolean } = {},
+  ): Promise<CryptoKey> {
     const kid = header.kid;
     if (typeof kid !== "string" || kid.length === 0 || kid.length > 255) {
       throw new UnknownKeyError();
@@ -64,7 +72,7 @@ export class JwksCache {
       keys = await this.#refetch();
     }
     let jwk = findKey(keys.keys, kid);
-    if (jwk === undefined && this.#mayRefetch(Date.now())) {
+    if (jwk === undefined && (options.fromTokenEndpoint === true || this.#mayRefetch(Date.now()))) {
       keys = await this.#refetch();
       jwk = findKey(keys.keys, kid);
     }

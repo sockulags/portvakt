@@ -6,6 +6,7 @@ target
 coverage
 playwright-report
 test-results
+.artifacts
 package-lock.json
 # Delivered design system: kept byte-for-byte as generated.
 packages/design-system/src

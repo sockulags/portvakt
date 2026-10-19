@@ -148,8 +148,10 @@ export class DiscoveryCache {
     }
     configuration.timeout = config.httpTimeoutSeconds;
     if (config.fetch !== undefined) configuration[client.customFetch] = customFetchOf(config.fetch);
-    // ID tokens from the token endpoint are verified against Portvakt's JWKS as well.
-    client.enableNonRepudiationChecks(configuration);
+    // ID tokens from the token endpoint are verified against Portvakt's JWKS by the BFF itself
+    // (`JwksCache`, bff.ts), not by openid-client's non-repudiation checks: their JWKS cache
+    // refetches an unknown kid only once its copy is 60 s old, so a manual key rotation ended
+    // every session refreshed within a minute of the BFF's last JWKS download.
     this.#current = { configuration, fetchedAt: Date.now() };
     this.#retryAt = 0;
     this.#failure = undefined;

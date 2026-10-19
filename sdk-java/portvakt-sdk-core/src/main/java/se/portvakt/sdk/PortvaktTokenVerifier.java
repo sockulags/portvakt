@@ -68,9 +68,13 @@ public final class PortvaktTokenVerifier {
 
   public PortvaktTokenVerifier(PortvaktConfig config, PortvaktJwks jwks) {
     this.config = config;
-    JWSKeySelector<SecurityContext> keys = (header, context) -> select(jwks, header);
-    this.accessTokens = processor(keys, new DefaultJOSEObjectTypeVerifier<>(AT_JWT, APPLICATION_AT_JWT));
-    this.idTokens = processor(keys, new DefaultJOSEObjectTypeVerifier<>(JOSEObjectType.JWT, null));
+    JWSKeySelector<SecurityContext> bearerKeys = (header, context) -> select(jwks, header, false);
+    // ID tokens reach the application only from Portvakt's token endpoint (code and refresh).
+    JWSKeySelector<SecurityContext> tokenEndpointKeys = (header, context) -> select(jwks, header, true);
+    this.accessTokens =
+        processor(bearerKeys, new DefaultJOSEObjectTypeVerifier<>(AT_JWT, APPLICATION_AT_JWT));
+    this.idTokens =
+        processor(tokenEndpointKeys, new DefaultJOSEObjectTypeVerifier<>(JOSEObjectType.JWT, null));
   }
 
   private static DefaultJWTProcessor<SecurityContext> processor(
@@ -84,10 +88,10 @@ public final class PortvaktTokenVerifier {
   }
 
   /** ES256 only, and only a published key with the token's kid. */
-  private static List<Key> select(PortvaktJwks jwks, JWSHeader header) {
+  private static List<Key> select(PortvaktJwks jwks, JWSHeader header, boolean fromTokenEndpoint) {
     if (!JWSAlgorithm.ES256.equals(header.getAlgorithm())) return List.of();
     try {
-      return List.of(jwks.keyFor(header.getKeyID()).toECPublicKey());
+      return List.of(jwks.keyFor(header.getKeyID(), fromTokenEndpoint).toECPublicKey());
     } catch (PortvaktJwks.UnknownKeyException | JOSEException unknown) {
       return List.of();
     }
@@ -110,7 +114,9 @@ public final class PortvaktTokenVerifier {
   /**
    * Validates an ID token issued to this application ({@code aud} contains the client_id; with
    * several audiences {@code azp} must be the client_id) and maps it to a person principal with
-   * profile fields. The nonce is the caller's to check.
+   * profile fields. The nonce is the caller's to check. For ID tokens received from Portvakt's
+   * token endpoint (code exchange, refresh): an unknown kid refetches the JWKS also within the
+   * cooldown (see {@link PortvaktJwks}).
    *
    * @throws AccessTokenException 401 {@code invalid_token} for an invalid token or one that does
    *     not follow the claims contract

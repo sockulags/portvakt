@@ -21,7 +21,7 @@ there are not reopened during delivery.
 | `examples/demo-service`      | Demo service (Express + SDK, React SPA in `web/`), run as A and B   |
 | `sdk-java`                   | Java SDK (Maven, Java 21): `portvakt-sdk-core`, Spring Boot starter |
 | `examples/demo-service-java` | Java demo "Tjänst C" (Spring Boot + starter, Thymeleaf), :3300      |
-| `e2e`                        | Playwright suite                                                    |
+| `e2e`                        | Playwright suite (`scripts/e2e.js` runs it over the whole stack)    |
 | `deploy`                     | `docker-compose.dev.yml` (dev/test Postgres), later images/Helm     |
 | `docs`                       | Plan, claims contract, admin API (`admin-api.md`)                   |
 
@@ -41,7 +41,7 @@ npm run format:check   # prettier --check . (npm run format writes)
 npm test               # vitest run over apps/*, packages/*, examples/* (6 files at a time)
 npm run build          # vite build for apps/login and apps/admin (SPA into apps/admin/dist/web)
 npm run db:up          # Postgres 16 on localhost:5433, waits until healthy; npm run db:down stops it
-npm run test:e2e       # Playwright (browsers: npm run install-browsers --workspace e2e)
+npm run test:e2e       # Playwright end-to-end suite over the whole stack (below; Docker needed)
 npm run migrate -w apps/server         # migrate as MIGRATION_DATABASE_URL, grant the runtime role
 npm run rewrap-secrets -w apps/server  # after MASTER_KEY rotation: re-wrap secrets, re-index pins
 npm run audit:prune -w apps/server     # delete audit events older than AUDIT_RETENTION (owner role)
@@ -70,7 +70,8 @@ start (see "Java SDK" below). Without a root
 `kommun.example`, groups to roles), Mock BankID OIDC (loa3) and Mock BankID hög OIDC (loa4, the
 step-up target; persona `maja-loa4` can do both), Mock BankID SAML (`linkByPin`,
 `trustPinForRepresentation`; persona `saml-sven` may represent Bygg AB and Samuel Samordning),
-and Mock SITHS SAML (`sara@2321000016` gives the role `lakare`).
+and Mock SITHS SAML (`sara@2321000016` gives the role `lakare`; `service-a` may request the
+scope `hsa`, and Tjänst A asks for it and shows the HSA-id).
 
 Local login flow: `npm run db:up`, the server and the mock IdP as above, and `npm run build -w
 apps/login` once (or its `dev` watch). Create a tenant, an application and a login method with
@@ -91,6 +92,53 @@ Databases: `portvakt` (dev) and `portvakt_test` (tests), created by `deploy/post
 volume init. Two roles: the app runs as the restricted `portvakt_app` (`DATABASE_URL`,
 `TEST_DATABASE_URL`) and migrations as the owner `portvakt` (`MIGRATION_DATABASE_URL`,
 `TEST_MIGRATION_DATABASE_URL`). See `.env.example`.
+
+## End-to-end suite (`e2e`, `scripts/e2e.js`)
+
+`npm run test:e2e` is the release gate: the eleven scenarios of docs/plan.md plus the
+accessibility checks, with no retries. The orchestrator (plain Node, works on Windows) starts the
+Java demo's build in the Maven container first (`mvn -q -DskipTests package` of the demo and the
+SDK; ~/.m2 in the volume `portvakt-m2` or PORTVAKT_M2_DIR), then db:up, a fresh database
+`portvakt_e2e`, migrations, the login UI, demo and admin SPA builds (`--no-build` skips them, as CI
+does after `npm run build`), the mock IdP (default personas plus `e2e/personas.e2e.json`, merged
+into `e2e/.artifacts/personas.json`), the dev seed, Portvakt, the demos, the admin portal and the
+Java demo, waits for each health endpoint, runs `playwright install chromium` (a no-op when
+present) and `playwright test`, and stops everything (also on failure and Ctrl+C; a run killed
+without cleanup is reaped by the next one through `e2e/.artifacts/stack-pids.json`). Other
+arguments go to Playwright: `npm run test:e2e -- --grep "Scenario 6"`, `-- --headed`. `--no-java`
+skips the Java demo and its variants (local iteration only); `--keep` leaves the stack running, so
+`npx playwright test` in `e2e/` (defaults: the same ports) or `--ui` can be run against it.
+
+| Port | Process                                   | Port | Process                         |
+| ---- | ----------------------------------------- | ---- | ------------------------------- |
+| 3800 | Portvakt (issuers `.../t/{slug}`)         | 3820 | Tjänst B (demo, `service-b`)    |
+| 4800 | Mock IdP                                  | 3830 | Tjänst C (Java demo, container) |
+| 3810 | Tjänst A (demo, `service-a`, scope `hsa`) | 3840 | Admin portal                    |
+
+They differ from dev:stack (3000...) and test:java (3900, 4900), so all three can run at once,
+but not two e2e runs, and not test:java while the e2e Java build runs (both write
+`sdk-java/target`). The e2e stack sets ACCESS_TOKEN_TTL=60s: both SDKs refresh tokens valid for
+less than 60 s, so every API call refreshes first and "the next refresh" (scenario 6) is the next
+call, with no waiting.
+
+Debugging a failing scenario: process logs are in `e2e/.artifacts/logs/<process>.log`, and the
+lines a failed test added are attached to it; the HTML report is `npx playwright show-report
+e2e/.artifacts/playwright-report`; a failure keeps its trace, screenshot and video in
+`e2e/.artifacts/test-results/<test>/` (`npx playwright show-trace <dir>/trace.zip`). CI uploads
+`e2e/.artifacts` when the job fails.
+
+Layout: `src/env.ts` (URLs, seeded method names), `src/fixtures.ts` (`test` with the log
+attachment, the worker-scoped platform admin session `platformAdmin` and `demoTenant`,
+`tenantAdmin()`), page objects in `src/pages` (`LoginUi`, `MockIdp`, `DemoPage` for Tjänst A, B
+and C alike, `AdminPortal`), `src/admin-api.ts` (the admin API through the portal's BFF, for
+setup), `src/rp.ts` (the test as a relying party of a seeded app, for token-level checks),
+`src/a11y.ts` (axe, WCAG 2.1 AA; serious and critical fail). Projects (`playwright.config.ts`):
+`demo-tenant` (scenarios that change the seeded demo tenant; one worker, files in name order),
+`own-tenant` (scenarios with a tenant of their own, admin accessibility; runs next to it),
+`key-rotation` (scenario 9, alone, after both; a filter does not apply to the projects it depends on,
+so run scenario 9 by itself with `-- --grep "Scenario 9" --no-deps`). Flows click the persona buttons of the mock's
+pages; `login_hint` only signs the tenant administrator in. Scenario 2 needs `e2e-emma` and
+`e2e-jonas` to sign in for the first time in the run: no other test may use them earlier.
 
 ## Server modules (`apps/server/src`)
 
@@ -216,7 +264,8 @@ dependency would only wrap.
 | `client.ts`         | `createPortvaktClient`: config, discovery, JWKS, `bff`, `requireAccessToken`   |
 | `config.ts`         | zod-validated client config with defaults (`PortvaktConfigError`)              |
 | `discovery.ts`      | openid-client discovery cache (stale-if-error), client auth, `isUnavailable`   |
-| `jwks.ts`           | ES256 JWKS cache: unknown-kid refetch with cooldown, stale-if-error            |
+| `jwks.ts`           | ES256 JWKS cache: unknown-kid refetch with cooldown, stale-if-error; also the  |
+|                     | keys of the BFF's ID tokens (token endpoint: an unknown kid always refetches)  |
 | `access-token.ts`   | JWT validation (iss pinned, typ at+jwt, aud), middleware, RFC 6750 errors      |
 | `principal.ts`      | Principal types, claim schemas, person/service discriminator, `acrAtLeast`     |
 | `service-tokens.ts` | Cached client_credentials tokens (`resource` = `urn:portvakt:app:{client_id}`) |
@@ -759,6 +808,14 @@ packages/sdk-node` emits `dist/` with declarations. Publishing (exports pointing
 - Java `safeReturnTo` resolves `%2e` as a dot segment (browsers do), so `/%2e//evil` is refused.
 - Windows Python writes CRLF in text mode; edit repo files with `newline=""` (the repo is LF,
   `.gitattributes` has `eol=lf`, and prettier checks it).
+- SDK ID token signatures (both SDKs) are checked with the SDK's own JWKS cache, never
+  openid-client's non-repudiation checks (their cache refetches an unknown kid only after 60 s).
+  ID tokens come from the token endpoint, so an unknown kid refetches regardless of the cooldown:
+  the portal's key rotation activates the new key at once, and the next refresh must not end the
+  session (e2e scenario 9). Access tokens (bearer, from anyone) keep the cooldown.
+- Playwright: `page.route` never sees the target of a redirect, so `src/rp.ts` reads the code from
+  the callback's request event. The design system's checkboxes and switches cover their input:
+  click the label (`AdminPortal.toggle`), not the input.
 - BFF step-up and representation switches refuse cross-site starts (`Sec-Fetch-Site` same-origin
   or none, else a same-origin Referer or the session's `csrf` token); so do logins with `acr` or
   `prompt`, and any login while a session exists (both SDKs). Tests driving them with

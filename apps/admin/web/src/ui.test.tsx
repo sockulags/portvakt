@@ -11,7 +11,7 @@ import { PersonsPage } from "./pages/Persons";
 import { TenantsPage } from "./pages/Tenants";
 import type { Location } from "./router";
 import type { LoginMethod, Me, Person, Tenant, TenantApplication } from "./types";
-import { AdminContext, Modal, type Admin } from "./ui";
+import { AdminContext, CopyValue, Modal, type Admin } from "./ui";
 
 afterEach(() => {
   cleanup();
@@ -226,6 +226,21 @@ describe("Modal", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(opener);
+  });
+});
+
+describe("CopyValue", () => {
+  it("labels the value's group, not the code element (ARIA prohibits naming code)", () => {
+    render(
+      <I18nContext.Provider value={{ locale: "sv", t: MESSAGES.sv, setLocale: () => undefined }}>
+        <CopyValue label="SP-metadata" value="https://example.test/metadata" testId="sp" />
+      </I18nContext.Provider>,
+    );
+    const group = screen.getByRole("group", { name: "SP-metadata" });
+    const code = screen.getByTestId("sp-value");
+    expect(group.contains(code)).toBe(true);
+    expect(code.hasAttribute("aria-labelledby")).toBe(false);
+    expect(code.textContent).toBe("https://example.test/metadata");
   });
 });
 

@@ -86,3 +86,42 @@ jobs:
           restore-keys: maven-
       - run: npm ci
       - run: npm run test:java
+
+  e2e:
+    # The Playwright suite over the whole stack (scripts/e2e.js): Postgres (compose), the mock
+    # IdP, Portvakt, the demo as Tjänst A and B, the admin portal, and the Java demo (Tjänst C) in
+    # the maven:3.9-eclipse-temurin-21 container. The release gate: no retries.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      CI: "true"
+      # A host directory instead of the named volume, so the dependencies can be cached.
+      PORTVAKT_M2_DIR: ${{ github.workspace }}/.m2-cache
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Cache Maven dependencies
+        uses: actions/cache@v6
+        with:
+          path: .m2-cache
+          key: maven-${{ hashFiles('sdk-java/**/pom.xml', 'examples/demo-service-java/pom.xml') }}
+          restore-keys: maven-
+      - run: npm ci
+      - run: npm run build
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+        working-directory: e2e
+      - name: End-to-end suite
+        run: npm run test:e2e -- --no-build
+      - name: Upload the stack logs and the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-artifacts
+          path: e2e/.artifacts
+          retention-days: 14

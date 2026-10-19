@@ -14,6 +14,8 @@ export interface SessionPrincipal {
   readonly authTime: number;
   readonly roles: readonly string[];
   readonly name?: string;
+  /** SITHS employees, with scope `hsa` (when the application is allowed it). */
+  readonly hsaId?: string;
   readonly protectedIdentity?: boolean;
   readonly rep?: {
     readonly sub: string;

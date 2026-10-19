@@ -45,6 +45,7 @@ beforeEach(() => {
   op.accessTokenTtl = 300;
   op.refreshDelayMs = 0;
   op.refuseRefresh = false;
+  op.signingKid = undefined;
   op.down = false;
   op.serverError = undefined;
 });
@@ -466,6 +467,45 @@ describe("BFF access tokens and refresh", () => {
         ),
       );
       expect(values.size).toBe(1);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("keeps the session when the refresh returns an ID token signed with a key that was just activated", async () => {
+    // A manual key rotation activates a new key at once (Portvakt's "rotate now"): the next
+    // refresh answers with tokens signed by a kid the BFF fetched no JWKS for yet. That is no
+    // reason to end the session (regression: openid-client's own JWKS cache refetches an
+    // unknown kid only once its copy is 60 s old, and the session ended).
+    const h = await harness();
+    try {
+      const browser = new MiniBrowser();
+      await login(h, browser);
+      const jwksBefore = op.counters.jwks;
+      op.signingKid = await op.addKey();
+      const refreshed = await browser.request(`${h.base}/token?min=3600`);
+      expect(refreshed.status).toBe(200);
+      expect(op.counters.jwks).toBe(jwksBefore + 1);
+      expect((await sessionOf(h, browser)).authenticated).toBe(true);
+      // A login right after the rotation verifies the new key from the cache, without a fetch.
+      await login(h, new MiniBrowser());
+      expect(op.counters.jwks).toBe(jwksBefore + 1);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("ends the session when a refreshed ID token is signed by a key Portvakt does not publish", async () => {
+    const h = await harness();
+    try {
+      const browser = new MiniBrowser();
+      await login(h, browser);
+      // The token endpoint answers with an ID token whose kid is not in the JWKS (one refetch).
+      op.signingKid = await op.addKey("unpublished");
+      op.unpublished.add("unpublished");
+      const refreshed = await browser.request(`${h.base}/token?min=3600`);
+      expect(refreshed.status).toBe(401);
+      expect((await sessionOf(h, browser)).authenticated).toBe(false);
     } finally {
       await h.close();
     }
