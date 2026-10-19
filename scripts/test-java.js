@@ -191,7 +191,24 @@ async function waitFor(/** @type {string} */ name, /** @type {string} */ url, ti
 /** A fresh, empty test database (dropped and created again by the owner role, with psql). */
 async function recreateDatabase() {
   console.log(`[test-java] database ${DATABASE}: recreating`);
-  const result = spawnSync(
+  // The postgres image restarts the server once after its init scripts, so a container reported
+  // healthy can still answer "the database system is starting up"; retry for a bounded time.
+  const deadline = Date.now() + 30_000;
+  let result = recreateOnce();
+  while (result.status !== 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    result = recreateOnce();
+  }
+  if (result.status !== 0) {
+    console.error(
+      `[test-java] creating ${DATABASE} failed: ${result.stderr || result.error?.message}`,
+    );
+    await stopAll(1);
+  }
+}
+
+function recreateOnce() {
+  return spawnSync(
     "docker",
     [
       "compose",
@@ -214,12 +231,6 @@ async function recreateDatabase() {
     ],
     { cwd: root, encoding: "utf8" },
   );
-  if (result.status !== 0) {
-    console.error(
-      `[test-java] creating ${DATABASE} failed: ${result.stderr || result.error?.message}`,
-    );
-    await stopAll(1);
-  }
 }
 
 function kill(/** @type {import("node:child_process").ChildProcess} */ child) {
