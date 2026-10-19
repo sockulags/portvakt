@@ -1,0 +1,115 @@
+/* Layout of the demo service. Visual language comes from the design system's tokens. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+}
+
+.demo-page {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  padding: var(--space-8) var(--space-4);
+}
+
+.demo-column {
+  width: 100%;
+  max-width: 44rem;
+}
+
+.demo-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.demo-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.demo-heading {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+}
+
+.demo-text {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.demo-details {
+  margin: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.demo-detail {
+  display: grid;
+  grid-template-columns: minmax(9rem, 14rem) 1fr;
+  gap: var(--space-3);
+}
+
+.demo-detail dt {
+  color: var(--color-text-muted);
+}
+
+.demo-detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.demo-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.demo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.demo-pre {
+  margin: 0;
+  padding: var(--space-4);
+  overflow: auto;
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.demo-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (max-width: 36rem) {
+  .demo-detail {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
+}

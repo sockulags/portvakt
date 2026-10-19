@@ -4,7 +4,12 @@ import reactHooks from "eslint-plugin-react-hooks";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
-const reactWorkspaces = ["apps/login/**", "apps/admin/**", "packages/design-system/**"];
+const reactWorkspaces = [
+  "apps/login/**",
+  "apps/admin/**",
+  "packages/design-system/**",
+  "examples/demo-service/web/**",
+];
 
 export default tseslint.config(
   {

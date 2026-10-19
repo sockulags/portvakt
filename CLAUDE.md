@@ -9,19 +9,19 @@ there are not reopened during delivery.
 
 ## Layout
 
-| Path                     | Contents                                                         |
-| ------------------------ | ---------------------------------------------------------------- |
-| `apps/server`            | Broker (Express 5); `createApp()` in `src/app.ts`                |
-| `apps/login`             | Login/interaction SPA (Vite + React 19), served by the server    |
-| `apps/admin`             | Admin portal SPA (Vite + React 19)                               |
-| `apps/mock-idp`          | Dev/test upstream IdPs: OIDC `/entra`, `/bankid`; SAML `/saml/*` |
-| `packages/sdk-node`      | TypeScript SDK for Node/Express                                  |
-| `packages/design-system` | Delivered design system; source in `src/` kept as delivered      |
-| `packages/fonts`         | Self-hosted design-system fonts (`@portvakt/fonts/fonts.css`)    |
-| `examples/demo-service`  | Demo downstream service (Service A and B)                        |
-| `e2e`                    | Playwright suite                                                 |
-| `deploy`                 | `docker-compose.dev.yml` (dev/test Postgres), later images/Helm  |
-| `docs`                   | Plan, claims contract (`claims.md`); architecture later          |
+| Path                     | Contents                                                          |
+| ------------------------ | ----------------------------------------------------------------- |
+| `apps/server`            | Broker (Express 5); `createApp()` in `src/app.ts`                 |
+| `apps/login`             | Login/interaction SPA (Vite + React 19), served by the server     |
+| `apps/admin`             | Admin portal SPA (Vite + React 19)                                |
+| `apps/mock-idp`          | Dev/test upstream IdPs: OIDC `/entra`, `/bankid`; SAML `/saml/*`  |
+| `packages/sdk-node`      | `@portvakt/sdk-node`: BFF, access token validation, s2s tokens    |
+| `packages/design-system` | Delivered design system; source in `src/` kept as delivered       |
+| `packages/fonts`         | Self-hosted design-system fonts (`@portvakt/fonts/fonts.css`)     |
+| `examples/demo-service`  | Demo service (Express + SDK, React SPA in `web/`), run as A and B |
+| `e2e`                    | Playwright suite                                                  |
+| `deploy`                 | `docker-compose.dev.yml` (dev/test Postgres), later images/Helm   |
+| `docs`                   | Plan, claims contract (`claims.md`); architecture later           |
 
 Shared config at the root: `tsconfig.base.json` (strict), `tsconfig.node.json` (NodeNext, Node
 packages), `tsconfig.vite.json` (Bundler resolution, Vite apps), `eslint.config.js`,
@@ -46,7 +46,22 @@ npm run audit:prune -w apps/server     # delete audit events older than AUDIT_RE
 npm run dev -w apps/server             # broker with reload (migrates on start outside production)
 npm run dev -w apps/mock-idp           # mock upstream IdPs on :4500 (/entra, /bankid, /saml/*)
 npm run dev -w apps/login              # rebuilds apps/login/dist on change; the server serves it
+npm run dev:stack                      # whole local stack (below); Ctrl+C stops it, not the DB
+npm run seed:dev -w apps/server        # demo tenant (idempotent); needs the mock IdP running
+npm run build -w examples/demo-service # demo SPA into examples/demo-service/dist/web
+npm run build -w packages/sdk-node     # SDK into packages/sdk-node/dist (JS + .d.ts)
 ```
+
+Local stack (`npm run dev:stack`, `scripts/dev-stack.js`, plain Node, works on Windows): db:up,
+migrate, the login UI and demo SPA builds when missing (`npm run dev:stack -- --build` forces
+them), the mock IdP (:4500), `seed:dev`, Portvakt (:3000), the demo as Tjänst A (:3100,
+`service-a`, enabled) and Tjänst B (:3200, `service-b`, attached but disabled). Without a root
+`.env` it uses the values of `.env.example`. The demo tenant's issuer is
+`http://localhost:3000/t/demo`. Its login methods: Mock Entra (employees, home realm
+`kommun.example`, groups to roles), Mock BankID OIDC (loa3) and Mock BankID hög OIDC (loa4, the
+step-up target; persona `maja-loa4` can do both), Mock BankID SAML (`linkByPin`,
+`trustPinForRepresentation`; persona `saml-sven` may represent Bygg AB and Samuel Samordning),
+and Mock SITHS SAML (`sara@2321000016` gives the role `lakare`).
 
 Local login flow: `npm run db:up`, the server and the mock IdP as above, and `npm run build -w
 apps/login` once (or its `dev` watch). Create a tenant, an application and a login method with
@@ -131,6 +146,25 @@ Migrations are plain SQL in `apps/server/migrations/NNNN_name.sql`, applied by o
 (`src/db/migrate.ts`): it is ~150 lines, takes an advisory lock and keeps checksums, which a
 dependency would only wrap.
 
+## SDK (`packages/sdk-node/src`)
+
+| Module              | Contents                                                                       |
+| ------------------- | ------------------------------------------------------------------------------ |
+| `client.ts`         | `createPortvaktClient`: config, discovery, JWKS, `bff`, `requireAccessToken`   |
+| `config.ts`         | zod-validated client config with defaults (`PortvaktConfigError`)              |
+| `discovery.ts`      | openid-client discovery cache (stale-if-error), client auth, `isUnavailable`   |
+| `jwks.ts`           | ES256 JWKS cache: unknown-kid refetch with cooldown, stale-if-error            |
+| `access-token.ts`   | JWT validation (iss pinned, typ at+jwt, aud), middleware, RFC 6750 errors      |
+| `principal.ts`      | Principal types, claim schemas, person/service discriminator, `acrAtLeast`     |
+| `service-tokens.ts` | Cached client_credentials tokens (`resource` = `urn:portvakt:app:{client_id}`) |
+| `bff/`              | BFF router and helpers, sealed sessions, signed cookies, returnTo, keyed lock  |
+| `stores/`           | `SessionStore`, `MemoryStore`, `PgSessionStore` (advisory-lock `withLock`)     |
+| `testing/`          | Test-only: `FakeOp` (minimal OP for unit tests), `MiniBrowser`                 |
+
+Integration tests (`integration.test.ts`, the demo's `smoke.test.ts`) run an in-process Portvakt
+and mock IdP through `@portvakt/server/testing` (the server package's only export). The dev seed
+lives in `apps/server/src/dev` (`seed.ts`, `seed-cli.ts`).
+
 ## Conventions
 
 - Claims contract (docs/plan.md): `sub` is always the signed-in person, also when representing;
@@ -147,7 +181,7 @@ dependency would only wrap.
   carry a `.js` extension; Vite apps use Bundler resolution and extensionless imports.
 - Validate every boundary (HTTP input, config, env, database rows from JSON columns) with zod.
 - No personal data in logs: no names, emails, personal identity numbers, tokens or secrets.
-- Code, comments, commits and docs in English.
+- Code, comments, commits and docs in English; user-facing text of the demo SPA in Swedish.
 - UI only through `@portvakt/design-system` (`/components`, `/patterns`, `/tokens.css`). Do not
   edit files under `packages/design-system/src`; they are the delivered design system. App CSS
   (layout only) uses the tokens and lives in a stylesheet file: the login UI's CSP allows no
@@ -526,3 +560,29 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
   `rewrap-secrets`: keep the old key in MASTER_KEY_PREVIOUS until SESSION_TTL has passed.
 - The init script in `deploy/postgres-init` only runs on a fresh volume. To recreate the databases:
   `docker compose -f deploy/docker-compose.dev.yml down -v` then `npm run db:up`.
+- Person and service access tokens are told apart by the claims the server issues: person tokens
+  always carry `idp`, `idp_kind`, `acr`, `auth_time`, `roles` and `attrs` and a person UUID
+  as `sub`; client_credentials tokens carry none of them (`extraTokenClaims` adds only `tid`)
+  and oidc-provider sets their `sub` to the client_id. The SDK refuses anything in between, so
+  changing those claims in `oidc/provider.ts` or `oidc/claims.ts` breaks the SDK.
+- Node's fetch always sends `Sec-Fetch-Mode: cors` (it sets the header itself), so the SDK
+  treats test requests as XHR. Tests of browser-navigation behaviour use `MiniBrowser.navigate`
+  (node:http).
+- The mock IdP generates new SAML keys at every start and the server caches IdP metadata: after
+  restarting the mock alone, run `npm run seed:dev -w apps/server` again (it fetches the metadata
+  of the demo's SAML methods again). Local SAML metadata is unsigned (`allowUnsignedMetadata`).
+- Cookies on localhost ignore ports: every demo instance (and any other BFF on localhost) needs
+  its own `COOKIE_NAME`. For XHR 401s the BFF's `returnTo` is `defaultReturnTo`, never the API
+  URL that was called.
+- The SDK supports Express 4 and 5: its handlers never rely on Express 5's promise handling, and
+  `bff.test.ts` runs the BFF on Express 4 through the devDependency alias `express4`.
+- The SDK's `exports` point at `src/index.ts` (workspace convention); `npm run build -w
+packages/sdk-node` emits `dist/` with declarations. Publishing (exports pointing at `dist`)
+  belongs to M9.
+- `PgSessionStore.withLock` holds one pool connection (transaction-scoped advisory lock) and runs
+  every store operation inside the lock on that connection (AsyncLocalStorage), never a second
+  one: lock holders waiting for more connections would deadlock a small pool. Writes inside the
+  lock are committed even when the locked function throws.
+- BFF step-up and representation switches refuse cross-site starts (`Sec-Fetch-Site` same-origin
+  or none, else a same-origin Referer or the session's `csrf` token). Tests driving them with
+  Node's fetch send `sec-fetch-site: same-origin` explicitly.

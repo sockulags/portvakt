@@ -578,8 +578,16 @@ describe.skipIf(ts === undefined)("upstream federation and login", () => {
         acr_values_supported?: string[];
       };
     expect((await discovery()).acr_values_supported).not.toContain("urn:portvakt:acr:custom");
-    const cached = ts!.portvakt.registry.peek(w.tenant.slug);
-    expect(cached).toBeDefined();
+    // Parallel test files' change events (NOTIFY is database-wide) may drop the provider at any
+    // time, so the cached one is taken once it is there.
+    let cached = ts!.portvakt.registry.peek(w.tenant.slug);
+    await expect
+      .poll(async () => {
+        if (cached === undefined) await discovery();
+        cached ??= ts!.portvakt.registry.peek(w.tenant.slug);
+        return cached;
+      })
+      .toBeDefined();
     const method: LoginMethod = await createFederatedLoginMethod(ts!, idp!, w.tenant, "entra", {
       assertedAcr: "urn:portvakt:acr:custom",
     });

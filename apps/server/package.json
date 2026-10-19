@@ -8,6 +8,9 @@
   "engines": {
     "node": ">=24"
   },
+  "exports": {
+    "./testing": "./src/testing/index.ts"
+  },
   "dependencies": {
     "@node-saml/node-saml": "~5.1.0",
     "@peculiar/asn1-schema": "^2.11.0",
@@ -36,6 +39,7 @@
     "migrate": "tsx --env-file-if-exists=../../.env src/db/migrate-cli.ts",
     "rewrap-secrets": "tsx --env-file-if-exists=../../.env src/db/rewrap-cli.ts",
     "audit:prune": "tsx --env-file-if-exists=../../.env src/audit/prune-cli.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "seed:dev": "tsx --env-file-if-exists=../../.env src/dev/seed-cli.ts"
   }
 }
