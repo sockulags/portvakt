@@ -13,7 +13,7 @@ How to deploy, configure, monitor and recover Portvakt 1.0. The architecture is 
 | Audit retention job | `portvakt-server`   | `node dist/audit/prune-cli.js` (owner role), daily                        |
 | Admin portal        | `portvakt-admin`    | `node dist/main.js` on port 3400 (`ADMIN_PORT`)                           |
 | Admin session table | `portvakt-admin`    | `node dist/migrate-sessions.js`, before every admin deployment            |
-| Database            | PostgreSQL 16       | Everything durable: tenants, keys, sessions, audit                        |
+| Database            | PostgreSQL 18       | Everything durable: tenants, keys, sessions, audit                        |
 | Mock IdP, demo      | `portvakt-mock-idp` | Evaluation and tests only (labelled `se.portvakt.image.production=false`) |
 |                     | `portvakt-demo`     |                                                                           |
 
@@ -503,6 +503,14 @@ for the latest minor version ([SECURITY.md](../SECURITY.md)). Roll back by deplo
 images (`helm rollback`, which does not run the migration hook): additive migrations keep the
 schema usable by the previous minor release. Do not run the previous version's migration job
 against a newer schema: the runner refuses a database with applied migrations it does not know.
+
+**PostgreSQL versions.** CI, the dev database and the Compose stack run PostgreSQL 18. Portvakt
+uses no 18-only features, but only 18 is tested. A major PostgreSQL upgrade is a database
+operation (`pg_upgrade` or dump and restore), independent of Portvakt's own upgrades. The Compose
+files mount the volume at `/var/lib/postgresql`, as the 18 image expects, under new volume names
+(`portvakt-pgdata18`, `pgdata18`). A volume created by an earlier Compose file still holds
+PostgreSQL 16 data and is no longer used; migrate its data with `pg_upgrade` or a dump and
+restore if you need it, then remove it.
 
 ## Runbooks
 

@@ -101,7 +101,9 @@ describe("session encryption", () => {
     expect(sealer.open(sealed, "s:abc")).toBe('{"accessToken":"secret-token"}');
     expect(sealer.open(sealed, "s:other")).toBeUndefined();
     const parts = sealed.split(".");
-    const tampered = [...parts.slice(0, 3), `A${parts[3]!.slice(1)}`].join(".");
+    // Always change the first character (replacing it with a fixed one is a no-op 1 time in 64).
+    const first = parts[3]!.charAt(0) === "A" ? "B" : "A";
+    const tampered = [...parts.slice(0, 3), `${first}${parts[3]!.slice(1)}`].join(".");
     expect(sealer.open(tampered, "s:abc")).toBeUndefined();
 
     const rotated = new Sealer([key(2), key(1)]);

@@ -45,7 +45,7 @@ npm run format:check   # prettier --check . (npm run format writes)
 npm test               # vitest run over apps/*, packages/*, examples/* (6 files at a time)
 npm run build          # every workspace: tsc -b into dist/ (server, admin BFF, http-kit, SDK,
                        # mock IdP, demo) and the vite SPAs (login, admin dist/web, demo dist/web)
-npm run db:up          # Postgres 16 on localhost:5433, waits until healthy; npm run db:down stops it
+npm run db:up          # Postgres 18 on localhost:5433, waits until healthy; npm run db:down stops it
 npm run test:e2e       # Playwright end-to-end suite over the whole stack (below; Docker needed)
 npm run migrate -w apps/server         # migrate as MIGRATION_DATABASE_URL, grant the runtime role
 npm run rewrap-secrets -w apps/server  # after MASTER_KEY rotation: re-wrap, re-index (owner role)

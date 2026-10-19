@@ -79,3 +79,4 @@ The first release.
   CronJob, NetworkPolicies, PodDisruptionBudgets, an optional HPA and ServiceMonitor and a
   database capacity check.
 - Release workflow building the images with SBOMs on version tags.
+- Tested on PostgreSQL 18 (CI, dev database and Compose stack).
