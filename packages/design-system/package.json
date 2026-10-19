@@ -1,6 +1,6 @@
 {
   "name": "@portvakt/design-system",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Portvakt design system: tokens and React components (CSS Modules), as delivered.",
   "license": "MIT",

@@ -1,0 +1,51 @@
+{{- if .Values.ingress.enabled }}
+{{- $fullname := include "portvakt.fullname" . }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+        {{- if .Values.admin.enabled }}
+        - {{ .Values.ingress.adminHost | quote }}
+        {{- end }}
+      secretName: {{ default (printf "%s-tls" $fullname) .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    # Everything of Portvakt's origin goes to the server; /metrics answers only with
+    # METRICS_TOKEN there, and with metrics.enabled it is on its own port, not this one.
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-server
+                port:
+                  name: http
+    {{- if .Values.admin.enabled }}
+    - host: {{ .Values.ingress.adminHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-admin
+                port:
+                  name: http
+    {{- end }}
+{{- end }}

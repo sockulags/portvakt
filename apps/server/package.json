@@ -1,6 +1,6 @@
 {
   "name": "@portvakt/server",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Portvakt broker: OIDC provider per tenant, federation, interactions, admin API.",
   "license": "MIT",
@@ -35,13 +35,14 @@
     "supertest": "^7.3.1"
   },
   "scripts": {
-    "dev": "tsx watch --env-file-if-exists=../../.env src/main.ts",
-    "start": "tsx --env-file-if-exists=../../.env src/main.ts",
-    "migrate": "tsx --env-file-if-exists=../../.env src/db/migrate-cli.ts",
-    "rewrap-secrets": "tsx --env-file-if-exists=../../.env src/db/rewrap-cli.ts",
-    "audit:prune": "tsx --env-file-if-exists=../../.env src/audit/prune-cli.ts",
+    "dev": "tsx watch --conditions=portvakt-source --env-file-if-exists=../../.env src/main.ts",
+    "start": "tsx --conditions=portvakt-source --env-file-if-exists=../../.env src/main.ts",
+    "migrate": "tsx --conditions=portvakt-source --env-file-if-exists=../../.env src/db/migrate-cli.ts",
+    "rewrap-secrets": "tsx --conditions=portvakt-source --env-file-if-exists=../../.env src/db/rewrap-cli.ts",
+    "audit:prune": "tsx --conditions=portvakt-source --env-file-if-exists=../../.env src/audit/prune-cli.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "seed:dev": "tsx --env-file-if-exists=../../.env src/dev/seed-cli.ts",
-    "config:check": "tsx --env-file-if-exists=../../.env src/config/check-cli.ts"
+    "seed:dev": "tsx --conditions=portvakt-source --env-file-if-exists=../../.env src/dev/seed-cli.ts",
+    "config:check": "tsx --conditions=portvakt-source --env-file-if-exists=../../.env src/config/check-cli.ts",
+    "build": "tsc -b tsconfig.build.json"
   }
 }

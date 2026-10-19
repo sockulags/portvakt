@@ -1,0 +1,129 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+# Default deny for every Portvakt pod, then exactly the flows each component needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "portvakt.fullname" . }}-server
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "portvakt.selectorLabels" (dict "root" . "component" "server") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Browsers and applications through the ingress controller.
+    - from:
+        - namespaceSelector:
+            {{- toYaml $np.ingressController.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.ingressController.podSelector | nindent 12 }}
+        {{- if .Values.admin.enabled }}
+        # The admin BFF, when admin.apiUrl points at the in-cluster Service.
+        - podSelector:
+            matchLabels:
+              {{- include "portvakt.selectorLabels" (dict "root" . "component" "admin") | nindent 14 }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: 3000 }
+    {{- if .Values.metrics.enabled }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml $np.metricsScraper.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.metricsScraper.podSelector | nindent 12 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.metrics.port }} }
+    {{- end }}
+  egress:
+    {{- include "portvakt.np.dns" $np | nindent 4 }}
+    {{- include "portvakt.np.database" $np | nindent 4 }}
+    # Upstream IdPs and downstream jwks_uri (Portvakt's outbound guard refuses private
+    # addresses by itself as well).
+    - to:
+        {{- range $np.upstream.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+            {{- with $np.upstream.except }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+        {{- end }}
+      ports:
+        {{- range $np.upstream.ports }}
+        - { protocol: TCP, port: {{ . }} }
+        {{- end }}
+{{- if .Values.admin.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "portvakt.fullname" . }}-admin
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admin
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "portvakt.selectorLabels" (dict "root" . "component" "admin") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml $np.ingressController.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.ingressController.podSelector | nindent 12 }}
+      ports:
+        - { protocol: TCP, port: 3400 }
+    - from:
+        - namespaceSelector:
+            {{- toYaml $np.metricsScraper.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.metricsScraper.podSelector | nindent 12 }}
+      ports:
+        - { protocol: TCP, port: 3400 }
+  egress:
+    {{- include "portvakt.np.dns" $np | nindent 4 }}
+    {{- include "portvakt.np.database" $np | nindent 4 }}
+    # Portvakt: its public origin (discovery, token endpoint, admin API) ...
+    - to:
+        {{- range $np.adminToPortvakt.cidrs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        {{- range $np.adminToPortvakt.ports }}
+        - { protocol: TCP, port: {{ . }} }
+        {{- end }}
+    # ... or the in-cluster Service.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "portvakt.selectorLabels" (dict "root" . "component" "server") | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 3000 }
+{{- end }}
+---
+# Migrations and audit retention: the database only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "portvakt.fullname" . }}-jobs
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name | quote }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [migrate, audit-prune]
+  policyTypes: [Ingress, Egress]
+  egress:
+    {{- include "portvakt.np.dns" $np | nindent 4 }}
+    {{- include "portvakt.np.database" $np | nindent 4 }}
+{{- end }}

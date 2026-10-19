@@ -161,6 +161,66 @@ describe.skipIf(ts === undefined)("kill switches", () => {
     await refreshFails(signed);
   });
 
+  it("disabling the application globally revokes its grants in every tenant; enabling it revives nothing", async () => {
+    const first = await signedIn();
+    const { app } = first.w;
+    // The same application in a second tenant, with a login of its own there.
+    const other = await createTenantWorld(repos, "kill");
+    await repos.applications.enableForTenant(other.tenant.id, app.application.id);
+    const { person } = await login(
+      repos,
+      other.tenant.id,
+      other.loginMethod,
+      `p-${uniqueSuffix()}`,
+    );
+    const otherRp = await discoverWithSecret(ts!, other.tenant.slug, app);
+    const otherTokens = await codeFlow(ts!, otherRp, app.application.redirectUris[0]!, {
+      personId: person.id,
+      loginMethodId: other.loginMethod.id,
+      acr: other.loginMethod.assertedAcr,
+    });
+    const second: Signed = {
+      w: { ...other, app },
+      rp: otherRp,
+      personId: person.id,
+      refreshToken: otherTokens.refresh_token!,
+      browser: new TestBrowser(),
+    };
+    // An unrelated application of the second tenant keeps its grants.
+    const bystander = await signedIn();
+
+    const path = `/applications/${app.application.id}`;
+    await adminChange("PATCH", path, { enabled: false });
+    for (const signed of [first, second]) {
+      const events = await revocationEvents(signed.w.tenant.id);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        subject: { type: "application", id: app.application.id },
+        details: {
+          reason: "application_disabled",
+          grants: 1,
+          clientId: app.application.clientId,
+        },
+      });
+    }
+    expect(await revocationEvents(bystander.w.tenant.id)).toEqual([]);
+
+    await adminChange("PATCH", path, { enabled: true });
+    await refreshFails(first);
+    await refreshFails(second);
+    await expect(
+      client.refreshTokenGrant(bystander.rp, bystander.refreshToken),
+    ).resolves.toBeDefined();
+    // A fresh sign-in works as usual once the application is enabled again.
+    await expect(
+      authorize(ts!, first.rp, app.application.redirectUris[0]!, {
+        personId: first.personId,
+        loginMethodId: first.w.loginMethod.id,
+        acr: first.w.loginMethod.assertedAcr,
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it("detaching the application revokes its grants; attaching it again revives nothing", async () => {
     const signed = await signedIn();
     const { tenant, app } = signed.w;

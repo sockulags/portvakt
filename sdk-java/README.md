@@ -19,14 +19,14 @@ The demo service `examples/demo-service-java` ("Tjänst C") uses the starter for
 <dependency>
   <groupId>se.portvakt</groupId>
   <artifactId>portvakt-spring-boot-starter</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.0</version>
 </dependency>
 
 <!-- Without Spring: -->
 <dependency>
   <groupId>se.portvakt</groupId>
   <artifactId>portvakt-sdk-core</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.0</version>
 </dependency>
 ```
 

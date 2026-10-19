@@ -1,0 +1,68 @@
+# The end-to-end suite against the production images: `npm run test:e2e:compose`
+# (scripts/e2e.js --compose) runs
+#
+#   docker compose --env-file deploy/compose/local.env --env-file deploy/compose/e2e.env \
+#     -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml \
+#     -f deploy/docker-compose.e2e.yml --profile demo up -d --wait
+#
+# on top of the local mode (deploy/docker-compose.local.yml: one shared localhost), with the
+# ports of `npm run test:e2e` (so the suite's defaults apply) and the test-only settings the
+# scenarios need. Every one of them is an environment variable of this file; no production
+# default changes. The Java demo (Tjänst C) joins the same network namespace from the
+# orchestrator (maven container, as in `npm run test:e2e`).
+
+name: portvakt-e2e
+
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:3800:3800"
+      - "127.0.0.1:3810:3810"
+      - "127.0.0.1:3820:3820"
+      - "127.0.0.1:3830:3830"
+      - "127.0.0.1:3840:3840"
+      - "127.0.0.1:4800:4800"
+      # The suite's own database access (owner role, fixtures the product cannot set).
+      - "127.0.0.1:5434:5432"
+
+  server:
+    environment:
+      PORT: "3800"
+      SHUTDOWN_DRAIN_DELAY: 0s
+      # Short access tokens: the SDKs refresh once half the lifetime has passed, so "the next
+      # refresh" (scenarios 6 and 9) comes after seconds (e2e/src/env.ts ACCESS_TOKEN_DUE_MS).
+      ACCESS_TOKEN_TTL: 10s
+      # Scenario 9 waits for a manually rotated key to activate.
+      KEY_MANUAL_PUBLISH_AHEAD: 15s
+      # Every browser of the suite signs in from one address, in parallel: the limits stay on
+      # (their code runs on every request) but are raised.
+      RATE_LIMIT_AUTHORIZE_IP: 10000/1m
+      RATE_LIMIT_AUTHORIZE_CLIENT: 10000/1m
+      RATE_LIMIT_INTERACTION_IP: 10000/1m
+      RATE_LIMIT_FEDERATION_IP: 10000/1m
+      RATE_LIMIT_TOKEN_IP: 10000/1m
+      RATE_LIMIT_TOKEN_CLIENT: 10000/1m
+      RATE_LIMIT_ADMIN_API: 10000/1m
+
+  admin:
+    environment:
+      ADMIN_PORT: "3840"
+      ADMIN_RATE_LIMIT_LOGIN: 10000/1m
+
+  mock-idp:
+    environment:
+      # The default personas plus e2e/personas.e2e.json, merged by the orchestrator.
+      MOCK_IDP_PERSONAS: /e2e/personas.json
+      MOCK_IDP_CLIENTS: >-
+        [{"issuer":"entra","client_id":"portvakt-dev","client_secret":"dev-only-entra-client-secret","redirect_uri_prefixes":["http://localhost:3800/t/"]},
+        {"issuer":"bankid","client_id":"portvakt-dev","client_secret":"dev-only-bankid-client-secret","redirect_uri_prefixes":["http://localhost:3800/t/"]}]
+    volumes:
+      - ../e2e/.artifacts/personas.json:/e2e/personas.json:ro
+
+  demo-a:
+    environment:
+      COOKIE_NAME: demo_a_e2e_session
+
+  demo-b:
+    environment:
+      COOKIE_NAME: demo_b_e2e_session

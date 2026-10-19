@@ -1,0 +1,23 @@
+# Build context of deploy/Dockerfile (the repository root): sources and lockfile only. Builds,
+# dependencies, local configuration and test output never enter an image.
+**/node_modules
+**/dist
+**/dist-dev
+**/*.tsbuildinfo
+**/target
+**/coverage
+.git
+.github
+.m2-cache
+.env
+.env.*
+!.env.example
+e2e/.artifacts
+e2e/test-results
+e2e/playwright-report
+sdk-java
+examples/demo-service-java
+deploy/helm
+docs
+*.md
+!packages/sdk-node/README.md

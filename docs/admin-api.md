@@ -164,6 +164,7 @@ Changes that take a login away end it at once, in the change's own transaction, 
 | -------------------------------------------------------------- | ---------------------------------------------------------- |
 | suspending the tenant                                          | every session and grant of the tenant                      |
 | disabling an application in the tenant, or detaching it        | the application's grants in the tenant                     |
+| disabling an application globally (`PATCH /applications/{id}`) | the application's grants in every tenant it is attached to |
 | disabling or deleting a login method                           | sessions and grants whose login came through it            |
 | unlinking an identity                                          | the person's sessions and grants through that login method |
 | deleting a person                                              | every session and grant of the person                      |

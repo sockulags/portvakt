@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "portvakt.fullname" . }}-server
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  type: {{ .Values.server.service.type }}
+  selector:
+    {{- include "portvakt.selectorLabels" (dict "root" . "component" "server") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.server.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- if .Values.metrics.enabled }}
+---
+# Metrics only (METRICS_PORT): never routed by the ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "portvakt.fullname" . }}-server-metrics
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+    portvakt.se/metrics: "true"
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "portvakt.selectorLabels" (dict "root" . "component" "server") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.service.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "portvakt.fullname" . }}-server
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "portvakt.selectorLabels" (dict "root" . "component" "server") | nindent 6 }}
+      portvakt.se/metrics: "true"
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      {{- with .Values.metrics.serviceMonitor.tokenSecretKey }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "portvakt.serverSecret" $ }}
+          key: {{ . }}
+      {{- end }}
+{{- end }}

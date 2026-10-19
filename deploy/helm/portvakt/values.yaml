@@ -1,0 +1,289 @@
+# Portvakt Helm chart. Secrets are never values: every secret comes from a Secret you create
+# before installing (server.existingSecret, admin.existingSecret, database.ownerSecret);
+# values.schema.json refuses secret variables in the *.env maps. The server and admin pods get
+# runtime database credentials only; the owner credentials (database.ownerSecret) go only to the
+# migration Jobs and the audit retention CronJob. docs/operations.md describes every setting.
+
+# Image registry prefix for both images, for example "ghcr.io/example/" (with the slash).
+imageRegistry: ""
+imagePullSecrets: []
+
+# Kept on every object as app.kubernetes.io/part-of and in selectors.
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  # Portvakt never talks to the Kubernetes API.
+  automountServiceAccountToken: false
+  name: ""
+  annotations: {}
+
+# Pod and container security contexts of every Portvakt pod (server, admin, jobs).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+# Database capacity check (docs/operations.md, "Capacity"): when set to the server's
+# max_connections minus its reserved slots, rendering fails if the chart's pods could need more:
+# server replicas (HPA maximum) x (DATABASE_POOL_MAX + 1 LISTEN connection) + 2 jobs
+# (+ admin replicas x 10, the admin BFF's pool, when its sessions live on the same server).
+database:
+  maxConnections: null
+  adminSharesServer: true
+  # A Secret (default name: {release fullname}-db-owner) with the owner roles' URLs:
+  # MIGRATION_DATABASE_URL (owner of Portvakt's database) and ADMIN_MIGRATION_DATABASE_URL
+  # (owner of the admin portal's session database). Mounted only into the migration Jobs and the
+  # audit retention CronJob, never into the server or admin pods.
+  ownerSecret: ""
+
+server:
+  image:
+    repository: portvakt-server
+    # Defaults to the chart's appVersion.
+    tag: ""
+    # Pin the image by digest (sha256:...); takes precedence over the tag.
+    digest: ""
+    pullPolicy: IfNotPresent
+
+  replicas: 2
+
+  # Portvakt's origin (https, no path); default https://{ingress.host}. Issuers are
+  # {publicUrl}/t/{tenant}.
+  publicUrl: ""
+  # The admin portal's origin; default https://{ingress.adminHost}.
+  adminPublicUrl: ""
+  # Proxy hops in front of the pods (the ingress controller): the client IP of rate limits.
+  trustProxy: "1"
+  logLevel: info
+  # Recommended: the lowest ACR_RANKING level administrators must sign in with (loa3).
+  adminMinAcr: ""
+  databasePoolMax: 10
+
+  # Graceful shutdown (docs/operations.md): preStop sleeps first (endpoints and load balancers
+  # stop routing to the pod), then Portvakt answers readiness 503 for drainDelaySeconds and gives
+  # in-flight requests timeoutSeconds. terminationGracePeriodSeconds covers all three plus 5 s.
+  shutdown:
+    preStopSleepSeconds: 5
+    drainDelaySeconds: 5
+    timeoutSeconds: 15
+
+  # A Secret with the server's secrets as environment variables (default name:
+  # {release fullname}-server), created before installing. Keys: DATABASE_URL (the runtime
+  # role; never the owner), MASTER_KEY, COOKIE_KEYS, ADMIN_CLIENT_SECRET; optional
+  # MASTER_KEY_PREVIOUS, METRICS_TOKEN, BOOTSTRAP_IDP_CLIENT_SECRET. No MIGRATION_DATABASE_URL:
+  # that is in database.ownerSecret.
+  existingSecret: ""
+
+  # Bootstrap on an empty database (docs/operations.md, "Bootstrap"): the first platform admin.
+  bootstrap:
+    idpIssuer: ""
+    idpClientId: ""
+    idpScopes: ""
+    idpKind: ""
+    idpDisplayName: ""
+    idpAcr: ""
+    adminSubject: ""
+
+  # Further non-secret configuration as environment variables (docs/operations.md lists them),
+  # for example ACCESS_TOKEN_TTL: 5m. Secret variables are refused by values.schema.json.
+  env: {}
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+
+  probes:
+    liveness:
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readiness:
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 2
+    startup:
+      periodSeconds: 2
+      timeoutSeconds: 3
+      failureThreshold: 60
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+  topologySpread:
+    enabled: true
+    # ScheduleAnyway keeps small clusters schedulable; DoNotSchedule enforces the spread.
+    whenUnsatisfiable: ScheduleAnyway
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+
+  service:
+    type: ClusterIP
+    port: 80
+
+# Prometheus metrics of the server on a port of their own (METRICS_PORT), never through the
+# ingress. With serviceMonitor.tokenSecretKey the scrape sends the server Secret's METRICS_TOKEN.
+metrics:
+  enabled: true
+  port: 9464
+  service:
+    port: 9464
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+    # Key of server.existingSecret with the bearer token (METRICS_TOKEN), or "" for none.
+    tokenSecretKey: ""
+
+admin:
+  enabled: true
+  image:
+    repository: portvakt-admin
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+
+  replicas: 2
+  # Where the BFF reaches the admin API; default: server.publicUrl (https, through the ingress).
+  apiUrl: ""
+  trustProxy: "1"
+  logLevel: info
+
+  # A Secret (default name: {release fullname}-admin) with ADMIN_CLIENT_SECRET (the server's value),
+  # ADMIN_COOKIE_SECRET, ADMIN_SESSION_ENCRYPTION_KEY, ADMIN_DATABASE_URL (the portal's runtime
+  # role), ADMIN_METRICS_TOKEN (or set env ADMIN_METRICS_ENABLED: "false").
+  existingSecret: ""
+
+  env: {}
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 384Mi
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  topologySpread:
+    enabled: true
+    whenUnsatisfiable: ScheduleAnyway
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+
+  service:
+    type: ClusterIP
+    port: 80
+
+# Migrations as a pre-install/pre-upgrade hook (MIGRATION_DATABASE_URL, the owner role), and the
+# admin portal's session table (ADMIN_MIGRATION_DATABASE_URL), both from database.ownerSecret.
+migrations:
+  enabled: true
+  activeDeadlineSeconds: 600
+  backoffLimit: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+# Audit retention (owner role): deletes audit events older than retention, daily.
+auditPrune:
+  enabled: true
+  schedule: "17 3 * * *"
+  retention: 400d
+  activeDeadlineSeconds: 3600
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  # Host names of the server and the admin portal (the hosts of publicUrl and adminPublicUrl).
+  host: login.example.org
+  adminHost: admin.login.example.org
+  tls:
+    enabled: true
+    # Secret with the certificate for both hosts (for example from cert-manager).
+    secretName: ""
+
+networkPolicy:
+  enabled: false
+  # Where the ingress controller runs (traffic to the server and the admin portal).
+  ingressController:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: ingress-nginx
+    podSelector: {}
+  # Who may scrape metrics.
+  metricsScraper:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: monitoring
+    podSelector: {}
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+  # The database: CIDRs (managed Postgres) and/or a selector (in-cluster Postgres).
+  database:
+    cidrs: []
+    namespaceSelector: {}
+    podSelector: {}
+    port: 5432
+  # Upstream IdPs (OIDC discovery, JWKS, token endpoints, SAML metadata) and client jwks_uri.
+  upstream:
+    cidrs:
+      - 0.0.0.0/0
+    except:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 169.254.0.0/16
+      - 100.64.0.0/10
+    ports: [443]
+  # The admin BFF calls Portvakt at server.publicUrl (through the ingress or load balancer).
+  adminToPortvakt:
+    cidrs:
+      - 0.0.0.0/0
+    ports: [443]

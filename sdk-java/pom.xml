@@ -6,11 +6,11 @@
 
   <groupId>se.portvakt</groupId>
   <artifactId>portvakt-sdk-parent</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.0</version>
   <packaging>pom</packaging>
 
   <name>Portvakt Java SDK (parent)</name>
-  <description>Portvakt SDK for Java 21: core token validation and a Spring Boot 3 starter.</description>
+  <description>Portvakt SDK for Java 21: core token validation and a Spring Boot 4 starter.</description>
   <licenses>
     <license>
       <name>MIT</name>
@@ -48,7 +48,32 @@
     <maven-site-plugin.version>3.22.0</maven-site-plugin.version>
     <maven-antrun-plugin.version>3.2.0</maven-antrun-plugin.version>
     <license-maven-plugin.version>2.7.1</license-maven-plugin.version>
+    <maven-source-plugin.version>3.3.1</maven-source-plugin.version>
+    <maven-javadoc-plugin.version>3.12.0</maven-javadoc-plugin.version>
+
+    <!--
+      Where `mvn -Prelease deploy` publishes the SDK. No real repository is configured: the default
+      is a staging directory in target/. Override both on the command line, for example
+      -Dportvakt.release.repository.id=central
+      -Dportvakt.release.repository.url=https://repo.example.org/releases
+      (credentials for the id go into settings.xml, never into this file).
+    -->
+    <portvakt.release.repository.id>portvakt-staging</portvakt.release.repository.id>
+    <portvakt.release.repository.url>file://${maven.multiModuleProjectDirectory}/target/staging-repository</portvakt.release.repository.url>
+    <portvakt.snapshot.repository.id>portvakt-staging</portvakt.snapshot.repository.id>
+    <portvakt.snapshot.repository.url>file://${maven.multiModuleProjectDirectory}/target/staging-repository</portvakt.snapshot.repository.url>
   </properties>
+
+  <distributionManagement>
+    <repository>
+      <id>${portvakt.release.repository.id}</id>
+      <url>${portvakt.release.repository.url}</url>
+    </repository>
+    <snapshotRepository>
+      <id>${portvakt.snapshot.repository.id}</id>
+      <url>${portvakt.snapshot.repository.url}</url>
+    </snapshotRepository>
+  </distributionManagement>
 
   <dependencyManagement>
     <dependencies>
@@ -153,6 +178,16 @@
           <artifactId>spring-boot-maven-plugin</artifactId>
           <version>${spring-boot.version}</version>
         </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-source-plugin</artifactId>
+          <version>${maven-source-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-javadoc-plugin</artifactId>
+          <version>${maven-javadoc-plugin.version}</version>
+        </plugin>
       </plugins>
     </pluginManagement>
 
@@ -243,4 +278,46 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!--
+      Release artifacts (mvn -Prelease package / deploy): a sources jar and a javadoc jar next to
+      each SDK jar. The Java demo skips both and is never deployed.
+    -->
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals>
+                  <goal>jar-no-fork</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <configuration>
+              <doclint>all,-missing</doclint>
+              <quiet>true</quiet>
+            </configuration>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <goals>
+                  <goal>jar</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

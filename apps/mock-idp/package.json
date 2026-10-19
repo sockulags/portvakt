@@ -1,6 +1,6 @@
 {
   "name": "@portvakt/mock-idp",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Development and test upstream identity providers. Never deployed to production.",
   "license": "MIT",
@@ -25,9 +25,10 @@
     "supertest": "^7.3.1"
   },
   "scripts": {
-    "dev": "tsx watch --env-file-if-exists=../../.env src/main.ts",
-    "start": "tsx --env-file-if-exists=../../.env src/main.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "dev": "tsx watch --conditions=portvakt-source --env-file-if-exists=../../.env src/main.ts",
+    "start": "tsx --conditions=portvakt-source --env-file-if-exists=../../.env src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -b tsconfig.build.json"
   },
   "exports": {
     ".": "./src/index.ts"

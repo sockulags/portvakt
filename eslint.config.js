@@ -16,6 +16,7 @@ export default tseslint.config(
     ignores: [
       "**/node_modules/**",
       "**/dist/**",
+      "**/dist-dev/**",
       "**/coverage/**",
       "**/target/**",
       "e2e/test-results/**",

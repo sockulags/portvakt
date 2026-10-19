@@ -11,8 +11,13 @@ import { checkConfig, type ConfigReport } from "./index.js";
  * build in production), and lists the problems and warnings by variable name. Values are never
  * printed. `ok` is false when the server would refuse to start.
  */
-export function report(env: NodeJS.ProcessEnv): { readonly text: string; readonly ok: boolean } {
-  const result: ConfigReport = checkConfig(env);
+export function report(
+  env: NodeJS.ProcessEnv,
+  options: { readonly ownerJob?: boolean } = {},
+): { readonly text: string; readonly ok: boolean } {
+  // --job: the configuration of the owner-role jobs (migrate, audit:prune, rewrap-secrets),
+  // which also need MIGRATION_DATABASE_URL in production.
+  const result: ConfigReport = checkConfig(env, { requireMigrationUrl: options.ownerJob === true });
   const issues = [...result.issues];
   if (result.nodeEnv === "production") {
     const dir = env.LOGIN_UI_DIR?.trim() ? env.LOGIN_UI_DIR.trim() : DEFAULT_LOGIN_UI_DIR;
@@ -22,7 +27,9 @@ export function report(env: NodeJS.ProcessEnv): { readonly text: string; readonl
       );
     }
   }
-  const lines = [`Portvakt configuration check (NODE_ENV=${result.nodeEnv})`];
+  const lines = [
+    `Portvakt configuration check (NODE_ENV=${result.nodeEnv}${options.ownerJob === true ? ", owner-role jobs" : ""})`,
+  ];
   if (issues.length === 0)
     lines.push("No problems: the server would start with this configuration.");
   else {

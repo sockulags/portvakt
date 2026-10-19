@@ -1,0 +1,56 @@
+{{- if .Values.database.maxConnections }}
+{{- $needed := int (include "portvakt.databaseConnections" .) }}
+{{- if gt $needed (int .Values.database.maxConnections) }}
+{{- fail (printf "database.maxConnections: the release may hold %d connections (server replicas incl. surge x (DATABASE_POOL_MAX + 1) + 2 jobs + admin), more than %d; lower server.databasePoolMax or the replicas, or raise max_connections (docs/operations.md, Capacity)" $needed (int .Values.database.maxConnections)) }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "portvakt.fullname" . }}-server
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+data:
+  PORT: "3000"
+  PUBLIC_URL: {{ include "portvakt.publicUrl" . | quote }}
+  ADMIN_PUBLIC_URL: {{ include "portvakt.adminPublicUrl" . | quote }}
+  TRUST_PROXY: {{ .Values.server.trustProxy | quote }}
+  LOG_LEVEL: {{ .Values.server.logLevel | quote }}
+  DATABASE_POOL_MAX: {{ .Values.server.databasePoolMax | quote }}
+  # Migrations run in the hook Job before the pods start (templates/migration-job.yaml).
+  MIGRATE_ON_START: "false"
+  SHUTDOWN_DRAIN_DELAY: {{ printf "%ds" (int .Values.server.shutdown.drainDelaySeconds) | quote }}
+  SHUTDOWN_TIMEOUT: {{ printf "%ds" (int .Values.server.shutdown.timeoutSeconds) | quote }}
+  {{- if .Values.server.adminMinAcr }}
+  ADMIN_MIN_ACR: {{ .Values.server.adminMinAcr | quote }}
+  {{- end }}
+  {{- if .Values.metrics.enabled }}
+  METRICS_PORT: {{ .Values.metrics.port | quote }}
+  {{- else }}
+  METRICS_ENABLED: "false"
+  {{- end }}
+  {{- with .Values.server.bootstrap }}
+  {{- if .idpIssuer }}
+  BOOTSTRAP_IDP_ISSUER: {{ .idpIssuer | quote }}
+  BOOTSTRAP_IDP_CLIENT_ID: {{ .idpClientId | quote }}
+  {{- with .idpScopes }}
+  BOOTSTRAP_IDP_SCOPES: {{ . | quote }}
+  {{- end }}
+  {{- with .idpKind }}
+  BOOTSTRAP_IDP_KIND: {{ . | quote }}
+  {{- end }}
+  {{- with .idpDisplayName }}
+  BOOTSTRAP_IDP_DISPLAY_NAME: {{ . | quote }}
+  {{- end }}
+  {{- with .idpAcr }}
+  BOOTSTRAP_IDP_ACR: {{ . | quote }}
+  {{- end }}
+  {{- with .adminSubject }}
+  BOOTSTRAP_ADMIN_SUBJECT: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- range $name, $value := .Values.server.env }}
+  {{ $name }}: {{ $value | toString | quote }}
+  {{- end }}

@@ -411,6 +411,19 @@ export class ApplicationRepository {
     return rows.map(toTenantApplication);
   }
 
+  /**
+   * The tenants the application is attached to (enabled or not), in id order: a global disable
+   * ends its logins in each of them.
+   */
+  async listTenantIds(applicationId: string): Promise<string[]> {
+    requireUuids({ applicationId });
+    const rows = await this.#db.query<{ tenant_id: string }>(
+      `SELECT tenant_id FROM tenant_applications WHERE application_id = $1 ORDER BY tenant_id`,
+      [applicationId],
+    );
+    return rows.map((row) => row.tenant_id);
+  }
+
   #clientAuthColumns(
     id: string,
     auth: z.output<typeof createApplicationInputSchema>["clientAuth"],

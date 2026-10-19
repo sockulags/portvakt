@@ -1,0 +1,112 @@
+# A production-like configuration (rendered and linted in CI, docs/operations.md "Helm"):
+# three server replicas with autoscaling, pinned image digests, TLS from cert-manager, network
+# policies for a managed Postgres, metrics scraped by the Prometheus Operator with a token, and
+# the capacity check against the database's connection limit.
+imageRegistry: registry.example.org/portvakt/
+
+database:
+  # max_connections 200 minus 3 reserved slots.
+  maxConnections: 197
+  adminSharesServer: true
+  ownerSecret: portvakt-db-owner
+
+server:
+  image:
+    repository: portvakt-server
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  replicas: 3
+  publicUrl: https://login.kommun.example
+  adminPublicUrl: https://admin.login.kommun.example
+  trustProxy: "1"
+  adminMinAcr: http://id.elegnamnden.se/loa/1.0/loa3
+  databasePoolMax: 10
+  existingSecret: portvakt-server-secrets
+  bootstrap:
+    idpIssuer: https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0
+    idpClientId: 11111111-1111-1111-1111-111111111111
+    idpKind: employee
+    idpDisplayName: Kommunens Entra ID
+    adminSubject: 22222222-2222-2222-2222-222222222222
+  env:
+    ACCESS_TOKEN_TTL: 5m
+    SESSION_TTL: 8h
+    KEY_ROTATION_INTERVAL: 90d
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+  topologySpread:
+    enabled: true
+    whenUnsatisfiable: DoNotSchedule
+  priorityClassName: ""
+
+metrics:
+  enabled: true
+  port: 9464
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    labels:
+      release: kube-prometheus-stack
+    tokenSecretKey: METRICS_TOKEN
+
+admin:
+  enabled: true
+  image:
+    repository: portvakt-admin
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+  replicas: 2
+  existingSecret: portvakt-admin-secrets
+
+auditPrune:
+  enabled: true
+  schedule: "17 3 * * *"
+  retention: 400d
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/proxy-body-size: 12m
+  host: login.kommun.example
+  adminHost: admin.login.kommun.example
+  tls:
+    enabled: true
+    secretName: portvakt-tls
+
+networkPolicy:
+  enabled: true
+  ingressController:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: ingress-nginx
+  metricsScraper:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: monitoring
+  database:
+    cidrs:
+      - 10.20.30.0/24
+    port: 5432
+  upstream:
+    cidrs:
+      - 0.0.0.0/0
+    except:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 169.254.0.0/16
+      - 100.64.0.0/10
+    ports: [443]
+  adminToPortvakt:
+    cidrs:
+      - 0.0.0.0/0
+    ports: [443]

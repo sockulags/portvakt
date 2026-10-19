@@ -1,0 +1,23 @@
+Portvakt {{ .Chart.AppVersion }} ({{ include "portvakt.fullname" . }})
+
+Issuers:      {{ include "portvakt.publicUrl" . }}/t/{tenant}
+{{- if .Values.admin.enabled }}
+Admin portal: {{ include "portvakt.adminPublicUrl" . }}/t/system/
+{{- end }}
+
+Secrets read from the namespace (create them before installing; docs/operations.md):
+  {{ include "portvakt.serverSecret" . }}  DATABASE_URL (runtime role), MASTER_KEY, COOKIE_KEYS, ADMIN_CLIENT_SECRET, ...
+  {{ include "portvakt.ownerSecret" . }}  MIGRATION_DATABASE_URL{{ if .Values.admin.enabled }}, ADMIN_MIGRATION_DATABASE_URL{{ end }} (jobs only)
+{{- if .Values.admin.enabled }}
+  {{ include "portvakt.adminSecret" . }}  ADMIN_CLIENT_SECRET, ADMIN_COOKIE_SECRET, ADMIN_SESSION_ENCRYPTION_KEY, ADMIN_DATABASE_URL (runtime role), ...
+{{- end }}
+
+Database connections this release may hold at once: {{ include "portvakt.databaseConnections" . }}
+(server replicas incl. one surge pod x (DATABASE_POOL_MAX {{ .Values.server.databasePoolMax }} + 1) + 2 jobs
+{{- if and .Values.admin.enabled .Values.database.adminSharesServer }} + admin portal pools{{ end }}).
+{{- if not .Values.database.maxConnections }}
+Set database.maxConnections to have the chart check it against your database.
+{{- end }}
+
+Check the configuration of a running pod (names of problems only, never values):
+  kubectl exec deploy/{{ include "portvakt.fullname" . }}-server -- node dist/config/check-cli.js

@@ -1,6 +1,6 @@
 {
   "name": "@portvakt/login",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Login and interaction UI, served by the server.",
   "license": "MIT",

@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/tsconfig.build.tsbuildinfo"
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"],
+  "references": [
+    {
+      "path": "../../packages/http-kit/tsconfig.build.json"
+    },
+    {
+      "path": "../../packages/sdk-node/tsconfig.build.json"
+    }
+  ]
+}

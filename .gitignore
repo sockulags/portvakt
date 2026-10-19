@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-dev/
 coverage/
 *.tsbuildinfo
 .env
@@ -21,3 +22,5 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+# Compose deployment secrets (deploy/compose/production.env.example is the template)
+deploy/compose/production.env

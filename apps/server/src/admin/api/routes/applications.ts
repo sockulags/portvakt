@@ -435,6 +435,23 @@ export function applicationRoutes(deps: AdminDeps): AdminRoute[] {
           await replaceDeclarations(tx, current, body);
           const updated = await tx.repos.applications.findById(current.id);
           if (updated === null) throw notFound();
+          if (current.enabled && !updated.enabled) {
+            // A global disable is a kill switch in every tenant, like the per-tenant one: the
+            // application's grants end now, so enabling it again revives no refresh token.
+            for (const tenantId of await tx.repos.applications.listTenantIds(current.id)) {
+              await endLogins(
+                tx,
+                caller,
+                tenantId,
+                { clientId: current.clientId },
+                {
+                  reason: "application_disabled",
+                  subject: { type: "application", id: current.id },
+                  clientId: current.clientId,
+                },
+              );
+            }
+          }
           await recordApplication(
             tx,
             caller,

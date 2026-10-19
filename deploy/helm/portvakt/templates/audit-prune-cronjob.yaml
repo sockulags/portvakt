@@ -1,0 +1,40 @@
+{{- if .Values.auditPrune.enabled }}
+# Audit retention: deletes audit events older than AUDIT_RETENTION (at least 90 days) in batches,
+# as the owner role (only it may run audit_events_prune), and audits `audit.pruned`.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "portvakt.fullname" . }}-audit-prune
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: audit-prune
+spec:
+  schedule: {{ .Values.auditPrune.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: {{ .Values.auditPrune.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "portvakt.podLabels" (dict "root" . "component" "audit-prune") | nindent 12 }}
+        spec:
+          {{- include "portvakt.podSecurity" (dict "root" . "hook" false) | nindent 10 }}
+          restartPolicy: Never
+          containers:
+            - name: audit-prune
+              image: {{ include "portvakt.image" (dict "root" . "image" .Values.server.image) }}
+              imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+              command: ["node", "dist/audit/prune-cli.js"]
+              securityContext:
+                {{- toYaml .Values.containerSecurityContext | nindent 16 }}
+              env:
+                - name: AUDIT_RETENTION
+                  value: {{ .Values.auditPrune.retention | quote }}
+                {{- include "portvakt.jobDatabaseEnv" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.auditPrune.resources | nindent 16 }}
+{{- end }}

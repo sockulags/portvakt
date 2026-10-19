@@ -140,6 +140,15 @@ const envSchema = z.object({
   ),
 });
 
+/**
+ * Every environment variable the admin portal reads (docs/operations.md documents each one):
+ * the BFF's configuration, plus ADMIN_MIGRATION_DATABASE_URL of `migrate-sessions`.
+ */
+export const ADMIN_CONFIG_VARIABLES: readonly string[] = [
+  ...Object.keys(envSchema.shape),
+  "ADMIN_MIGRATION_DATABASE_URL",
+];
+
 const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /** Loopback hosts: plain http to the admin API is allowed only there, and never in production. */

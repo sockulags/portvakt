@@ -20,17 +20,21 @@ const idp = ts === undefined ? undefined : await startTestIdp();
 describe("seed:dev CLI", () => {
   it("refuses NODE_ENV=production before touching anything", () => {
     const cli = fileURLToPath(new URL("./seed-cli.ts", import.meta.url));
-    const result = spawnSync(process.execPath, ["--import", "tsx", cli], {
-      cwd: fileURLToPath(new URL("../..", import.meta.url)),
-      // A database URL that would fail loudly if the CLI got as far as connecting.
-      env: {
-        ...process.env,
-        NODE_ENV: "production",
-        DATABASE_URL: "postgres://nobody@127.0.0.1:9/x",
+    const result = spawnSync(
+      process.execPath,
+      ["--conditions=portvakt-source", "--import", "tsx", cli],
+      {
+        cwd: fileURLToPath(new URL("../..", import.meta.url)),
+        // A database URL that would fail loudly if the CLI got as far as connecting.
+        env: {
+          ...process.env,
+          NODE_ENV: "production",
+          DATABASE_URL: "postgres://nobody@127.0.0.1:9/x",
+        },
+        encoding: "utf8",
+        timeout: 60_000,
       },
-      encoding: "utf8",
-      timeout: 60_000,
-    });
+    );
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("refuses NODE_ENV=production");
   });

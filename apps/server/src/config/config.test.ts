@@ -14,6 +14,7 @@ import {
   loadAuditPruneConfig,
   loadConfig,
   loadDatabaseConfig,
+  ownerDatabase,
 } from "./index.js";
 
 const devEnv = {
@@ -28,12 +29,16 @@ const productionEnv = {
   NODE_ENV: "production",
   PUBLIC_URL: "https://login.example.org",
   DATABASE_URL: "postgres://portvakt_app:s3cure-Pa55@db.internal:5432/portvakt",
-  MIGRATION_DATABASE_URL: "postgres://portvakt_owner:an0ther-Pa55@db.internal:5432/portvakt",
   MASTER_KEY: strongKey(),
   COOKIE_KEYS: `${randomBytes(32).toString("base64url")},${randomBytes(32).toString("base64url")}`,
   METRICS_TOKEN: randomBytes(32).toString("base64url"),
   ADMIN_MIN_ACR: "http://id.elegnamnden.se/loa/1.0/loa3",
 };
+
+/** The owner role's URL: only the migration, prune and re-wrap jobs (and MIGRATE_ON_START) get it. */
+const OWNER_URL = "postgres://portvakt_owner:an0ther-Pa55@db.internal:5432/portvakt";
+/** The environment of the owner-role jobs in production. */
+const jobEnv = { ...productionEnv, MIGRATION_DATABASE_URL: OWNER_URL };
 
 function issuesOf(env: NodeJS.ProcessEnv): readonly string[] {
   try {
@@ -80,9 +85,7 @@ describe("loadConfig", () => {
     expect(() =>
       loadDatabaseConfig({ NODE_ENV: "production", DATABASE_URL: productionEnv.DATABASE_URL }),
     ).toThrow(/MIGRATION_DATABASE_URL: required in production/);
-    expect(loadDatabaseConfig(productionEnv).migrationUrl).toBe(
-      productionEnv.MIGRATION_DATABASE_URL,
-    );
+    expect(loadDatabaseConfig(jobEnv).migrationUrl).toBe(OWNER_URL);
   });
 
   it("loads a development config with defaults", () => {
@@ -220,8 +223,8 @@ describe("loadConfig", () => {
       "DATABASE_URL",
     ],
     [
-      "missing MIGRATION_DATABASE_URL",
-      { MIGRATION_DATABASE_URL: undefined },
+      "MIGRATE_ON_START without MIGRATION_DATABASE_URL",
+      { MIGRATE_ON_START: "true" },
       "MIGRATION_DATABASE_URL",
     ],
     [
@@ -250,6 +253,68 @@ describe("loadConfig", () => {
   });
 });
 
+describe("production database roles: the owner URL only where it is used", () => {
+  it("starts the server with the runtime role alone", () => {
+    const config = loadConfig(productionEnv);
+    expect(config.database).toMatchObject({
+      url: productionEnv.DATABASE_URL,
+      migrationUrl: undefined,
+      runtimeRole: "portvakt_app",
+      separateRoles: false,
+    });
+    expect(config.warnings).toEqual([]);
+    expect(() => ownerDatabase(config)).toThrow(/MIGRATION_DATABASE_URL: required/);
+  });
+
+  it("requires the owner URL with MIGRATE_ON_START and for the owner CLIs", () => {
+    const required = /MIGRATION_DATABASE_URL: required in production/;
+    expect(issuesOf({ ...productionEnv, MIGRATE_ON_START: "true" }).join(" ")).toMatch(required);
+    expect(() => loadConfig(productionEnv, { requireMigrationUrl: true })).toThrow(required);
+    expect(() => loadDatabaseConfig(productionEnv)).toThrow(required);
+    expect(() => loadAuditPruneConfig(productionEnv)).toThrow(required);
+    expect(ownerDatabase(loadConfig(jobEnv, { requireMigrationUrl: true })).migrationUrl).toBe(
+      OWNER_URL,
+    );
+    expect(loadAuditPruneConfig(jobEnv).database.migrationUrl).toBe(OWNER_URL);
+    expect(loadConfig({ ...jobEnv, MIGRATE_ON_START: "true" }).database.separateRoles).toBe(true);
+  });
+
+  it("still refuses an owner URL with the runtime role or a development password", () => {
+    expect(
+      issuesOf({
+        ...productionEnv,
+        MIGRATION_DATABASE_URL: "postgres://portvakt_app:other-Pa55@db.internal:5432/portvakt",
+      }),
+    ).toContain("MIGRATION_DATABASE_URL: must use another role than DATABASE_URL in production");
+    expect(
+      issuesOf({
+        ...productionEnv,
+        MIGRATION_DATABASE_URL: "postgres://portvakt:portvakt@db.internal:5432/portvakt",
+      }),
+    ).toContain("MIGRATION_DATABASE_URL: uses a development password");
+  });
+
+  it("warns when the server is given the owner URL it does not use", () => {
+    expect(loadConfig(jobEnv).warnings).toEqual([
+      expect.stringMatching(/^MIGRATION_DATABASE_URL: the server does not use the owner role/),
+    ]);
+    // The owner CLIs need it: no warning there, nor with MIGRATE_ON_START (warned on its own).
+    expect(loadConfig(jobEnv, { requireMigrationUrl: true }).warnings).toEqual([]);
+    expect(loadConfig({ ...jobEnv, MIGRATE_ON_START: "true" }).warnings).toEqual([
+      expect.stringMatching(/^MIGRATE_ON_START:/),
+    ]);
+  });
+
+  it("config:check reports the server and, with --job, the owner-role jobs", () => {
+    const loginUi = { LOGIN_UI_DIR: testLoginUiDir() };
+    expect(report({ ...productionEnv, ...loginUi }).ok).toBe(true);
+    const job = report({ ...productionEnv, ...loginUi }, { ownerJob: true });
+    expect(job.ok).toBe(false);
+    expect(job.text).toContain("MIGRATION_DATABASE_URL: required in production");
+    expect(report({ ...jobEnv, ...loginUi }, { ownerJob: true }).ok).toBe(true);
+  });
+});
+
 describe("loadConfig: OIDC core settings", () => {
   it("defaults token lifetimes, intervals, proxy trust and start-up migrations", () => {
     const config = loadConfig(devEnv);
@@ -272,7 +337,7 @@ describe("loadConfig: OIDC core settings", () => {
     expect(config.trustProxy).toBe(false);
     expect(config.migrateOnStart).toBe(true);
     expect(loadConfig(productionEnv).migrateOnStart).toBe(false);
-    expect(loadConfig({ ...productionEnv, MIGRATE_ON_START: "true" }).migrateOnStart).toBe(true);
+    expect(loadConfig({ ...jobEnv, MIGRATE_ON_START: "true" }).migrateOnStart).toBe(true);
     expect(loadConfig({ ...devEnv, MIGRATE_ON_START: "0" }).migrateOnStart).toBe(false);
   });
 

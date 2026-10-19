@@ -24,8 +24,10 @@ there are not reopened during delivery.
 | `sdk-java`                   | Java SDK (Maven, Java 21): `portvakt-sdk-core`, Spring Boot starter |
 | `examples/demo-service-java` | Java demo "Tjänst C" (Spring Boot + starter, Thymeleaf), :3300      |
 | `e2e`                        | Playwright suite (`scripts/e2e.js` runs it over the whole stack)    |
-| `deploy`                     | `docker-compose.dev.yml` (dev/test Postgres), later images/Helm     |
-| `docs`                       | Plan, claims contract, admin API, threat model (`threat-model.md`)  |
+| `deploy`                     | `Dockerfile` (all images), `docker-compose*.yml`, `compose/`, Helm  |
+|                              | chart `helm/portvakt`, `images.Dockerfile` (pinned base images)     |
+| `docs`                       | Plan, claims, admin API, threat model, architecture, operations,    |
+|                              | integration, login methods                                          |
 
 Shared config at the root: `tsconfig.base.json` (strict), `tsconfig.node.json` (NodeNext, Node
 packages), `tsconfig.vite.json` (Bundler resolution, Vite apps), `eslint.config.js`,
@@ -41,24 +43,29 @@ npm run typecheck      # tsc --noEmit in the root and every workspace
 npm run lint           # eslint . (type-aware typescript-eslint, react-hooks for React code)
 npm run format:check   # prettier --check . (npm run format writes)
 npm test               # vitest run over apps/*, packages/*, examples/* (6 files at a time)
-npm run build          # vite build for apps/login and apps/admin (SPA into apps/admin/dist/web)
+npm run build          # every workspace: tsc -b into dist/ (server, admin BFF, http-kit, SDK,
+                       # mock IdP, demo) and the vite SPAs (login, admin dist/web, demo dist/web)
 npm run db:up          # Postgres 16 on localhost:5433, waits until healthy; npm run db:down stops it
 npm run test:e2e       # Playwright end-to-end suite over the whole stack (below; Docker needed)
 npm run migrate -w apps/server         # migrate as MIGRATION_DATABASE_URL, grant the runtime role
-npm run rewrap-secrets -w apps/server  # after MASTER_KEY rotation: re-wrap secrets, re-index pins
+npm run rewrap-secrets -w apps/server  # after MASTER_KEY rotation: re-wrap, re-index (owner role)
 npm run audit:prune -w apps/server     # delete audit events older than AUDIT_RETENTION (owner role)
 npm run dev -w apps/server             # broker with reload (migrates on start outside production)
 npm run dev -w apps/mock-idp           # mock upstream IdPs on :4500 (/entra, /bankid, /saml/*)
 npm run dev -w apps/login              # rebuilds apps/login/dist on change; the server serves it
 npm run dev:stack                      # whole local stack (below); Ctrl+C stops it, not the DB
 npm run seed:dev -w apps/server        # demo tenant (idempotent); needs the mock IdP running
-npm run build -w examples/demo-service # demo SPA into examples/demo-service/dist/web
+npm run build:web -w examples/demo-service # demo SPA into examples/demo-service/dist/web
+npm run build:web -w apps/admin            # admin SPA into apps/admin/dist/web (build: SPA + tsc)
 npm run build -w packages/sdk-node     # SDK into packages/sdk-node/dist (JS + .d.ts)
 npm run start -w apps/admin            # admin portal on :3400 (build its SPA first)
 npm run test:java      # Java SDK and Java demo: mvn verify in Docker against a real Portvakt
 npm audit              # dependency audit (CI fails on any finding)
 npm run license:check  # licenses of the production npm dependencies (allowlist; Maven: verify)
-npm run images:check   # compose and CI name the images pinned in deploy/images.Dockerfile
+npm run images:check   # Dockerfile, compose and CI name the images pinned in deploy/images.Dockerfile
+npm run helm:check     # helm lint --strict, helm template, kubeconform (containers), 3 value sets
+npm run test:e2e:compose # the e2e suite against the production images on Docker Compose
+npm run compose:local  # the production images locally (dev mode, demo profile); :down removes it
 npm run config:check -w apps/server   # problems and warnings of the configuration in the env
 ```
 
@@ -93,6 +100,14 @@ answers `access_denied`. SAML: the mock's IdPs are `http://localhost:4500/saml/{
 (`data-testid="switch"`).
 
 `TEST_LOG_LEVEL=debug npm test` shows the server logs of integration tests (silent by default).
+
+Owner URL rules (`resolveDatabase` in `config/index.ts`): in production MIGRATION_DATABASE_URL is
+required only with MIGRATE_ON_START=true and by the owner CLIs (`loadDatabaseConfig`,
+`loadAuditPruneConfig`, `loadConfig(env, { requireMigrationUrl: true })` for rewrap-secrets, which
+connects as the owner); `ownerDatabase(config)` narrows it. Without it the server runs with
+DATABASE_URL alone and `assertRestrictedRuntimeRole` still refuses an owner or superuser as the
+runtime role; given to the server without MIGRATE_ON_START it is a production warning.
+`config:check -- --job` checks the owner jobs' view.
 
 Databases: `portvakt` (dev) and `portvakt_test` (tests), created by `deploy/postgres-init` on first
 volume init. Two roles: the app runs as the restricted `portvakt_app` (`DATABASE_URL`,
@@ -250,7 +265,8 @@ dependency would only wrap.
   (`admin/api/diff.ts`) mark redacted fields `changed`; the catalogue's `changesOf()` refuses a
   value for a redacted field.
 - Kill switches (`endLogins` in `admin/api/context.ts`, `oidcPayloads.revokeLogins`): suspending
-  a tenant, disabling or detaching an application in a tenant, disabling or deleting a login
+  a tenant, disabling or detaching an application in a tenant, disabling an application
+  globally (`PATCH /applications/{id}`: every tenant it is attached to), disabling or deleting a login
   method, unlinking an identity, deleting a person and `POST
 /tenants/{id}/persons/{personId}/end-sessions` delete the affected sessions (oidc-provider
   Session, session record) and grants (with codes and refresh tokens) in `oidc_payloads`, in the
@@ -314,7 +330,7 @@ lives in `apps/server/src/dev` (`seed.ts`, `seed-cli.ts`).
 
 ## Java SDK (`sdk-java`, `examples/demo-service-java`)
 
-Maven multi-module (Java 21, groupId `se.portvakt`, 1.0.0-SNAPSHOT). The reactor is
+Maven multi-module (Java 21, groupId `se.portvakt`, 1.0.0). The reactor is
 `sdk-java/pom.xml`; it includes `../examples/demo-service-java`. Spring Boot 4.1 (Spring
 Framework 7, Spring Security 7.1, Jackson 3 `tools.jackson`, JUnit 6 from Boot's BOM); Boot 3.5 is
 not supported. Versions are pinned in the parent POM (the Spring Boot BOM is imported for
@@ -361,13 +377,49 @@ docker run --rm -p 3300:3300 -v "<repo>:/workspace" -v portvakt-m2:/root/.m2 \
   -w /workspace/sdk-java maven:3.9-eclipse-temurin-21 sh -c "java \
   /workspace/scripts/java-test/PortForward.java host.docker.internal 3000 4500 & \
   mvn -B -ntp -C -q -DskipTests package && java -jar \
-  ../examples/demo-service-java/target/portvakt-demo-service-java-1.0.0-SNAPSHOT.jar \
+  ../examples/demo-service-java/target/portvakt-demo-service-java-1.0.0.jar \
   --spring.profiles.active=local"
 ```
 
 (on Linux add `--add-host=host.docker.internal:host-gateway`). The demo's session cookie is
 Secure and an http issuer refused unless the `local` profile is active
 (`application-local.yml`); e2e and the Java integration tests activate it.
+
+## Packaging (`deploy/`, docs/operations.md)
+
+- `deploy/Dockerfile` (context: the repo root, `.dockerignore`) builds every image from one
+  build stage (`npm ci --ignore-scripts`, `npm run build`, the server's dev build) and one
+  `npm ci --omit=dev -w <workspace>` stage per image; the runtime base is node:24-alpine with npm,
+  npx, corepack and yarn removed and squashed into `FROM scratch` (so they are really gone), UID
+  10001, NODE_ENV=production. Targets `server` and `admin` are production; `mock-idp` (mock IdPs
+  plus the dev seed at `/app/apps/server/dist-dev/dev/seed-cli.js`, NODE_ENV=development) and
+  `demo` are labelled `se.portvakt.image.production=false`. Every `FROM` names the `node` image of
+  `deploy/images.Dockerfile` (images:check). Files in the images are root-owned: nothing is
+  written at run time (`--read-only` works; `/tmp` as tmpfs/emptyDir for safety).
+- Compose: `docker-compose.yml` is production mode (secrets via `${VAR:?}`, roles from
+  `compose/postgres-init/10-portvakt-roles.sh`: `portvakt` owner, `portvakt_app` runtime,
+  `portvakt_admin_owner` owning the database `portvakt_admin`, `portvakt_admin` its runtime role
+  through default privileges). Only the one-off jobs get owner URLs; the server and admin
+  services get runtime roles only (Helm: the owner Secret `database.ownerSecret` is mounted only
+  by the migration Jobs and the prune CronJob, and the Deployments set `MIGRATION_DATABASE_URL`
+  / `ADMIN_MIGRATION_DATABASE_URL` empty). `docker-compose.local.yml` switches
+  the same images to NODE_ENV=development and puts every service into the network namespace of
+  `postgres` (`network_mode: service:postgres`, ports published there, `ports: !reset []` on
+  services that had ports; a `!reset` inside a YAML merge anchor is ignored), so browsers and
+  containers share `http://localhost:<port>` URLs (issuer pinning). `docker-compose.e2e.yml`
+  (project `portvakt-e2e`, ports of test:e2e, Postgres on :5434) adds the test-only settings.
+  `scripts/e2e.js --compose` builds the images, starts postgres first, runs the Java demo in the
+  maven container with `--network container:portvakt-e2e-postgres-1` (no PortForward), follows
+  `docker compose logs -f` per service into e2e/.artifacts/logs and runs `down -v` at the end.
+- Helm (`deploy/helm/portvakt`): hook Jobs (migrations) use the namespace's default service
+  account (the chart's does not exist yet at pre-install) and inline env (no ConfigMaps yet);
+  `values.schema.json` refuses secret variables in `server.env`/`admin.env`; templates are Go
+  templates, so prettier ignores `deploy/helm/portvakt/templates`. `scripts/helm-check.js` runs
+  helm and kubeconform from `deploy/images.Dockerfile`.
+- Releases: `.github/workflows/release.yml` on `v*` tags checks that the tag matches every
+  version (npm packages, Maven, Chart appVersion), builds the four images with SBOMs (syft via
+  anchore/sbom-action), pushes server and admin only when the PORTVAKT_REGISTRY secrets exist,
+  and keeps the SDK tarball and Java jars (sources, javadoc: `mvn -Prelease`) as artifacts.
 
 ## Conventions
 
@@ -812,9 +864,15 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
   URL that was called.
 - The SDK supports Express 4 and 5: its handlers never rely on Express 5's promise handling, and
   `bff.test.ts` runs the BFF on Express 4 through the devDependency alias `express4`.
-- The SDK's `exports` point at `src/index.ts` (workspace convention); `npm run build -w
-packages/sdk-node` emits `dist/` with declarations. Publishing (exports pointing at `dist`)
-  belongs to M9.
+- `@portvakt/sdk-node` and `@portvakt/http-kit` export `dist/` (JS and `.d.ts`) by default and
+  their TypeScript source under the custom condition `portvakt-source`, which tsc
+  (`customConditions` in tsconfig.base.json), tsx (`--conditions=portvakt-source` in every
+  script; tests spawning tsx pass it too) and Vitest (`resolve.conditions` in the
+  `vitest.config.ts` of server, admin, sdk-node and demo-service; a new project importing them
+  needs the same) use, so nothing is built before tests or typecheck. The production builds
+  (`tsconfig.build.json`, `tsc -b` with project references) resolve the libraries' dist
+  declarations instead and build them first. The server's dev build (`tsconfig.build-dev.json`,
+  `dist-dev/`, with the dev seed) exists only for the mock-idp image.
 - `PgSessionStore.withLock` holds one pool connection (transaction-scoped advisory lock) and runs
   every store operation inside the lock on that connection (AsyncLocalStorage), never a second
   one: lock holders waiting for more connections would deadlock a small pool. Writes inside the

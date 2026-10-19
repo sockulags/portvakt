@@ -1,0 +1,72 @@
+# Local evaluation on one machine, on top of deploy/docker-compose.yml: the same production
+# images, explicitly switched to NODE_ENV=development (never for a deployment: development mode
+# refuses any PUBLIC_URL that is not loopback or *.localhost), with the dev values of
+# deploy/compose/local.env and the `demo` profile (mock IdPs, dev seed, Tjänst A and B):
+#
+#   npm run compose:local      # = docker compose --env-file deploy/compose/local.env \
+#                              #   -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml \
+#                              #   --profile demo up -d --build --wait
+#
+# Then http://localhost:3100 (Tjänst A), :3200 (Tjänst B, disabled in the demo tenant),
+# :3400/t/system/ and :3400/t/demo/ (admin portal), :3000 (Portvakt), :4500 (mock IdPs); the same
+# ports as `npm run dev:stack`, so stop one before starting the other.
+#
+# Why development mode: the browser and the containers must reach every service at the same URL
+# (issuers are pinned), Portvakt in production refuses http, local hosts, private upstream
+# addresses (the mock IdP) and a short manual key publish-ahead, and the mock IdP and the seed
+# refuse production. So every service shares the network namespace of `postgres` (one
+# localhost, as on a developer machine) and the published ports live there.
+
+x-local: &local
+  network_mode: service:postgres
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3100:3100"
+      - "127.0.0.1:3200:3200"
+      - "127.0.0.1:3400:3400"
+      - "127.0.0.1:4500:4500"
+
+  migrate:
+    <<: *local
+    environment:
+      NODE_ENV: development
+
+  admin-migrate:
+    <<: *local
+
+  server:
+    <<: *local
+    ports: !reset []
+    depends_on:
+      seed: { condition: service_completed_successfully, required: false }
+    environment:
+      NODE_ENV: development
+      MIGRATE_ON_START: "false"
+      TRUST_PROXY: "false"
+      ALLOW_PRIVATE_UPSTREAM_HOSTS: localhost,127.0.0.1
+
+  admin:
+    <<: *local
+    ports: !reset []
+    environment:
+      NODE_ENV: development
+      ADMIN_TRUST_PROXY: "false"
+
+  mock-idp:
+    <<: *local
+
+  seed:
+    <<: *local
+
+  demo-a:
+    <<: *local
+    environment:
+      NODE_ENV: development
+
+  demo-b:
+    <<: *local
+    environment:
+      NODE_ENV: development

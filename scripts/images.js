@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// The container images of the development and test tooling, from deploy/images.Dockerfile (the
+// The container images Portvakt builds on and its tooling runs, from deploy/images.Dockerfile (the
 // one tracked list, pinned by digest; Dependabot updates it). `node scripts/images.js --check`
-// (npm run images:check) verifies that the files that cannot read it name the same images.
+// (npm run images:check) verifies that the files that cannot read it (deploy/Dockerfile, the
+// compose files, CI) name the same images.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,8 +42,26 @@ export function image(name) {
 
 function check() {
   const postgres = image("postgres");
+  const node = image("node");
   const problems = [];
-  for (const file of ["deploy/docker-compose.dev.yml", ".github/workflows/ci.yml"]) {
+  // Every base image of deploy/Dockerfile is the pinned node image (FROM scratch aside).
+  const dockerfile = readFileSync(join(root, "deploy", "Dockerfile"), "utf8");
+  const bases = [...dockerfile.matchAll(/^FROM\s+(\S+)/gim)]
+    .map((match) => match[1] ?? "")
+    .filter((reference) => reference.includes(":") || reference.includes("@"));
+  if (bases.length === 0) problems.push("deploy/Dockerfile: names no base image");
+  for (const reference of bases) {
+    if (reference !== node) {
+      problems.push(
+        `deploy/Dockerfile: ${reference} differs from deploy/images.Dockerfile (${node})`,
+      );
+    }
+  }
+  for (const file of [
+    "deploy/docker-compose.dev.yml",
+    "deploy/docker-compose.yml",
+    ".github/workflows/ci.yml",
+  ]) {
     const text = readFileSync(join(root, file), "utf8");
     const named = [...text.matchAll(/^\s*image:\s*(\S+)\s*$/gm)].map((match) => match[1] ?? "");
     const postgresImages = named.filter((reference) => reference.startsWith("postgres:"));

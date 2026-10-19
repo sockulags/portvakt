@@ -207,10 +207,10 @@ async function main() {
     await step("login-ui", ["run", "build", "-w", "apps/login"]);
   }
   if (forceBuild || !existsSync(join(root, "examples/demo-service/dist/web/index.html"))) {
-    await step("demo-web", ["run", "build", "-w", "examples/demo-service"]);
+    await step("demo-web", ["run", "build:web", "-w", "examples/demo-service"]);
   }
   if (forceBuild || !existsSync(join(root, "apps/admin/dist/web/index.html"))) {
-    await step("admin-web", ["run", "build", "-w", "apps/admin"]);
+    await step("admin-web", ["run", "build:web", "-w", "apps/admin"]);
   }
 
   service("mock-idp", ["run", "start", "-w", "apps/mock-idp"], {

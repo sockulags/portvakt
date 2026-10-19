@@ -1,6 +1,6 @@
 {
   "name": "@portvakt/demo-service",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Demo downstream service, run as Service A and Service B.",
   "license": "MIT",
@@ -29,9 +29,10 @@
     "vite": "^8.3.4"
   },
   "scripts": {
-    "dev": "tsx watch src/main.ts",
-    "start": "tsx src/main.ts",
-    "build": "vite build --config web/vite.config.ts",
-    "typecheck": "tsc -p tsconfig.json && tsc -p web/tsconfig.json"
+    "dev": "tsx watch --conditions=portvakt-source src/main.ts",
+    "start": "tsx --conditions=portvakt-source src/main.ts",
+    "build": "npm run build:web && tsc -b tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p web/tsconfig.json",
+    "build:web": "vite build --config web/vite.config.ts"
   }
 }

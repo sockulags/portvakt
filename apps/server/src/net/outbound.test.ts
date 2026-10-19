@@ -137,7 +137,7 @@ describe("outbound guard", () => {
     ].join("\n");
     const { stdout } = await promisify(execFile)(
       process.execPath,
-      ["--import", "tsx", "--input-type=module", "-e", script],
+      ["--conditions=portvakt-source", "--import", "tsx", "--input-type=module", "-e", script],
       { timeout: 30_000 },
     );
     expect(JSON.parse(stdout.trim())).toEqual({ ok: "ok", refused: "special_use_address" });

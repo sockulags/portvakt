@@ -1,0 +1,119 @@
+{{- $shutdown := .Values.server.shutdown }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "portvakt.fullname" . }}-server
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  {{- if not .Values.server.autoscaling.enabled }}
+  replicas: {{ .Values.server.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "portvakt.selectorLabels" (dict "root" . "component" "server") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "portvakt.podLabels" (dict "root" . "component" "server") | nindent 8 }}
+        {{- with .Values.server.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A changed configuration rolls the pods.
+        checksum/config: {{ include (print $.Template.BasePath "/server-configmap.yaml") . | sha256sum }}
+        {{- with .Values.server.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "portvakt.podSecurity" (dict "root" . "hook" false) | nindent 6 }}
+      # preStop sleep + SHUTDOWN_DRAIN_DELAY + SHUTDOWN_TIMEOUT + 5 s.
+      terminationGracePeriodSeconds: {{ add $shutdown.preStopSleepSeconds $shutdown.drainDelaySeconds $shutdown.timeoutSeconds 5 }}
+      {{- with .Values.server.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- include "portvakt.topologySpread" (dict "root" . "component" "server" "spread" .Values.server.topologySpread) | nindent 6 }}
+      containers:
+        - name: server
+          image: {{ include "portvakt.image" (dict "root" . "image" .Values.server.image) }}
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "portvakt.fullname" . }}-server
+            - secretRef:
+                name: {{ include "portvakt.serverSecret" . }}
+          env:
+            # Never the owner role in the runtime pods, even if the Secret carries it: an empty
+            # value counts as unset (the server needs it only with MIGRATE_ON_START, refused here).
+            - name: MIGRATION_DATABASE_URL
+              value: ""
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ .Values.server.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.startup.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: {{ .Values.server.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.server.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.liveness.failureThreshold }}
+          readinessProbe:
+            # The database reachable and the signing keys loaded; 503 while draining.
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: {{ .Values.server.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.readiness.failureThreshold }}
+          {{- if gt (int $shutdown.preStopSleepSeconds) 0 }}
+          lifecycle:
+            preStop:
+              exec:
+                # Endpoint removal reaches every load balancer before SIGTERM starts the drain.
+                command: ["sleep", "{{ $shutdown.preStopSleepSeconds }}"]
+          {{- end }}
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

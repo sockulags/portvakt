@@ -24,6 +24,13 @@
  * Options: `--no-build` (use the existing SPA builds), `--no-java` (skip the Java demo and its
  * scenario variants; local iteration only, the release gate runs them), `--keep` (leave the
  * stack running after the tests; Ctrl+C stops it).
+ *
+ * `--compose` (`npm run test:e2e:compose`) runs the same suite against the production images
+ * instead: it builds them (deploy/Dockerfile; `--no-build` uses the existing ones), starts
+ * deploy/docker-compose.yml with the local and e2e overrides (a fresh database volume, the
+ * migration jobs, the dev seed, Portvakt, the admin portal, the mock IdP and Tjänst A and B in
+ * containers, on the same ports), joins the Java demo to the stack's network namespace, streams
+ * every container's log to e2e/.artifacts/logs, and removes the stack (and its volume) at the end.
  */
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -46,12 +53,13 @@ const isWindows = process.platform === "win32";
 const isLinux = process.platform === "linux";
 const npmCli = process.env.npm_execpath;
 const npmDirect = npmCli !== undefined && /.c?js$/.test(npmCli) && existsSync(npmCli);
-const OWN_OPTIONS = ["--no-build", "--no-java", "--keep"];
+const OWN_OPTIONS = ["--no-build", "--no-java", "--keep", "--compose"];
 const args = process.argv.slice(2).filter((arg) => arg !== "--");
 const playwrightArgs = args.filter((arg) => !OWN_OPTIONS.includes(arg));
 const skipBuild = args.includes("--no-build");
 const withJava = !args.includes("--no-java");
 const keep = args.includes("--keep");
+const composeMode = args.includes("--compose");
 
 const PORTS = {
   portvakt: 3800,
@@ -77,6 +85,36 @@ const SECRETS = {
 const JAVA_IMAGE = image("maven");
 const JAVA_CONTAINER = "portvakt-e2e-java";
 const M2 = process.env.PORTVAKT_M2_DIR ?? "portvakt-m2";
+
+/** `--compose`: the production images on Docker Compose (deploy/docker-compose.e2e.yml). */
+const COMPOSE_PROJECT = "portvakt-e2e";
+const COMPOSE = [
+  "compose",
+  "--env-file",
+  "deploy/compose/local.env",
+  "--env-file",
+  "deploy/compose/e2e.env",
+  "-f",
+  "deploy/docker-compose.yml",
+  "-f",
+  "deploy/docker-compose.local.yml",
+  "-f",
+  "deploy/docker-compose.e2e.yml",
+  "--profile",
+  "demo",
+];
+/** The container whose network namespace every service of the compose stack shares. */
+const COMPOSE_NETWORK_CONTAINER = `${COMPOSE_PROJECT}-postgres-1`;
+/** Long-running compose services and the log file each one writes (e2e/.artifacts/logs). */
+const COMPOSE_SERVICES = {
+  server: "portvakt",
+  "mock-idp": "mock-idp",
+  "demo-a": "service-a",
+  "demo-b": "service-b",
+  admin: "admin",
+};
+/** One-off compose jobs; their output is saved once they have finished. */
+const COMPOSE_JOBS = ["migrate", "admin-migrate", "seed"];
 
 const artifacts = join(root, "e2e", ".artifacts");
 const logDir = join(artifacts, "logs");
@@ -290,7 +328,10 @@ function kill(/** @type {import("node:child_process").ChildProcess} */ child) {
 
 function writePids() {
   const pids = [...children.values()].map((child) => child.pid).filter((pid) => pid !== undefined);
-  writeFileSync(pidFile, JSON.stringify({ pids, container: javaStarted ? JAVA_CONTAINER : null }));
+  writeFileSync(
+    pidFile,
+    JSON.stringify({ pids, container: javaStarted ? JAVA_CONTAINER : null, compose: composeMode }),
+  );
 }
 
 /**
@@ -312,6 +353,13 @@ async function reapPrevious() {
       log(`stopping what a previous run left running (${previous.pids.length} processes)`);
       for (const pid of previous.pids) if (Number.isInteger(pid)) killTree(pid);
     }
+    if (previous.compose === true) {
+      log("removing the compose stack a previous run left running");
+      spawnSync("docker", [...COMPOSE, "down", "-v", "--remove-orphans"], {
+        cwd: root,
+        stdio: "ignore",
+      });
+    }
   } catch {
     // An unreadable file: nothing to reap.
   }
@@ -331,6 +379,14 @@ async function stopAll(code = 0) {
   log("stopping the stack");
   if (javaStarted) spawnSync("docker", ["rm", "-f", JAVA_CONTAINER], { stdio: "ignore" });
   const running = [...children.values()];
+  if (composeMode) {
+    for (const child of running) kill(child);
+    log("removing the compose stack and its database volume");
+    spawnSync("docker", [...COMPOSE, "down", "-v", "--remove-orphans", "--timeout", "10"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+  }
   const exited = running.map(
     (child) =>
       new Promise((resolve) =>
@@ -406,13 +462,19 @@ function writePersonas() {
  * Portvakt, then runs the jar on :3830 (published to the host). Inside the container
  * PortForward.java makes Portvakt and the mock IdP reachable at the host's URLs.
  */
-function startJava() {
+function startJava(compose = false) {
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   const gid = typeof process.getgid === "function" ? process.getgid() : 0;
-  const jar = "../examples/demo-service-java/target/portvakt-demo-service-java-1.0.0-SNAPSHOT.jar";
+  const jar = "../examples/demo-service-java/target/portvakt-demo-service-java-1.0.0.jar";
+  // In the compose stack's network namespace, localhost is the stack itself: no forwarding.
+  const forward = compose
+    ? []
+    : [
+        `java /workspace/scripts/java-test/PortForward.java host.docker.internal ${PORTS.portvakt} ${PORTS.mockIdp} > /tmp/forward.log 2>&1 &`,
+      ];
   const script = [
     "set -u",
-    `java /workspace/scripts/java-test/PortForward.java host.docker.internal ${PORTS.portvakt} ${PORTS.mockIdp} > /tmp/forward.log 2>&1 &`,
+    ...forward,
     "echo '[java] building the demo'",
     "mvn -B -ntp -C -q -DskipTests -pl :portvakt-demo-service-java -am package; status=$?",
     // Linux: the build output belongs to the user who ran the suite, not to root.
@@ -422,7 +484,11 @@ function startJava() {
         ]
       : []),
     "[ $status -eq 0 ] || exit $status",
-    "grep -q ready /tmp/forward.log || { sleep 2; grep -q ready /tmp/forward.log; } || { cat /tmp/forward.log; exit 1; }",
+    ...(compose
+      ? []
+      : [
+          "grep -q ready /tmp/forward.log || { sleep 2; grep -q ready /tmp/forward.log; } || { cat /tmp/forward.log; exit 1; }",
+        ]),
     "echo '[java] waiting for Portvakt'",
     `for i in $(seq 1 600); do curl -sf ${PORTVAKT_URL}/readyz > /dev/null && break; sleep 0.5; done`,
     `exec java -jar ${jar}`,
@@ -432,9 +498,13 @@ function startJava() {
     "--rm",
     "--name",
     JAVA_CONTAINER,
-    ...(isLinux ? ["--add-host=host.docker.internal:host-gateway"] : []),
-    "-p",
-    `${PORTS.serviceC}:${PORTS.serviceC}`,
+    ...(compose
+      ? ["--network", `container:${COMPOSE_NETWORK_CONTAINER}`]
+      : [
+          ...(isLinux ? ["--add-host=host.docker.internal:host-gateway"] : []),
+          "-p",
+          `${PORTS.serviceC}:${PORTS.serviceC}`,
+        ]),
     "-v",
     `${root.replace(/[\\/]$/, "")}:/workspace`,
     "-v",
@@ -508,8 +578,8 @@ function playwright(/** @type {string[]} */ cliArgs, /** @type {NodeJS.ProcessEn
   );
 }
 
-async function main() {
-  const started = Date.now();
+/** Fresh log directory, leftovers of a killed run stopped, the stack's ports free. */
+async function prepare() {
   mkdirSync(artifacts, { recursive: true });
   await reapPrevious();
   rmSync(logDir, { recursive: true, force: true });
@@ -526,6 +596,11 @@ async function main() {
     );
     process.exit(1);
   }
+}
+
+async function main() {
+  const started = Date.now();
+  await prepare();
 
   if (withJava) startJava();
   await step("db", ["run", "db:up"]);
@@ -535,8 +610,8 @@ async function main() {
     log("building the login UI, the demo SPA and the admin SPA");
     await Promise.all([
       step("build-login", ["run", "build", "-w", "apps/login"]),
-      step("build-demo", ["run", "build", "-w", "examples/demo-service"]),
-      step("build-admin", ["run", "build", "-w", "apps/admin"]),
+      step("build-demo", ["run", "build:web", "-w", "examples/demo-service"]),
+      step("build-admin", ["run", "build:web", "-w", "apps/admin"]),
     ]);
   } else {
     for (const built of [
@@ -597,6 +672,11 @@ async function main() {
     ...(withJava ? [waitFor("service-c", `${url(PORTS.serviceC)}/healthz`, 15 * 60_000)] : []),
   ]);
   if (stopping) return;
+  await runSuite(started, env.MIGRATION_DATABASE_URL ?? "");
+}
+
+/** Chromium, then the Playwright suite against the running stack; stops it unless --keep. */
+async function runSuite(/** @type {number} */ started, /** @type {string} */ databaseUrl) {
   log(`stack ready after ${Math.round((Date.now() - started) / 1000)} s`);
 
   const install = await playwright(["install", "chromium"], process.env);
@@ -615,7 +695,7 @@ async function main() {
     E2E_ADMIN_URL: ADMIN_URL,
     E2E_SERVICE_A_SECRET: SECRETS.a,
     E2E_SERVICE_B_SECRET: SECRETS.b,
-    E2E_DATABASE_URL: env.MIGRATION_DATABASE_URL,
+    E2E_DATABASE_URL: databaseUrl,
     E2E_LOG_DIR: logDir,
     E2E_JAVA: withJava ? "1" : "0",
   };
@@ -635,7 +715,76 @@ async function main() {
   await stopAll(code);
 }
 
-main().catch((error) => {
+/** Runs `docker compose <args>` for the e2e stack to completion; stops everything on failure. */
+async function compose(/** @type {string} */ name, /** @type {string[]} */ composeArgs) {
+  log(`${name}: docker compose ${composeArgs.join(" ")}`);
+  const child = spawnLogged(name, "docker", [...COMPOSE, ...composeArgs], {
+    env: { ...process.env, MSYS_NO_PATHCONV: "1" },
+  });
+  const code = await new Promise((resolve) => child.on("exit", resolve));
+  if (code !== 0) {
+    console.error(`[e2e] ${name} failed (exit code ${String(code)}); see ${logFile(name)}`);
+    printTail(name);
+    await stopAll(1);
+  }
+}
+
+/**
+ * `--compose`: the production images (deploy/Dockerfile) on Docker Compose with the local and
+ * e2e overrides. Services share the network namespace of the `postgres` container, which
+ * publishes the suite's ports, so browsers and containers use the same URLs.
+ */
+async function mainCompose() {
+  const started = Date.now();
+  await prepare();
+  writePids();
+  writePersonas();
+  // A run killed before its cleanup may have left the stack or its volume behind.
+  spawnSync("docker", [...COMPOSE, "down", "-v", "--remove-orphans"], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  if (!skipBuild) {
+    log("building the images (deploy/Dockerfile: server, admin, mock-idp, demo)");
+    await compose("images", ["build"]);
+  }
+  await compose("postgres", ["up", "-d", "--wait", "postgres"]);
+  if (withJava) startJava(true);
+  await compose("stack", ["up", "-d", "--wait", "--wait-timeout", "300"]);
+  if (stopping) return;
+  for (const job of COMPOSE_JOBS) {
+    writeFileSync(
+      logFile(job),
+      spawnSync("docker", [...COMPOSE, "logs", "--no-color", "--no-log-prefix", job], {
+        cwd: root,
+        encoding: "utf8",
+      }).stdout,
+    );
+  }
+  // One follower per service: its output is the service's log, and its end (the container
+  // stopped) ends the run, as a process of the local stack would.
+  for (const [serviceName, logName] of Object.entries(COMPOSE_SERVICES)) {
+    service(
+      logName,
+      spawnLogged(
+        logName,
+        "docker",
+        [...COMPOSE, "logs", "-f", "--no-color", "--no-log-prefix", serviceName],
+        { env: { ...process.env, MSYS_NO_PATHCONV: "1" } },
+      ),
+    );
+  }
+  await Promise.all([
+    waitFor("portvakt", `${PORTVAKT_URL}/readyz`),
+    waitFor("admin", `${ADMIN_URL}/healthz`),
+    ...(withJava ? [waitFor("service-c", `${url(PORTS.serviceC)}/healthz`, 15 * 60_000)] : []),
+  ]);
+  if (stopping) return;
+  // The compose database: the owner role of deploy/compose/local.env, published on :5434.
+  await runSuite(started, "postgres://portvakt:portvakt@localhost:5434/portvakt");
+}
+
+(composeMode ? mainCompose() : main()).catch((error) => {
   console.error("[e2e] failed:", error instanceof Error ? error.message : error);
   void stopAll(1);
 });

@@ -253,11 +253,19 @@ export interface Config {
 export interface DatabaseConfig {
   /** Runtime connection (restricted role: DML only, audit_events SELECT/INSERT). */
   readonly url: string;
-  /** Owner connection for migrations. Falls back to `url` outside production only. */
-  readonly migrationUrl: string;
+  /**
+   * Owner connection for migrations, audit retention and the re-wrap. Falls back to `url`
+   * outside production only. In production the server itself needs it only with
+   * MIGRATE_ON_START; the CLIs that use it load it with {@link loadDatabaseConfig},
+   * {@link loadAuditPruneConfig} or `loadConfig(env, { requireMigrationUrl: true })`.
+   */
+  readonly migrationUrl: string | undefined;
   /** Role name of `url`, which the migration runner grants runtime privileges to. */
   readonly runtimeRole: string;
-  /** False when both URLs use the same role (development fallback): no grants are applied. */
+  /**
+   * False when both URLs use the same role (development fallback: no grants are applied) or
+   * there is no owner URL.
+   */
   readonly separateRoles: boolean;
   readonly poolMax: number;
   /** `statement_timeout` of runtime connections (DATABASE_STATEMENT_TIMEOUT). */
@@ -492,6 +500,9 @@ const envSchema = z.object({
 
 type Env = z.infer<typeof envSchema>;
 
+/** Every environment variable the server reads (docs/operations.md documents each one). */
+export const CONFIG_VARIABLES: readonly string[] = Object.keys(envSchema.shape);
+
 const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
 
 function isLocalHostname(hostname: string): boolean {
@@ -688,7 +699,7 @@ function reusedSecretIssues(env: Env): string[] {
  * Settings that are allowed in production but deserve an operator's attention (printed by
  * `npm run config:check` and logged at start).
  */
-function productionWarnings(env: Env): string[] {
+function productionWarnings(env: Env, options: { readonly ownerCli: boolean }): string[] {
   const warnings: string[] = [];
   if (env.TRUST_PROXY === true) {
     warnings.push(
@@ -716,6 +727,10 @@ function productionWarnings(env: Env): string[] {
   if (env.MIGRATE_ON_START === true) {
     warnings.push(
       "MIGRATE_ON_START: the runtime replicas need the owner role; prefer a separate migration job",
+    );
+  } else if (env.MIGRATION_DATABASE_URL !== undefined && !options.ownerCli) {
+    warnings.push(
+      "MIGRATION_DATABASE_URL: the server does not use the owner role without MIGRATE_ON_START; give it only to the migration, audit:prune and rewrap-secrets jobs",
     );
   }
   return warnings;
@@ -870,19 +885,34 @@ function formatZodIssues(error: z.ZodError): string[] {
  * Loads and validates configuration from the environment. Throws {@link ConfigError} listing
  * every problem (variable names only, never values).
  */
-export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
+export interface LoadConfigOptions {
+  /**
+   * Require MIGRATION_DATABASE_URL in production even without MIGRATE_ON_START (CLIs that
+   * connect as the owner, such as `rewrap-secrets`).
+   */
+  readonly requireMigrationUrl?: boolean;
+}
+
+export function loadConfig(
+  source: NodeJS.ProcessEnv = process.env,
+  options: LoadConfigOptions = {},
+): Config {
   const parsed = envSchema.safeParse(source);
   if (!parsed.success) throw new ConfigError(formatZodIssues(parsed.error));
   const env = parsed.data;
   const issues: string[] = [];
   const isProduction = env.NODE_ENV === "production";
+  const warningOptions = { ownerCli: options.requireMigrationUrl === true };
 
   const publicUrlValue =
     env.PUBLIC_URL ?? (isProduction ? undefined : `http://localhost:${env.PORT}`);
   const publicUrl =
     publicUrlValue === undefined ? undefined : parseHttpUrl(publicUrlValue, "PUBLIC_URL", issues);
 
-  const database = resolveDatabase(env, issues);
+  // The runtime replicas need only the runtime role; the owner URL only where it is used.
+  const database = resolveDatabase(env, issues, {
+    requireMigrationUrl: options.requireMigrationUrl === true || env.MIGRATE_ON_START === true,
+  });
 
   if (env.KEY_PUBLISH_AHEAD >= env.KEY_ROTATION_INTERVAL) {
     issues.push("KEY_PUBLISH_AHEAD: must be shorter than KEY_ROTATION_INTERVAL");
@@ -939,7 +969,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
   const admin = adminConfig(env, isProduction, issues);
   if (isProduction) issues.push(...productionIssues(env, publicUrl));
   if (issues.length > 0 || publicUrl === undefined || database === undefined) {
-    throw new ConfigError(issues, isProduction ? productionWarnings(env) : []);
+    throw new ConfigError(issues, isProduction ? productionWarnings(env, warningOptions) : []);
   }
 
   return {
@@ -1009,7 +1039,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     },
     loginUiDir: env.LOGIN_UI_DIR,
     audit: { retentionSeconds: env.AUDIT_RETENTION },
-    warnings: isProduction ? productionWarnings(env) : [],
+    warnings: isProduction ? productionWarnings(env, warningOptions) : [],
   };
 }
 
@@ -1039,23 +1069,39 @@ type DatabaseEnv = Pick<
 >;
 
 /**
- * Two roles: the app connects with DATABASE_URL (restricted runtime role), migrations with
- * MIGRATION_DATABASE_URL (owner). Outside production MIGRATION_DATABASE_URL defaults to
- * DATABASE_URL. In production it is required, must use another role, and neither may use a
- * development password.
+ * Two roles: the app connects with DATABASE_URL (restricted runtime role); migrations, audit
+ * retention and the re-wrap with MIGRATION_DATABASE_URL (owner). Outside production
+ * MIGRATION_DATABASE_URL defaults to DATABASE_URL. In production it is required only where it is
+ * used (`requireMigrationUrl`: MIGRATE_ON_START or an owner CLI); when given it must use another
+ * role, and neither may use a development password. Without it the server's start-up check
+ * (`assertRestrictedRuntimeRole`) still refuses a DATABASE_URL role that owns or may rewrite the
+ * audit trail.
  */
-function resolveDatabase(env: DatabaseEnv, issues: string[]): DatabaseConfig | undefined {
+function resolveDatabase(
+  env: DatabaseEnv,
+  issues: string[],
+  options: { readonly requireMigrationUrl: boolean },
+): DatabaseConfig | undefined {
   const isProduction = env.NODE_ENV === "production";
   const runtime = parseDatabaseUrl("DATABASE_URL", env.DATABASE_URL, issues);
-  if (isProduction && env.MIGRATION_DATABASE_URL === undefined) {
-    issues.push("MIGRATION_DATABASE_URL: required in production (the owner role for migrations)");
+  if (isProduction && options.requireMigrationUrl && env.MIGRATION_DATABASE_URL === undefined) {
+    issues.push(
+      "MIGRATION_DATABASE_URL: required in production for migrations, audit:prune, rewrap-secrets and MIGRATE_ON_START (the owner role)",
+    );
   }
-  const migrationValue = env.MIGRATION_DATABASE_URL ?? env.DATABASE_URL;
-  const migration = parseDatabaseUrl("MIGRATION_DATABASE_URL", migrationValue, issues);
-  if (runtime === undefined || migration === undefined) return undefined;
+  const migrationValue =
+    env.MIGRATION_DATABASE_URL ?? (isProduction ? undefined : env.DATABASE_URL);
+  const migration =
+    migrationValue === undefined
+      ? undefined
+      : parseDatabaseUrl("MIGRATION_DATABASE_URL", migrationValue, issues);
+  if (runtime === undefined || (migrationValue !== undefined && migration === undefined)) {
+    return undefined;
+  }
 
   const runtimeRole = decodeURIComponent(runtime.username);
-  const migrationRole = decodeURIComponent(migration.username);
+  const migrationRole =
+    migration === undefined ? undefined : decodeURIComponent(migration.username);
   if (isProduction) {
     if (runtimeRole === "") issues.push("DATABASE_URL: must name the runtime role");
     if (runtimeRole !== "" && runtimeRole === migrationRole) {
@@ -1065,7 +1111,7 @@ function resolveDatabase(env: DatabaseEnv, issues: string[]): DatabaseConfig | u
       ["DATABASE_URL", runtime],
       ["MIGRATION_DATABASE_URL", migration],
     ] as const) {
-      if (DEV_DATABASE_PASSWORDS.includes(decodeURIComponent(url.password))) {
+      if (url !== undefined && DEV_DATABASE_PASSWORDS.includes(decodeURIComponent(url.password))) {
         issues.push(`${name}: uses a development password`);
       }
     }
@@ -1074,7 +1120,8 @@ function resolveDatabase(env: DatabaseEnv, issues: string[]): DatabaseConfig | u
     url: env.DATABASE_URL,
     migrationUrl: migrationValue,
     runtimeRole,
-    separateRoles: runtimeRole !== "" && runtimeRole !== migrationRole,
+    separateRoles:
+      migrationRole !== undefined && runtimeRole !== "" && runtimeRole !== migrationRole,
     poolMax: env.DATABASE_POOL_MAX,
     statementTimeoutSeconds: env.DATABASE_STATEMENT_TIMEOUT,
     idleInTransactionTimeoutSeconds: env.DATABASE_IDLE_IN_TRANSACTION_TIMEOUT,
@@ -1082,11 +1129,23 @@ function resolveDatabase(env: DatabaseEnv, issues: string[]): DatabaseConfig | u
   };
 }
 
+/** The owner URL of a configuration that required it (narrows the type). */
+function withOwner(database: DatabaseConfig): OwnerDatabaseConfig {
+  const { migrationUrl } = database;
+  if (migrationUrl === undefined) throw new ConfigError(["MIGRATION_DATABASE_URL: required"]);
+  return { ...database, migrationUrl };
+}
+
+/** The owner database configuration of a loaded server configuration (MIGRATE_ON_START, CLIs). */
+export function ownerDatabase(config: Config): OwnerDatabaseConfig {
+  return withOwner(config.database);
+}
+
 /**
  * Narrow loader for tools that only need the database (the migration CLI), so a migration job
  * does not need MASTER_KEY or cookie keys.
  */
-export function loadDatabaseConfig(source: NodeJS.ProcessEnv = process.env): DatabaseConfig {
+export function loadDatabaseConfig(source: NodeJS.ProcessEnv = process.env): OwnerDatabaseConfig {
   const schema = envSchema.pick({
     NODE_ENV: true,
     DATABASE_URL: true,
@@ -1099,9 +1158,9 @@ export function loadDatabaseConfig(source: NodeJS.ProcessEnv = process.env): Dat
   const parsed = schema.safeParse(source);
   if (!parsed.success) throw new ConfigError(formatZodIssues(parsed.error));
   const issues: string[] = [];
-  const database = resolveDatabase(parsed.data, issues);
+  const database = resolveDatabase(parsed.data, issues, { requireMigrationUrl: true });
   if (issues.length > 0 || database === undefined) throw new ConfigError(issues);
-  return database;
+  return withOwner(database);
 }
 
 /**
@@ -1109,7 +1168,7 @@ export function loadDatabaseConfig(source: NodeJS.ProcessEnv = process.env): Dat
  * with MIGRATION_DATABASE_URL, the owner) and AUDIT_RETENTION.
  */
 export function loadAuditPruneConfig(source: NodeJS.ProcessEnv = process.env): {
-  readonly database: DatabaseConfig;
+  readonly database: OwnerDatabaseConfig;
   readonly retentionSeconds: number;
 } {
   const schema = envSchema.pick({
@@ -1125,12 +1184,12 @@ export function loadAuditPruneConfig(source: NodeJS.ProcessEnv = process.env): {
   const parsed = schema.safeParse(source);
   if (!parsed.success) throw new ConfigError(formatZodIssues(parsed.error));
   const issues: string[] = [];
-  const database = resolveDatabase(parsed.data, issues);
+  const database = resolveDatabase(parsed.data, issues, { requireMigrationUrl: true });
   if (parsed.data.AUDIT_RETENTION < MIN_AUDIT_RETENTION_SECONDS) {
     issues.push("AUDIT_RETENTION: must be at least 90 days");
   }
   if (issues.length > 0 || database === undefined) throw new ConfigError(issues);
-  return { database, retentionSeconds: parsed.data.AUDIT_RETENTION };
+  return { database: withOwner(database), retentionSeconds: parsed.data.AUDIT_RETENTION };
 }
 
 /** What `npm run config:check` reports: every problem and warning, by variable name only. */
@@ -1141,12 +1200,18 @@ export interface ConfigReport {
   readonly warnings: readonly string[];
 }
 
+/** A database configuration whose owner URL is known (the migration, prune and re-wrap CLIs). */
+export type OwnerDatabaseConfig = DatabaseConfig & { readonly migrationUrl: string };
+
 /** Validates `source` like the server does at start, without throwing. */
-export function checkConfig(source: NodeJS.ProcessEnv = process.env): ConfigReport {
+export function checkConfig(
+  source: NodeJS.ProcessEnv = process.env,
+  options: LoadConfigOptions = {},
+): ConfigReport {
   const nodeEnv =
     source.NODE_ENV === undefined || source.NODE_ENV === "" ? "development" : source.NODE_ENV;
   try {
-    const config = loadConfig(source);
+    const config = loadConfig(source, options);
     return { ok: true, nodeEnv, issues: [], warnings: config.warnings };
   } catch (error) {
     if (!(error instanceof ConfigError)) throw error;

@@ -1,0 +1,238 @@
+# Portvakt's full stack on Docker Compose, production-like: the production images (built from
+# deploy/Dockerfile), Postgres with separate owner, runtime and admin-session roles, one-off
+# migration jobs, then the broker and the admin portal, all with a read-only root filesystem, no
+# capabilities and no privilege escalation.
+#
+# This file runs in production mode (NODE_ENV=production, the images' default): every secret
+# comes from the environment (`${NAME:?}` fails when it is missing), PUBLIC_URL and
+# ADMIN_PUBLIC_URL must be https origins on real host names, and a TLS-terminating proxy in front
+# forwards to the published ports (127.0.0.1 only). See docs/operations.md, "Docker Compose".
+#
+#   cp deploy/compose/production.env.example deploy/compose/production.env   # fill it in
+#   docker compose --env-file deploy/compose/production.env -f deploy/docker-compose.yml up -d --build
+#
+# The `demo` profile adds the mock IdPs, the dev seed and the demo service (Tjänst A and B). They
+# need Portvakt in its explicitly non-production local mode, which deploy/docker-compose.local.yml
+# switches on (`npm run compose:local`); deploy/docker-compose.e2e.yml runs the end-to-end suite
+# on top of it (`npm run test:e2e:compose`).
+
+name: portvakt
+
+x-hardened: &hardened
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp:size=16m,mode=1777"]
+
+x-build: &build
+  context: ..
+  dockerfile: deploy/Dockerfile
+  args:
+    VERSION: ${PORTVAKT_TAG:-1.0.0}
+    REVISION: ${PORTVAKT_REVISION:-unknown}
+    SOURCE: ${PORTVAKT_SOURCE:-unknown}
+
+services:
+  postgres:
+    # postgres:16-alpine, pinned by digest as in deploy/images.Dockerfile (npm run images:check).
+    image: postgres:16-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (the superuser)}
+      POSTGRES_DB: postgres
+      # Read by compose/postgres-init/10-portvakt-roles.sh on the first start of the volume.
+      PORTVAKT_OWNER_DB_PASSWORD: ${PORTVAKT_OWNER_DB_PASSWORD:?set PORTVAKT_OWNER_DB_PASSWORD}
+      PORTVAKT_APP_DB_PASSWORD: ${PORTVAKT_APP_DB_PASSWORD:?set PORTVAKT_APP_DB_PASSWORD}
+      PORTVAKT_ADMIN_OWNER_DB_PASSWORD: ${PORTVAKT_ADMIN_OWNER_DB_PASSWORD:?set PORTVAKT_ADMIN_OWNER_DB_PASSWORD}
+      PORTVAKT_ADMIN_DB_PASSWORD: ${PORTVAKT_ADMIN_DB_PASSWORD:?set PORTVAKT_ADMIN_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./compose/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Over TCP: the init scripts run on a socket-only server first, which must not count.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d portvakt"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+
+  # Migrations as the owner role; grants the runtime role (the DATABASE_URL user) afterwards.
+  # Only the one-off jobs get owner credentials; the server and the portal get runtime roles.
+  migrate:
+    image: ${PORTVAKT_REGISTRY:-}portvakt-server:${PORTVAKT_TAG:-1.0.0}
+    <<: *hardened
+    command: ["node", "dist/db/migrate-cli.js"]
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://portvakt_app:${PORTVAKT_APP_DB_PASSWORD}@${PORTVAKT_DB_HOST:-postgres}:5432/portvakt
+      MIGRATION_DATABASE_URL: postgres://portvakt:${PORTVAKT_OWNER_DB_PASSWORD}@${PORTVAKT_DB_HOST:-postgres}:5432/portvakt
+
+  # The admin portal's session table, in its own database, as that database's owner.
+  admin-migrate:
+    image: ${PORTVAKT_REGISTRY:-}portvakt-admin:${PORTVAKT_TAG:-1.0.0}
+    <<: *hardened
+    command: ["node", "dist/migrate-sessions.js"]
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      ADMIN_MIGRATION_DATABASE_URL: postgres://portvakt_admin_owner:${PORTVAKT_ADMIN_OWNER_DB_PASSWORD}@${PORTVAKT_DB_HOST:-postgres}:5432/portvakt_admin
+
+  server:
+    image: ${PORTVAKT_REGISTRY:-}portvakt-server:${PORTVAKT_TAG:-1.0.0}
+    build:
+      <<: *build
+      target: server
+    <<: *hardened
+    restart: unless-stopped
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    ports:
+      - "127.0.0.1:${PORTVAKT_HTTP_PORT:-3000}:3000"
+    # SHUTDOWN_DRAIN_DELAY + SHUTDOWN_TIMEOUT, plus a margin.
+    stop_grace_period: 25s
+    environment:
+      PORT: "3000"
+      PUBLIC_URL: ${PORTVAKT_PUBLIC_URL:?set PORTVAKT_PUBLIC_URL (https origin of Portvakt)}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # The runtime role only: the server needs the owner role only with MIGRATE_ON_START.
+      DATABASE_URL: postgres://portvakt_app:${PORTVAKT_APP_DB_PASSWORD}@${PORTVAKT_DB_HOST:-postgres}:5432/portvakt
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY (openssl rand -base64 32)}
+      MASTER_KEY_PREVIOUS: ${MASTER_KEY_PREVIOUS:-}
+      COOKIE_KEYS: ${COOKIE_KEYS:?set COOKIE_KEYS (openssl rand -hex 32)}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      ADMIN_PUBLIC_URL: ${ADMIN_PUBLIC_URL:?set ADMIN_PUBLIC_URL (https origin of the admin portal)}
+      ADMIN_CLIENT_SECRET: ${ADMIN_CLIENT_SECRET:?set ADMIN_CLIENT_SECRET (openssl rand -hex 32)}
+      ADMIN_MIN_ACR: ${ADMIN_MIN_ACR:-}
+      BOOTSTRAP_IDP_ISSUER: ${BOOTSTRAP_IDP_ISSUER:-}
+      BOOTSTRAP_IDP_CLIENT_ID: ${BOOTSTRAP_IDP_CLIENT_ID:-}
+      BOOTSTRAP_IDP_CLIENT_SECRET: ${BOOTSTRAP_IDP_CLIENT_SECRET:-}
+      BOOTSTRAP_IDP_SCOPES: ${BOOTSTRAP_IDP_SCOPES:-}
+      BOOTSTRAP_IDP_KIND: ${BOOTSTRAP_IDP_KIND:-}
+      BOOTSTRAP_IDP_DISPLAY_NAME: ${BOOTSTRAP_IDP_DISPLAY_NAME:-}
+      BOOTSTRAP_IDP_ACR: ${BOOTSTRAP_IDP_ACR:-}
+      BOOTSTRAP_IDP_SUBJECT_CLAIM: ${BOOTSTRAP_IDP_SUBJECT_CLAIM:-}
+      BOOTSTRAP_IDP_NAME_CLAIM: ${BOOTSTRAP_IDP_NAME_CLAIM:-}
+      BOOTSTRAP_IDP_EMAIL_CLAIM: ${BOOTSTRAP_IDP_EMAIL_CLAIM:-}
+      BOOTSTRAP_IDP_PIN_CLAIM: ${BOOTSTRAP_IDP_PIN_CLAIM:-}
+      BOOTSTRAP_IDP_ACR_CLAIM: ${BOOTSTRAP_IDP_ACR_CLAIM:-}
+      BOOTSTRAP_IDP_TRUST_EMAIL: ${BOOTSTRAP_IDP_TRUST_EMAIL:-}
+      BOOTSTRAP_ADMIN_SUBJECT: ${BOOTSTRAP_ADMIN_SUBJECT:-}
+      BOOTSTRAP_ADMIN_PIN: ${BOOTSTRAP_ADMIN_PIN:-}
+
+  admin:
+    image: ${PORTVAKT_REGISTRY:-}portvakt-admin:${PORTVAKT_TAG:-1.0.0}
+    build:
+      <<: *build
+      target: admin
+    <<: *hardened
+    restart: unless-stopped
+    depends_on:
+      admin-migrate: { condition: service_completed_successfully }
+      server: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:${ADMIN_HTTP_PORT:-3400}:3400"
+    environment:
+      ADMIN_PORT: "3400"
+      ADMIN_PUBLIC_URL: ${ADMIN_PUBLIC_URL}
+      PORTVAKT_PUBLIC_URL: ${PORTVAKT_PUBLIC_URL}
+      ADMIN_API_URL: ${ADMIN_API_URL:-}
+      ADMIN_CLIENT_SECRET: ${ADMIN_CLIENT_SECRET}
+      ADMIN_COOKIE_SECRET: ${ADMIN_COOKIE_SECRET:?set ADMIN_COOKIE_SECRET (openssl rand -hex 32)}
+      ADMIN_SESSION_ENCRYPTION_KEY: ${ADMIN_SESSION_ENCRYPTION_KEY:?set ADMIN_SESSION_ENCRYPTION_KEY (openssl rand -base64 32)}
+      ADMIN_DATABASE_URL: postgres://portvakt_admin:${PORTVAKT_ADMIN_DB_PASSWORD}@${PORTVAKT_DB_HOST:-postgres}:5432/portvakt_admin
+      ADMIN_METRICS_TOKEN: ${ADMIN_METRICS_TOKEN:-}
+      ADMIN_TRUST_PROXY: ${ADMIN_TRUST_PROXY:-1}
+      ADMIN_LOG_LEVEL: ${LOG_LEVEL:-info}
+
+  # --- Profile `demo`: development and test only (with deploy/docker-compose.local.yml). -------
+
+  mock-idp:
+    profiles: [demo]
+    image: ${PORTVAKT_REGISTRY:-}portvakt-mock-idp:${PORTVAKT_TAG:-1.0.0}
+    build:
+      <<: *build
+      target: mock-idp
+    <<: *hardened
+    restart: unless-stopped
+    environment:
+      MOCK_IDP_PORT: ${MOCK_IDP_PORT:-4500}
+      MOCK_IDP_PUBLIC_URL: ${MOCK_IDP_PUBLIC_URL:-http://localhost:4500}
+
+  # The demo tenant (apps/server/src/dev/seed.ts): refuses NODE_ENV=production.
+  seed:
+    profiles: [demo]
+    image: ${PORTVAKT_REGISTRY:-}portvakt-mock-idp:${PORTVAKT_TAG:-1.0.0}
+    <<: *hardened
+    command: ["node", "/app/apps/server/dist-dev/dev/seed-cli.js"]
+    restart: "no"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      mock-idp: { condition: service_healthy }
+    environment:
+      NODE_ENV: development
+      PUBLIC_URL: ${PORTVAKT_PUBLIC_URL}
+      DATABASE_URL: postgres://portvakt_app:${PORTVAKT_APP_DB_PASSWORD}@${PORTVAKT_DB_HOST:-postgres}:5432/portvakt
+      MASTER_KEY: ${MASTER_KEY}
+      COOKIE_KEYS: ${COOKIE_KEYS}
+      ADMIN_PUBLIC_URL: ${ADMIN_PUBLIC_URL}
+      ADMIN_CLIENT_SECRET: ${ADMIN_CLIENT_SECRET}
+      ALLOW_PRIVATE_UPSTREAM_HOSTS: ${ALLOW_PRIVATE_UPSTREAM_HOSTS:-}
+      MOCK_IDP_PUBLIC_URL: ${MOCK_IDP_PUBLIC_URL:-http://localhost:4500}
+      MOCK_IDP_ENTRA_CLIENT_SECRET: ${MOCK_IDP_ENTRA_CLIENT_SECRET:-}
+      MOCK_IDP_BANKID_CLIENT_SECRET: ${MOCK_IDP_BANKID_CLIENT_SECRET:-}
+      DEMO_SERVICE_A_URL: ${DEMO_SERVICE_A_URL:-http://localhost:3100}
+      DEMO_SERVICE_B_URL: ${DEMO_SERVICE_B_URL:-http://localhost:3200}
+      DEMO_SERVICE_C_URL: ${DEMO_SERVICE_C_URL:-http://localhost:3300}
+      DEMO_SERVICE_A_CLIENT_SECRET: ${DEMO_SERVICE_A_CLIENT_SECRET:-}
+      DEMO_SERVICE_B_CLIENT_SECRET: ${DEMO_SERVICE_B_CLIENT_SECRET:-}
+      DEMO_SERVICE_C_CLIENT_SECRET: ${DEMO_SERVICE_C_CLIENT_SECRET:-}
+
+  demo-a:
+    profiles: [demo]
+    image: ${PORTVAKT_REGISTRY:-}portvakt-demo:${PORTVAKT_TAG:-1.0.0}
+    build:
+      <<: *build
+      target: demo
+    <<: *hardened
+    restart: unless-stopped
+    depends_on:
+      server: { condition: service_healthy }
+    environment:
+      APP_NAME: Tjänst A
+      PORT: ${DEMO_SERVICE_A_PORT:-3100}
+      PUBLIC_URL: ${DEMO_SERVICE_A_URL:-http://localhost:3100}
+      ISSUER: ${PORTVAKT_PUBLIC_URL}/t/demo
+      CLIENT_ID: service-a
+      CLIENT_SECRET: ${DEMO_SERVICE_A_CLIENT_SECRET:-}
+      COOKIE_NAME: ${DEMO_SERVICE_A_COOKIE_NAME:-demo_a_session}
+      COOKIE_SECRET: ${DEMO_COOKIE_SECRET:-}
+      SESSION_ENCRYPTION_KEY: ${DEMO_SESSION_ENCRYPTION_KEY:-}
+      SCOPES: openid profile email hsa
+
+  demo-b:
+    profiles: [demo]
+    image: ${PORTVAKT_REGISTRY:-}portvakt-demo:${PORTVAKT_TAG:-1.0.0}
+    <<: *hardened
+    restart: unless-stopped
+    depends_on:
+      server: { condition: service_healthy }
+    environment:
+      APP_NAME: Tjänst B
+      PORT: ${DEMO_SERVICE_B_PORT:-3200}
+      PUBLIC_URL: ${DEMO_SERVICE_B_URL:-http://localhost:3200}
+      ISSUER: ${PORTVAKT_PUBLIC_URL}/t/demo
+      CLIENT_ID: service-b
+      CLIENT_SECRET: ${DEMO_SERVICE_B_CLIENT_SECRET:-}
+      COOKIE_NAME: ${DEMO_SERVICE_B_COOKIE_NAME:-demo_b_session}
+      COOKIE_SECRET: ${DEMO_COOKIE_SECRET:-}
+      SESSION_ENCRYPTION_KEY: ${DEMO_SESSION_ENCRYPTION_KEY:-}
+
+volumes:
+  pgdata:

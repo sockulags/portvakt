@@ -1,4 +1,4 @@
-import { type Config, ConfigError, loadConfig } from "./config/index.js";
+import { type Config, ConfigError, loadConfig, ownerDatabase } from "./config/index.js";
 import { createDb, createPool } from "./db/database.js";
 import { migrate } from "./db/migrate.js";
 import { assertRestrictedRuntimeRole } from "./db/runtime-role.js";
@@ -20,7 +20,8 @@ function loadConfigOrExit(): Config {
 /** Applies migrations as the owner role, then grants the runtime role (MIGRATE_ON_START). */
 async function migrateOnStart(config: Config, logger: Logger): Promise<void> {
   const owner = createPool({
-    url: config.database.migrationUrl,
+    // MIGRATE_ON_START requires MIGRATION_DATABASE_URL in production (config/index.ts).
+    url: ownerDatabase(config).migrationUrl,
     poolMax: 1,
     applicationName: "portvakt-migrate",
   });

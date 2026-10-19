@@ -1,0 +1,682 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Portvakt chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(sha256:[0-9a-f]{64})?$"
+        },
+        "pullPolicy": {
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "origin": {
+      "description": "An https origin without a path, or empty for the default from the ingress host.",
+      "type": "string",
+      "pattern": "^(https://[A-Za-z0-9.-]+(:[0-9]{1,5})?)?$"
+    },
+    "hostname": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
+    },
+    "envName": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]*$"
+    },
+    "envMap": {
+      "description": "Non-secret environment variables. Secrets belong in the existing Secret.",
+      "type": "object",
+      "propertyNames": {
+        "allOf": [
+          {
+            "$ref": "#/definitions/envName"
+          },
+          {
+            "not": {
+              "enum": [
+                "DATABASE_URL",
+                "MIGRATION_DATABASE_URL",
+                "MASTER_KEY",
+                "MASTER_KEY_PREVIOUS",
+                "COOKIE_KEYS",
+                "METRICS_TOKEN",
+                "ADMIN_CLIENT_SECRET",
+                "BOOTSTRAP_IDP_CLIENT_SECRET",
+                "ADMIN_COOKIE_SECRET",
+                "ADMIN_SESSION_ENCRYPTION_KEY",
+                "ADMIN_DATABASE_URL",
+                "ADMIN_MIGRATION_DATABASE_URL",
+                "ADMIN_METRICS_TOKEN",
+                "ALLOW_PRIVATE_UPSTREAM_HOSTS",
+                "NODE_ENV",
+                "MIGRATE_ON_START"
+              ]
+            }
+          }
+        ]
+      },
+      "additionalProperties": {
+        "type": ["string", "number", "boolean"]
+      }
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "object"
+        },
+        "limits": {
+          "type": "object"
+        }
+      }
+    },
+    "pdb": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "minAvailable": {
+          "type": ["integer", "string"]
+        }
+      }
+    },
+    "spread": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "whenUnsatisfiable": {
+          "enum": ["ScheduleAnyway", "DoNotSchedule"]
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": ["ClusterIP", "NodePort", "LoadBalancer"]
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "selector": {
+      "description": "A Kubernetes label selector.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "matchLabels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "matchExpressions": {
+          "type": "array"
+        }
+      }
+    },
+    "cidrs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-fA-F.:]+/[0-9]{1,3}$"
+      }
+    },
+    "ports": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "initialDelaySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "periodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "properties": {
+    "imageRegistry": {
+      "type": "string",
+      "pattern": "^([A-Za-z0-9.:/_-]+/)?$"
+    },
+    "imagePullSecrets": {
+      "type": "array"
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "automountServiceAccountToken": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "required": ["runAsNonRoot"],
+      "properties": {
+        "runAsNonRoot": {
+          "const": true
+        }
+      }
+    },
+    "containerSecurityContext": {
+      "type": "object",
+      "required": ["allowPrivilegeEscalation", "readOnlyRootFilesystem"],
+      "properties": {
+        "allowPrivilegeEscalation": {
+          "const": false
+        },
+        "readOnlyRootFilesystem": {
+          "const": true
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxConnections": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "adminSharesServer": {
+          "type": "boolean"
+        },
+        "ownerSecret": {
+          "type": "string"
+        }
+      }
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "publicUrl": {
+          "$ref": "#/definitions/origin"
+        },
+        "adminPublicUrl": {
+          "$ref": "#/definitions/origin"
+        },
+        "trustProxy": {
+          "type": "string",
+          "pattern": "^(false|true|[0-9]{1,2})$"
+        },
+        "logLevel": {
+          "enum": ["fatal", "error", "warn", "info", "debug", "trace", "silent"]
+        },
+        "adminMinAcr": {
+          "type": "string"
+        },
+        "databasePoolMax": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 200
+        },
+        "shutdown": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "preStopSleepSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 120
+            },
+            "drainDelaySeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 120
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 600
+            }
+          }
+        },
+        "existingSecret": {
+          "type": "string"
+        },
+        "bootstrap": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idpIssuer": {
+              "type": "string",
+              "pattern": "^(https://.+)?$"
+            },
+            "idpClientId": {
+              "type": "string"
+            },
+            "idpScopes": {
+              "type": "string"
+            },
+            "idpKind": {
+              "enum": ["", "employee", "citizen"]
+            },
+            "idpDisplayName": {
+              "type": "string"
+            },
+            "idpAcr": {
+              "type": "string"
+            },
+            "adminSubject": {
+              "type": "string",
+              "maxLength": 255
+            }
+          }
+        },
+        "env": {
+          "$ref": "#/definitions/envMap"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "probes": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "liveness": {
+              "$ref": "#/definitions/probe"
+            },
+            "readiness": {
+              "$ref": "#/definitions/probe"
+            },
+            "startup": {
+              "$ref": "#/definitions/probe"
+            }
+          }
+        },
+        "podDisruptionBudget": {
+          "$ref": "#/definitions/pdb"
+        },
+        "autoscaling": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "minReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "targetCPUUtilizationPercentage": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        },
+        "topologySpread": {
+          "$ref": "#/definitions/spread"
+        },
+        "podAnnotations": {
+          "type": "object"
+        },
+        "podLabels": {
+          "type": "object"
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array"
+        },
+        "affinity": {
+          "type": "object"
+        },
+        "priorityClassName": {
+          "type": "string"
+        },
+        "service": {
+          "$ref": "#/definitions/service"
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535,
+          "not": {
+            "const": 3000
+          }
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "interval": {
+              "type": "string"
+            },
+            "labels": {
+              "type": "object"
+            },
+            "tokenSecretKey": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "admin": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "apiUrl": {
+          "$ref": "#/definitions/origin"
+        },
+        "trustProxy": {
+          "type": "string",
+          "pattern": "^(false|true|[0-9]{1,2})$"
+        },
+        "logLevel": {
+          "enum": ["fatal", "error", "warn", "info", "debug", "trace", "silent"]
+        },
+        "existingSecret": {
+          "type": "string"
+        },
+        "env": {
+          "$ref": "#/definitions/envMap"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "podDisruptionBudget": {
+          "$ref": "#/definitions/pdb"
+        },
+        "topologySpread": {
+          "$ref": "#/definitions/spread"
+        },
+        "podAnnotations": {
+          "type": "object"
+        },
+        "podLabels": {
+          "type": "object"
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array"
+        },
+        "affinity": {
+          "type": "object"
+        },
+        "priorityClassName": {
+          "type": "string"
+        },
+        "service": {
+          "$ref": "#/definitions/service"
+        }
+      }
+    },
+    "migrations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 30
+        },
+        "backoffLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
+      }
+    },
+    "auditPrune": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "schedule": {
+          "type": "string",
+          "minLength": 9
+        },
+        "retention": {
+          "type": "string",
+          "pattern": "^([0-9]+[smhdw])+$"
+        },
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 60
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "className": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object"
+        },
+        "host": {
+          "$ref": "#/definitions/hostname"
+        },
+        "adminHost": {
+          "$ref": "#/definitions/hostname"
+        },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretName": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ingressController": {
+          "type": "object",
+          "properties": {
+            "namespaceSelector": {
+              "$ref": "#/definitions/selector"
+            },
+            "podSelector": {
+              "$ref": "#/definitions/selector"
+            }
+          }
+        },
+        "metricsScraper": {
+          "type": "object",
+          "properties": {
+            "namespaceSelector": {
+              "$ref": "#/definitions/selector"
+            },
+            "podSelector": {
+              "$ref": "#/definitions/selector"
+            }
+          }
+        },
+        "dns": {
+          "type": "object",
+          "properties": {
+            "namespaceSelector": {
+              "$ref": "#/definitions/selector"
+            },
+            "podSelector": {
+              "$ref": "#/definitions/selector"
+            }
+          }
+        },
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cidrs": {
+              "$ref": "#/definitions/cidrs"
+            },
+            "namespaceSelector": {
+              "$ref": "#/definitions/selector"
+            },
+            "podSelector": {
+              "$ref": "#/definitions/selector"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
+        "upstream": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cidrs": {
+              "$ref": "#/definitions/cidrs"
+            },
+            "except": {
+              "$ref": "#/definitions/cidrs"
+            },
+            "ports": {
+              "$ref": "#/definitions/ports"
+            }
+          }
+        },
+        "adminToPortvakt": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cidrs": {
+              "$ref": "#/definitions/cidrs"
+            },
+            "ports": {
+              "$ref": "#/definitions/ports"
+            }
+          }
+        }
+      }
+    }
+  }
+}

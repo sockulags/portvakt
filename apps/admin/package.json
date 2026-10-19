@@ -1,6 +1,6 @@
 {
   "name": "@portvakt/admin",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Admin portal: Express BFF (Portvakt SDK) and React SPA, a separate deployable.",
   "license": "MIT",
@@ -9,12 +9,13 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "tsx watch --env-file-if-exists=../../.env src/main.ts",
-    "start": "tsx --env-file-if-exists=../../.env src/main.ts",
-    "build": "vite build --config web/vite.config.ts",
+    "dev": "tsx watch --conditions=portvakt-source --env-file-if-exists=../../.env src/main.ts",
+    "start": "tsx --conditions=portvakt-source --env-file-if-exists=../../.env src/main.ts",
+    "build": "npm run build:web && tsc -b tsconfig.build.json",
     "watch": "vite build --config web/vite.config.ts --watch",
-    "migrate-sessions": "tsx --env-file-if-exists=../../.env src/migrate-sessions.ts",
-    "typecheck": "tsc -p tsconfig.json && tsc -p web/tsconfig.json"
+    "migrate-sessions": "tsx --conditions=portvakt-source --env-file-if-exists=../../.env src/migrate-sessions.ts",
+    "typecheck": "tsc -p tsconfig.json && tsc -p web/tsconfig.json",
+    "build:web": "vite build --config web/vite.config.ts"
   },
   "dependencies": {
     "@portvakt/http-kit": "*",

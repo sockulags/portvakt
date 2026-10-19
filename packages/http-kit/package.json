@@ -1,6 +1,6 @@
 {
   "name": "@portvakt/http-kit",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Shared HTTP hardening and observability for Portvakt's deployables: metrics registry (Prometheus text), request context (W3C traceparent), token-bucket rate limiter, security headers.",
   "license": "MIT",
@@ -9,9 +9,14 @@
     "node": ">=24"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "portvakt-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -b tsconfig.build.json"
   }
 }

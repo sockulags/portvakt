@@ -1,0 +1,18 @@
+apiVersion: v2
+name: portvakt
+description: >-
+  Portvakt, a multi-tenant identity broker: the broker (OIDC provider per tenant, upstream OIDC
+  and SAML federation, admin API, login UI), the admin portal, the migration job and the audit
+  retention job.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - oidc
+  - saml
+  - identity
+  - broker
+  - bankid
+annotations:
+  licenses: MIT

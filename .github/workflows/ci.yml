@@ -133,3 +133,56 @@ jobs:
           name: e2e-artifacts
           path: e2e/.artifacts
           retention-days: 14
+
+  helm:
+    # The Helm chart (deploy/helm/portvakt): helm lint --strict, helm template and kubeconform
+    # for the default, the production-like and an everything-on values set, in the helm and
+    # kubeconform containers pinned in deploy/images.Dockerfile (scripts/helm-check.js).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: npm run helm:check
+
+  e2e-compose:
+    # The M9 acceptance gate: the whole Playwright suite against the production images on Docker
+    # Compose (scripts/e2e.js --compose: deploy/docker-compose.yml with the local and e2e
+    # overrides), the Java demo joined to the stack's network namespace.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      CI: "true"
+      PORTVAKT_M2_DIR: ${{ github.workspace }}/.m2-cache
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Cache Maven dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .m2-cache
+          key: maven-${{ hashFiles('sdk-java/**/pom.xml', 'examples/demo-service-java/pom.xml') }}
+          restore-keys: maven-
+      - run: npm ci --ignore-scripts
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+        working-directory: e2e
+      - name: End-to-end suite against the production images
+        run: npm run test:e2e:compose
+      - name: Image sizes
+        if: always()
+        run: docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep '^portvakt-' || true
+      - name: Upload the stack logs and the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: e2e-compose-artifacts
+          path: e2e/.artifacts
+          retention-days: 14

@@ -1,7 +1,6 @@
 {
   "name": "@portvakt/sdk-node",
-  "version": "0.1.0",
-  "private": true,
+  "version": "1.0.0",
   "description": "Portvakt SDK for Node and Express: backend-for-frontend login, access token validation and service-to-service tokens.",
   "license": "MIT",
   "type": "module",
@@ -9,15 +8,26 @@
     "node": ">=20"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "portvakt-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
+  "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "README.md"
+    "!dist/tsconfig.build.tsbuildinfo",
+    "src",
+    "!src/**/*.test.ts",
+    "!src/testing",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json"
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "jose": "^6.2.12",
@@ -41,5 +51,17 @@
     "express": "^5.3.0",
     "express4": "npm:express@^4.21.2",
     "pg": "^8.23.1"
+  },
+  "keywords": [
+    "oidc",
+    "bff",
+    "express",
+    "jwt",
+    "portvakt"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "provenance": true
   }
 }

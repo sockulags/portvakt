@@ -1,6 +1,6 @@
 {
   "name": "@portvakt/fonts",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Self-hosted web fonts of the design system (Outfit, Instrument Sans), latin subsets.",
   "license": "MIT",

@@ -1,0 +1,80 @@
+{{- if .Values.migrations.enabled }}
+# Runs before the release's pods on install and upgrade (hook): migrations as the owner role
+# (MIGRATION_DATABASE_URL), then the runtime role's grants (the DATABASE_URL user). A failure
+# stops the upgrade before any pod changes. Hooks run before the chart's ConfigMaps exist, so the
+# environment is set here.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "portvakt.fullname" . }}-migrate
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "portvakt.podLabels" (dict "root" . "component" "migrate") | nindent 8 }}
+    spec:
+      {{- include "portvakt.podSecurity" (dict "root" . "hook" true) | nindent 6 }}
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: {{ include "portvakt.image" (dict "root" . "image" .Values.server.image) }}
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          command: ["node", "dist/db/migrate-cli.js"]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- include "portvakt.jobDatabaseEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+{{- if .Values.admin.enabled }}
+---
+# The admin portal's session table (portvakt_admin_sessions), before the admin pods start.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "portvakt.fullname" . }}-admin-migrate
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-4"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "portvakt.podLabels" (dict "root" . "component" "migrate") | nindent 8 }}
+    spec:
+      {{- include "portvakt.podSecurity" (dict "root" . "hook" true) | nindent 6 }}
+      restartPolicy: Never
+      containers:
+        - name: admin-migrate
+          image: {{ include "portvakt.image" (dict "root" . "image" .Values.admin.image) }}
+          imagePullPolicy: {{ .Values.admin.image.pullPolicy }}
+          command: ["node", "dist/migrate-sessions.js"]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            # The owner of the session database creates the table; the portal's runtime role
+            # (ADMIN_DATABASE_URL) gets DML on it through default privileges (docs/operations.md).
+            - name: ADMIN_MIGRATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "portvakt.ownerSecret" . }}
+                  key: ADMIN_MIGRATION_DATABASE_URL
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+{{- end }}
+{{- end }}

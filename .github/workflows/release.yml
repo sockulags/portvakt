@@ -1,0 +1,136 @@
+name: Release
+
+# On a version tag (v1.0.0): the four images with OCI labels and an SPDX SBOM each, the npm
+# tarball of @portvakt/sdk-node and the Java SDK's jars (with sources and javadoc), all kept as
+# workflow artifacts. Nothing is published: the production images are pushed only when the
+# repository defines the PORTVAKT_REGISTRY secrets, and the SDKs are never published from here.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag names the version of every package
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          node -e '
+            const { readFileSync } = require("node:fs");
+            const expected = process.argv[1];
+            const files = ["package.json", "apps/server/package.json", "apps/admin/package.json",
+              "packages/sdk-node/package.json", "packages/http-kit/package.json"];
+            const wrong = files.filter((file) => JSON.parse(readFileSync(file, "utf8")).version !== expected);
+            const pom = readFileSync("sdk-java/pom.xml", "utf8");
+            if (!pom.includes(`<version>${expected}</version>`)) wrong.push("sdk-java/pom.xml");
+            const chart = readFileSync("deploy/helm/portvakt/Chart.yaml", "utf8");
+            if (!chart.includes(`appVersion: "${expected}"`)) wrong.push("deploy/helm/portvakt/Chart.yaml");
+            if (wrong.length > 0) { console.error(`version ${expected} expected in: ${wrong.join(", ")}`); process.exit(1); }
+          ' "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  images:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # Only used when PORTVAKT_REGISTRY points at this repository's GitHub Packages.
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [server, admin, mock-idp, demo]
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # A registry prefix such as ghcr.io/example/ (with the slash); empty: nothing is pushed.
+      REGISTRY: ${{ secrets.PORTVAKT_REGISTRY }}
+      REGISTRY_USERNAME: ${{ secrets.PORTVAKT_REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.PORTVAKT_REGISTRY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build time
+        id: created
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Build portvakt-${{ matrix.target }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: ${{ matrix.target }}
+          load: true
+          push: false
+          tags: portvakt-${{ matrix.target }}:${{ env.VERSION }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            REVISION=${{ github.sha }}
+            SOURCE=${{ github.server_url }}/${{ github.repository }}
+            CREATED=${{ steps.created.outputs.created }}
+      - name: Smoke test (read-only root filesystem, non-root user)
+        run: |
+          image="portvakt-${{ matrix.target }}:${VERSION}"
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            "$image" node -e 'if (process.getuid() === 0) process.exit(1)'
+          if [ "${{ matrix.target }}" = server ]; then
+            # Without configuration the check lists the missing variables and exits with 1.
+            out="$(docker run --rm --read-only "$image" node dist/config/check-cli.js || true)"
+            echo "$out"
+            echo "$out" | grep -q "MASTER_KEY: required"
+          fi
+          docker image inspect "$image" --format '{{ json .Config.Labels }}'
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: portvakt-${{ matrix.target }}:${{ env.VERSION }}
+          format: spdx-json
+          output-file: portvakt-${{ matrix.target }}-${{ env.VERSION }}.spdx.json
+          artifact-name: portvakt-${{ matrix.target }}-${{ env.VERSION }}.spdx.json
+          upload-release-assets: false
+      - name: Log in to the registry
+        if: env.REGISTRY != '' && (matrix.target == 'server' || matrix.target == 'admin')
+        run: echo "$REGISTRY_PASSWORD" | docker login "${REGISTRY%%/*}" -u "$REGISTRY_USERNAME" --password-stdin
+      - name: Push the production image
+        # The mock IdP and the demo are never pushed: they are not for production.
+        if: env.REGISTRY != '' && (matrix.target == 'server' || matrix.target == 'admin')
+        run: |
+          docker tag "portvakt-${{ matrix.target }}:${VERSION}" "${REGISTRY}portvakt-${{ matrix.target }}:${VERSION}"
+          docker push "${REGISTRY}portvakt-${{ matrix.target }}:${VERSION}"
+
+  sdks:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PORTVAKT_M2_DIR: ${{ github.workspace }}/.m2-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: The TypeScript SDK as an npm tarball (not published)
+        run: |
+          npm run build -w packages/sdk-node
+          mkdir -p release
+          npm pack -w packages/sdk-node --pack-destination release
+      - name: The Java SDK with sources and javadoc jars (not deployed)
+        run: |
+          image="$(node scripts/images.js | sed -n 's/^maven: //p')"
+          docker run --rm -v "$PWD:/workspace" -v "$PORTVAKT_M2_DIR:/root/.m2" -w /workspace/sdk-java \
+            "$image" mvn -B -ntp -C -Prelease -DskipTests -pl portvakt-sdk-core,portvakt-spring-boot-starter package
+          cp sdk-java/portvakt-sdk-core/target/*.jar sdk-java/portvakt-spring-boot-starter/target/*.jar release/
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: sdks-${{ needs.version.outputs.version }}
+          path: release
+          retention-days: 90

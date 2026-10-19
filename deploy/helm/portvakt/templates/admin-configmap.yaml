@@ -1,0 +1,21 @@
+{{- if .Values.admin.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "portvakt.fullname" . }}-admin
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admin
+data:
+  ADMIN_PORT: "3400"
+  ADMIN_PUBLIC_URL: {{ include "portvakt.adminPublicUrl" . | quote }}
+  PORTVAKT_PUBLIC_URL: {{ include "portvakt.publicUrl" . | quote }}
+  {{- with .Values.admin.apiUrl }}
+  ADMIN_API_URL: {{ . | quote }}
+  {{- end }}
+  ADMIN_TRUST_PROXY: {{ .Values.admin.trustProxy | quote }}
+  ADMIN_LOG_LEVEL: {{ .Values.admin.logLevel | quote }}
+  {{- range $name, $value := .Values.admin.env }}
+  {{ $name }}: {{ $value | toString | quote }}
+  {{- end }}
+{{- end }}

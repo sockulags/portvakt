@@ -1,6 +1,6 @@
 {
   "name": "portvakt",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Multi-tenant identity broker: federates upstream identity providers and issues OIDC tokens per tenant.",
   "license": "MIT",
@@ -22,13 +22,17 @@
     "test": "vitest run --maxWorkers=6",
     "test:watch": "vitest",
     "test:e2e": "node scripts/e2e.js",
+    "test:e2e:compose": "node scripts/e2e.js --compose",
     "test:java": "node scripts/test-java.js",
     "build": "npm run build --workspaces --if-present",
     "db:up": "docker compose -f deploy/docker-compose.dev.yml up -d --wait",
     "db:down": "docker compose -f deploy/docker-compose.dev.yml down",
     "dev:stack": "node scripts/dev-stack.js",
+    "compose:local": "docker compose --env-file deploy/compose/local.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml --profile demo up -d --build --wait",
+    "compose:local:down": "docker compose --env-file deploy/compose/local.env -f deploy/docker-compose.yml -f deploy/docker-compose.local.yml --profile demo down -v",
     "license:check": "node scripts/license-check.js",
-    "images:check": "node scripts/images.js --check"
+    "images:check": "node scripts/images.js --check",
+    "helm:check": "node scripts/helm-check.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

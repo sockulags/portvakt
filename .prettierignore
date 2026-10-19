@@ -1,5 +1,6 @@
 node_modules
 dist
+dist-dev
 # Maven build output (sdk-java, examples/demo-service-java)
 target
 .m2-cache
@@ -13,3 +14,5 @@ packages/design-system/src
 packages/design-system/README.md
 # Owner-authored plan: not reformatted.
 docs/plan.md
+# Helm templates are Go templates, not YAML.
+deploy/helm/portvakt/templates

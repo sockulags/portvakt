@@ -41,9 +41,10 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: docker
-    # Dockerfiles (M9) and deploy/images.Dockerfile, the pinned images of the tooling (maven for
-    # the Java builds, postgres). Copy a new postgres reference into docker-compose.dev.yml and
-    # ci.yml as well: npm run images:check fails until they match.
+    # deploy/Dockerfile (the node base of every image) and deploy/images.Dockerfile, the pinned
+    # list (node, maven, postgres, helm, kubeconform). Copy a new node reference into every FROM
+    # of deploy/Dockerfile, and a new postgres reference into the compose files and ci.yml:
+    # npm run images:check fails until they match.
     directory: /deploy
     schedule:
       interval: weekly
