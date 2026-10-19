@@ -6,7 +6,7 @@ import tseslint from "typescript-eslint";
 
 const reactWorkspaces = [
   "apps/login/**",
-  "apps/admin/**",
+  "apps/admin/web/**",
   "packages/design-system/**",
   "examples/demo-service/web/**",
 ];

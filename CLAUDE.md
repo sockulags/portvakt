@@ -13,7 +13,7 @@ there are not reopened during delivery.
 | ---------------------------- | ------------------------------------------------------------------- |
 | `apps/server`                | Broker (Express 5); `createApp()` in `src/app.ts`                   |
 | `apps/login`                 | Login/interaction SPA (Vite + React 19), served by the server       |
-| `apps/admin`                 | Admin portal SPA (Vite + React 19)                                  |
+| `apps/admin`                 | Admin portal: Express BFF (`src/`, SDK) and SPA (`web/`), :3400     |
 | `apps/mock-idp`              | Dev/test upstream IdPs: OIDC `/entra`, `/bankid`; SAML `/saml/*`    |
 | `packages/sdk-node`          | `@portvakt/sdk-node`: BFF, access token validation, s2s tokens      |
 | `packages/design-system`     | Delivered design system; source in `src/` kept as delivered         |
@@ -23,7 +23,7 @@ there are not reopened during delivery.
 | `examples/demo-service-java` | Java demo "Tjänst C" (Spring Boot + starter, Thymeleaf), :3300      |
 | `e2e`                        | Playwright suite                                                    |
 | `deploy`                     | `docker-compose.dev.yml` (dev/test Postgres), later images/Helm     |
-| `docs`                       | Plan, claims contract (`claims.md`); architecture later             |
+| `docs`                       | Plan, claims contract, admin API (`admin-api.md`)                   |
 
 Shared config at the root: `tsconfig.base.json` (strict), `tsconfig.node.json` (NodeNext, Node
 packages), `tsconfig.vite.json` (Bundler resolution, Vite apps), `eslint.config.js`,
@@ -39,7 +39,7 @@ npm run typecheck      # tsc --noEmit in the root and every workspace
 npm run lint           # eslint . (type-aware typescript-eslint, react-hooks for React code)
 npm run format:check   # prettier --check . (npm run format writes)
 npm test               # vitest run over apps/*, packages/*, examples/* (6 files at a time)
-npm run build          # vite build for apps/login and apps/admin
+npm run build          # vite build for apps/login and apps/admin (SPA into apps/admin/dist/web)
 npm run db:up          # Postgres 16 on localhost:5433, waits until healthy; npm run db:down stops it
 npm run test:e2e       # Playwright (browsers: npm run install-browsers --workspace e2e)
 npm run migrate -w apps/server         # migrate as MIGRATION_DATABASE_URL, grant the runtime role
@@ -52,13 +52,17 @@ npm run dev:stack                      # whole local stack (below); Ctrl+C stops
 npm run seed:dev -w apps/server        # demo tenant (idempotent); needs the mock IdP running
 npm run build -w examples/demo-service # demo SPA into examples/demo-service/dist/web
 npm run build -w packages/sdk-node     # SDK into packages/sdk-node/dist (JS + .d.ts)
+npm run start -w apps/admin            # admin portal on :3400 (build its SPA first)
 npm run test:java      # Java SDK and Java demo: mvn verify in Docker against a real Portvakt
 ```
 
 Local stack (`npm run dev:stack`, `scripts/dev-stack.js`, plain Node, works on Windows): db:up,
 migrate, the login UI and demo SPA builds when missing (`npm run dev:stack -- --build` forces
-them), the mock IdP (:4500), `seed:dev`, Portvakt (:3000), the demo as Tjänst A (:3100,
-`service-a`, enabled) and Tjänst B (:3200, `service-b`, attached but disabled). The seed also
+them, and the admin SPA), the mock IdP (:4500), `seed:dev`, Portvakt (:3000), the demo as Tjänst A
+(:3100, `service-a`, enabled), Tjänst B (:3200, `service-b`, attached but disabled) and the admin
+portal (:3400: `/t/system/` signs in `erik-admin` (Mock Entra) as platform admin, `/t/demo/`
+signs in `anna-handlaggare` as tenant admin of `demo`; the seed makes both pending assignments
+by upstream subject). The seed also
 registers `service-c` (Tjänst C, the Java demo on :3300, enabled), which dev:stack does not
 start (see "Java SDK" below). Without a root
 `.env` it uses the values of `.env.example`. The demo tenant's issuer is
@@ -77,7 +81,7 @@ id>` (or an employee's email) signs one in without the persona page, and `login_
 answers `access_denied`. SAML: the mock's IdPs are `http://localhost:4500/saml/{bankid,freja,siths}`
 (metadata at `.../metadata`, signed with a key whose certificate is
 `idp.saml(flavour).metadataSigningCertificate`); create the login method with
-`portvakt.samlAdmin.create` (the admin API is M6). The mock fetches the SP metadata from
+`portvakt.samlAdmin.create` or the admin API. The mock fetches the SP metadata from
 `{SP entityID}/metadata` on the first request; its persona page has a test switch select
 (`data-testid="switch"`).
 
@@ -113,11 +117,13 @@ volume init. Two roles: the app runs as the restricted `portvakt_app` (`DATABASE
 | `jobs/`           | Advisory-locked `runExclusive` and the `PeriodicTask` scheduler             |
 | `net/`            | `OutboundGuard`: every request to a configured URL (SSRF, redirects, size)  |
 | `logging/`        | pino JSON logger with redaction, request logging                            |
+| `admin/`          | Bootstrap (`bootstrap.ts`), admin API v1 (`api/`: auth, registry with the   |
+|                   | OpenAPI generator, problems, etags, diffs, `routes/` per resource)          |
 | `server.ts`       | `createPortvakt()`: composition root, start-up, jobs, graceful shutdown     |
 | `main.ts`         | Process entry: config, migrations, role check, signals                      |
 | `testing/`        | Test database, fixtures, test server, cookie-jar browser, RP helpers        |
 
-OIDC request path: `app.ts` (health probes) -> `/ui/login/*` (login UI assets) ->
+OIDC request path: `app.ts` (health probes) -> `/admin/api/v1/*` (admin API) -> `/ui/login/*` (login UI assets) ->
 `oidc/routes.ts` (`/t/:slug`, 404 for unknown or suspended tenants) -> `login/routes.ts` (login
 flow) -> `ProviderRegistry` (one cached oidc-provider per tenant, built lazily) -> the provider.
 
@@ -139,10 +145,8 @@ chooser): `GET .../interaction/{uid}` (bootstrap view `representation`) -> `GET
 (`{ self: true }` or `{ partyId }`, re-checked against the sources) -> resume -> the consent
 check stores the choice in the grant login.
 
-Entry points for later milestones: `rotation.rotateNow({actor, reason, emergency})` (M6 admin
-API), `portvakt.samlAdmin` (create and update SAML login methods, SP key rotation, SP
-certificate expiry), `repos.grants` (`create`, `revoke`, `setApplications`) and
-`repos.parties.setProtectedIdentity` (M6 admin API), `portvakt.representation` (add
+Entry points for later milestones: the admin API (`admin/api`, docs/admin-api.md) wraps
+`rotation.rotateNow`, `samlAdmin`, grants and parties; `portvakt.representation` (add
 Bolagsverket or Mina ombud as further `RepresentationSource`s in `server.ts` and enable them per
 tenant), and `createPortvakt({ auditSink })` (forwarding audit events to the starter kit's log
 service).
@@ -150,6 +154,60 @@ service).
 Migrations are plain SQL in `apps/server/migrations/NNNN_name.sql`, applied by our own runner
 (`src/db/migrate.ts`): it is ~150 lines, takes an advisory lock and keeps checksums, which a
 dependency would only wrap.
+
+## Admin (bootstrap, admin API, portal)
+
+- Bootstrap (`admin/bootstrap.ts`, run by `start()`): only on a database without tenants, under the
+  `bootstrap` advisory lock and in one transaction: tenant `system`, application `portvakt-admin`
+  (roles `platform-admin`, `tenant-admin`; redirect URI `{ADMIN_PUBLIC_URL}/t/{tenant}/auth/callback`;
+  secret ADMIN_CLIENT_SECRET, generated and printed once only in development), enabled in
+  `system`, the BOOTSTRAP_IDP_* OIDC login method (issuer checked by the outbound guard; an
+  unreachable discovery only warns) and a pending `platform-admin` assignment for
+  BOOTSTRAP_ADMIN_SUBJECT (or BOOTSTRAP_ADMIN_PIN, which needs BOOTSTRAP_IDP_PIN_CLAIM,
+  BOOTSTRAP_IDP_ACR_CLAIM and a BOOTSTRAP_IDP_ACR ranked at least loa3; the method is then trusted
+  for personal identity numbers), audited as `admin.bootstrap`. Concurrent instances bootstrap
+  once (the lock holder re-checks for tenants). Production
+  refuses BOOTSTRAP_IDP_* without ADMIN_CLIENT_SECRET and ADMIN_PUBLIC_URL. Without tenants and
+  without BOOTSTRAP_IDP_* it only logs a warning. In development the dev seed creates the system
+  tenant instead (`seedAdmin` in `dev/seed.ts`).
+- Admin API v1 (`/admin/api/v1`, docs/admin-api.md): every operation is declared once with
+  `route()` (`admin/api/registry.ts`): zod schemas for params, query, body and response, the
+  Express handler and the OpenAPI operation come from the same declaration;
+  `/admin/api/v1/openapi.json` serves the generated document. Authentication
+  (`admin/api/auth.ts`) verifies the token against the key cache and intersects its roles with
+  `repos.access.currentRoles` (live: assignments plus rules against the stored groups of the
+  token's `idp`). Scope: `targetTenant()`; any route with `{tenantId}` answers tenant admins 404
+  for another tenant before parsing the body, and tenant admins of `system` get 404 everywhere
+  but `/me` (registry). `guardPlatformAdminRole` refuses `platform-admin` of `portvakt-admin`
+  outside `system`/platform callers; `assertPlatformReachable` (`repositories/guard.ts`, inside
+  the change's transaction) answers `self_lockout` when `system` would lose its last enabled
+  login method or last path to platform admin. Key rotation is platform-only; `rotateNow` takes
+  hooks (`check` for If-Match, `audit` for the admin event) that run under its exclusive lock and
+  in its transaction. Never run queries concurrently (`Promise.all`) on one transaction client.
+  Mutations run in `inTransaction()` (repositories over the transaction plus `tx.record()` for the
+  `admin.*` event) and lock the row (`lockRow`) before `requireMatch(If-Match)`. Diffs
+  (`admin/api/diff.ts`) mark redacted fields `changed`; the catalogue's `changesOf()` refuses a
+  value for a redacted field.
+- Pending assignments (migration 0005): `repos.pending`; resolved in `persons.upsertFromLogin`
+  (`resolvePending`, inside the JIT transaction) and audited by the federation as
+  `assignment.pending_resolved`. A pin target needs a method with `trustPinForRepresentation`.
+- Redirect URIs may contain `{tenant}` as a whole path segment (`redirectUriSchema`);
+  `clientMetadataFor` expands it to the tenant's slug when a tenant's provider loads the client.
+- Admin portal (`apps/admin`): `src/` is the BFF (Express, `@portvakt/sdk-node`): one SDK client
+  and BFF per tenant issuer (`TenantClients`), mounted at `/t/{slug}/auth`, cookie `pv_admin` with
+  path `/t/{slug}`, sessions in a per-tenant store namespace (`TenantScopedStore`), and the proxy
+  `/t/{slug}/api/*` -> `{ADMIN_API_URL}/admin/api/v1/*` with the session's access token. A
+  tenant client is created only after Portvakt's discovery for the slug answers 200 (unknown
+  slugs: 404, remembered in a bounded negative cache that never evicts real tenants; Portvakt
+  unreachable: 503). HSTS is sent when ADMIN_PUBLIC_URL is https. (CSRF
+  token, same-origin and JSON required for mutations; only validated path segments below the
+  API base are forwarded). `web/` is the SPA (design system only; Swedish always by default,
+  English only when chosen and stored, never from `navigator.languages`; strings in
+  `web/src/i18n.ts`; `Modal` puts `aria-modal`/`aria-labelledby` on the design system's dialog,
+  traps focus and returns it; pages in `web/src/pages`; form logic in `web/src/forms.ts`). Production
+  requires ADMIN_DATABASE_URL (PgSessionStore, table `portvakt_admin_sessions`, created by
+  `npm run migrate-sessions -w apps/admin`). The SPA's test files declare
+  `@vitest-environment jsdom`.
 
 ## SDK (`packages/sdk-node/src`)
 
@@ -258,6 +316,9 @@ docker run --rm -p 3300:3300 -v "<repo>:/workspace" -v portvakt-m2:/root/.m2 \
   blind index (`*_index` columns), never the plaintext.
 - Id arguments are validated with `requireUuids` before SQL; a malformed id raises
   `InvalidIdError`.
+- Every admin API mutation writes an `admin.*` event with `actorTenantId` and, where fields
+  change, `changes` (non-secret values; secrets, party names and identifiers, attribute values
+  only as `{ changed: true }`).
 - Audit events come from the catalogue in `audit/catalogue.ts` (one zod schema per action,
   strict, ids and reason codes only, never a pin, name, email, NameID, upstream subject, token or
   request text); add an action there before writing it, and list it in the catalogue's docs.
@@ -279,6 +340,10 @@ docker run --rm -p 3300:3300 -v "<repo>:/workspace" -v portvakt-m2:/root/.m2 \
 - The delivered design-system `contracts.ts` files have an intentional empty interface; ESLint's
   `no-empty-object-type` is off for those files only.
 - Prettier ignores `packages/design-system/src` and `docs/plan.md` so they stay as authored.
+- Express 5 routing ignores a trailing slash: `app.get("/t/:slug")` also matches `/t/system/`
+  (the admin portal's redirect checks `req.path` to avoid a redirect loop).
+- The admin SPA's CSS may override the design system's dialog stage background (`.pv-modal > div`)
+  so `DialogStage` works as a fixed modal; the design system has no portaled dialog.
 - Never edit an applied migration: the runner refuses to start on a checksum mismatch, a missing
   applied file, or a new file numbered below the latest applied one. Add a new file instead.
 - Integration tests call `setupTestDatabase()`, which creates a private schema per test file as the

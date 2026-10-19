@@ -6,10 +6,12 @@ import { AuditRepository } from "./audit.js";
 import { FederationStateRepository } from "./federation-states.js";
 import { LoginMethodRepository } from "./login-methods.js";
 import { OidcPayloadRepository } from "./oidc-payloads.js";
+import { PendingAssignmentRepository } from "./pending.js";
 import { PersonRepository } from "./persons.js";
 import { PartyRepository, RepresentationGrantRepository } from "./representation.js";
 import { SamlRepository } from "./saml.js";
 import { SigningKeyRepository } from "./signing-keys.js";
+import { StatsRepository } from "./stats.js";
 import { TenantRepository } from "./tenants.js";
 
 export interface Repositories {
@@ -25,6 +27,8 @@ export interface Repositories {
   readonly oidcPayloads: OidcPayloadRepository;
   readonly federationStates: FederationStateRepository;
   readonly saml: SamlRepository;
+  readonly pending: PendingAssignmentRepository;
+  readonly stats: StatsRepository;
 }
 
 export interface RepositoryOptions {
@@ -56,6 +60,8 @@ export function createRepositories(
     oidcPayloads: new OidcPayloadRepository(db),
     federationStates: new FederationStateRepository(db, keys.secrets),
     saml: new SamlRepository(db, keys.secrets),
+    pending: new PendingAssignmentRepository(db, keys),
+    stats: new StatsRepository(db),
   };
 }
 
@@ -84,7 +90,14 @@ export {
   type LoginMethodClientKey,
 } from "./login-methods.js";
 export { OidcPayloadRepository, type PayloadIndexes, type StoredPayload } from "./oidc-payloads.js";
-export { identityPinContext, PersonRepository } from "./persons.js";
+export {
+  PendingAssignmentRepository,
+  pendingAttributePinContext,
+  pendingRolePinContext,
+  resolvePending,
+  type PendingMatch,
+} from "./pending.js";
+export { identityPinContext, PersonRepository, type PersonSummary } from "./persons.js";
 export { PartyRepository, RepresentationGrantRepository } from "./representation.js";
 export { rewrapAllSecrets, type RewrapResult } from "./rewrap.js";
 export {
@@ -99,4 +112,6 @@ export {
   type SpKeyState,
 } from "./saml.js";
 export { privateJwkContext, SigningKeyRepository, type ActivationResult } from "./signing-keys.js";
+export { platformAccess, type PlatformAccess } from "./guard.js";
+export { StatsRepository, type ApplicationUsage, type LoginCounts } from "./stats.js";
 export { TenantRepository } from "./tenants.js";

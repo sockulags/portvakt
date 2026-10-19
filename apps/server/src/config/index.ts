@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { LOGIN_METHOD_KINDS, type LoginMethodKind } from "../domain/login-method.js";
+import {
+  LOGIN_METHOD_KINDS,
+  PIN_REPRESENTATION_MIN_ACR,
+  type LoginMethodKind,
+} from "../domain/login-method.js";
+import { parsePersonnummer } from "../domain/personnummer.js";
 import { parseDurationSeconds } from "./duration.js";
 
 /**
@@ -14,6 +19,10 @@ export const DEV_COOKIE_KEYS: readonly string[] = [
   "dev-only-cookie-key-1-do-not-use-in-production",
   "dev-only-cookie-key-2-do-not-use-in-production",
 ];
+/** The admin portal's development client secret (.env.example); refused in production. */
+export const DEV_ADMIN_CLIENT_SECRET = "dev-only-admin-client-secret-0123456789abcdef";
+/** Where the admin portal runs outside production unless ADMIN_PUBLIC_URL says otherwise. */
+export const DEFAULT_DEV_ADMIN_PUBLIC_URL = "http://localhost:3400";
 /** Database credentials used by deploy/docker-compose.dev.yml. */
 const DEV_DATABASE_PASSWORDS: readonly string[] = [
   "portvakt",
@@ -55,6 +64,16 @@ export interface BootstrapIdpConfig {
   readonly kind: LoginMethodKind;
   readonly displayName: string;
   readonly acr: string;
+  /** Upstream claims (BOOTSTRAP_IDP_*_CLAIM); `subject` defaults to `sub`. */
+  readonly claims: {
+    readonly subject: string;
+    readonly name: string | undefined;
+    readonly email: string | undefined;
+    readonly pin: string | undefined;
+    readonly acr: string | undefined;
+  };
+  /** Map the email claim without `email_verified` (Entra ID work accounts). */
+  readonly trustEmail: boolean;
 }
 
 /** Express `trust proxy`: `false`, `true` (trust every hop) or the number of trusted hops. */
@@ -117,7 +136,17 @@ export interface Config {
   };
   readonly bootstrap: {
     readonly idp: BootstrapIdpConfig | undefined;
+    /** The upstream subject of the first platform admin at the bootstrap login method. */
     readonly adminSubject: string | undefined;
+    /** Or their personal identity number (canonical); the method must map and trust it. */
+    readonly adminPin: string | undefined;
+  };
+  /** The admin portal (apps/admin), a separate deployable. */
+  readonly admin: {
+    /** ADMIN_PUBLIC_URL: the portal's origin (redirect URIs of `portvakt-admin`). */
+    readonly publicUrl: string | undefined;
+    /** ADMIN_CLIENT_SECRET: the `portvakt-admin` client secret the bootstrap registers. */
+    readonly clientSecret: string | undefined;
   };
   /**
    * Assurance levels from lowest to highest (ACR_RANKING). A login method whose asserted acr
@@ -288,7 +317,16 @@ const envSchema = z.object({
   BOOTSTRAP_IDP_KIND: z.preprocess(emptyToUndefined, z.enum(LOGIN_METHOD_KINDS).optional()),
   BOOTSTRAP_IDP_DISPLAY_NAME: optionalString,
   BOOTSTRAP_IDP_ACR: optionalString,
+  BOOTSTRAP_IDP_SUBJECT_CLAIM: optionalString,
+  BOOTSTRAP_IDP_NAME_CLAIM: optionalString,
+  BOOTSTRAP_IDP_EMAIL_CLAIM: optionalString,
+  BOOTSTRAP_IDP_PIN_CLAIM: optionalString,
+  BOOTSTRAP_IDP_ACR_CLAIM: optionalString,
+  BOOTSTRAP_IDP_TRUST_EMAIL: booleanFlag,
   BOOTSTRAP_ADMIN_SUBJECT: optionalString,
+  BOOTSTRAP_ADMIN_PIN: optionalString,
+  ADMIN_PUBLIC_URL: optionalString,
+  ADMIN_CLIENT_SECRET: optionalString,
   ACR_RANKING: z.preprocess(
     emptyToUndefined,
     z
@@ -414,6 +452,25 @@ function productionIssues(env: Env, publicUrl: URL | undefined): string[] {
   if (env.BOOTSTRAP_IDP_ISSUER !== undefined && !env.BOOTSTRAP_IDP_ISSUER.startsWith("https://")) {
     issues.push("BOOTSTRAP_IDP_ISSUER: must use https in production");
   }
+  if (env.BOOTSTRAP_IDP_ISSUER !== undefined) {
+    // The bootstrap registers portvakt-admin; a generated secret would be unknown to the portal.
+    if (env.ADMIN_CLIENT_SECRET === undefined) {
+      issues.push("ADMIN_CLIENT_SECRET: required in production for the bootstrap");
+    }
+    if (env.ADMIN_PUBLIC_URL === undefined) {
+      issues.push("ADMIN_PUBLIC_URL: required in production for the bootstrap");
+    }
+  }
+  if (env.ADMIN_CLIENT_SECRET === DEV_ADMIN_CLIENT_SECRET) {
+    issues.push("ADMIN_CLIENT_SECRET: the development secret is not allowed in production");
+  }
+  if (env.ADMIN_PUBLIC_URL !== undefined && URL.canParse(env.ADMIN_PUBLIC_URL)) {
+    const url = new URL(env.ADMIN_PUBLIC_URL);
+    if (url.protocol !== "https:") issues.push("ADMIN_PUBLIC_URL: must use https in production");
+    if (isLocalHostname(url.hostname)) {
+      issues.push("ADMIN_PUBLIC_URL: must not point at a local or .test host in production");
+    }
+  }
 
   return issues;
 }
@@ -427,24 +484,73 @@ function bootstrapConfig(env: Env, issues: string[]): Config["bootstrap"] {
     env.BOOTSTRAP_IDP_KIND,
     env.BOOTSTRAP_IDP_DISPLAY_NAME,
     env.BOOTSTRAP_IDP_ACR,
+    env.BOOTSTRAP_IDP_SUBJECT_CLAIM,
+    env.BOOTSTRAP_IDP_NAME_CLAIM,
+    env.BOOTSTRAP_IDP_EMAIL_CLAIM,
+    env.BOOTSTRAP_IDP_PIN_CLAIM,
+    env.BOOTSTRAP_IDP_ACR_CLAIM,
+    env.BOOTSTRAP_IDP_TRUST_EMAIL,
   ];
-  if (idpVariables.every((value) => value === undefined)) {
-    return { idp: undefined, adminSubject: env.BOOTSTRAP_ADMIN_SUBJECT };
+  let adminPin: string | undefined;
+  if (env.BOOTSTRAP_ADMIN_PIN !== undefined) {
+    adminPin = parsePersonnummer(env.BOOTSTRAP_ADMIN_PIN)?.canonical;
+    if (adminPin === undefined) {
+      issues.push("BOOTSTRAP_ADMIN_PIN: must be a valid personnummer or samordningsnummer");
+    }
   }
+  const none = { idp: undefined, adminSubject: env.BOOTSTRAP_ADMIN_SUBJECT, adminPin };
+  if (idpVariables.every((value) => value === undefined)) return none;
 
   if (env.BOOTSTRAP_IDP_ISSUER === undefined) issues.push("BOOTSTRAP_IDP_ISSUER: required");
   if (env.BOOTSTRAP_IDP_CLIENT_ID === undefined) issues.push("BOOTSTRAP_IDP_CLIENT_ID: required");
-  if (env.BOOTSTRAP_ADMIN_SUBJECT === undefined) {
-    issues.push("BOOTSTRAP_ADMIN_SUBJECT: required when BOOTSTRAP_IDP_* is set");
+  if (env.BOOTSTRAP_ADMIN_SUBJECT === undefined && env.BOOTSTRAP_ADMIN_PIN === undefined) {
+    issues.push(
+      "BOOTSTRAP_ADMIN_SUBJECT: required when BOOTSTRAP_IDP_* is set (or BOOTSTRAP_ADMIN_PIN)",
+    );
+  }
+  if (env.BOOTSTRAP_ADMIN_SUBJECT !== undefined && env.BOOTSTRAP_ADMIN_PIN !== undefined) {
+    issues.push("BOOTSTRAP_ADMIN_PIN: set either BOOTSTRAP_ADMIN_SUBJECT or BOOTSTRAP_ADMIN_PIN");
+  }
+  if (env.BOOTSTRAP_ADMIN_SUBJECT !== undefined && env.BOOTSTRAP_ADMIN_SUBJECT.length > 255) {
+    issues.push("BOOTSTRAP_ADMIN_SUBJECT: at most 255 characters");
+  }
+  if (env.BOOTSTRAP_ADMIN_PIN !== undefined) {
+    if (env.BOOTSTRAP_IDP_PIN_CLAIM === undefined) {
+      issues.push("BOOTSTRAP_IDP_PIN_CLAIM: required with BOOTSTRAP_ADMIN_PIN");
+    }
+    // The method is then trusted for personal identity numbers: it must assert at least loa3,
+    // which the upstream must prove (a ranked acr needs the acr claim).
+    const rank = env.ACR_RANKING.indexOf(env.BOOTSTRAP_IDP_ACR ?? "");
+    const minimum = env.ACR_RANKING.indexOf(PIN_REPRESENTATION_MIN_ACR);
+    if (minimum < 0 || rank < minimum) {
+      issues.push(
+        "BOOTSTRAP_IDP_ACR: with BOOTSTRAP_ADMIN_PIN it must be ranked at least loa3 in ACR_RANKING",
+      );
+    }
+    if (env.BOOTSTRAP_IDP_ACR_CLAIM === undefined) {
+      issues.push("BOOTSTRAP_IDP_ACR_CLAIM: required with BOOTSTRAP_ADMIN_PIN");
+    }
   }
   if (env.BOOTSTRAP_IDP_ISSUER !== undefined) {
     parseHttpUrl(env.BOOTSTRAP_IDP_ISSUER, "BOOTSTRAP_IDP_ISSUER", issues);
+  }
+  const claimVariables = [
+    ["BOOTSTRAP_IDP_SUBJECT_CLAIM", env.BOOTSTRAP_IDP_SUBJECT_CLAIM],
+    ["BOOTSTRAP_IDP_NAME_CLAIM", env.BOOTSTRAP_IDP_NAME_CLAIM],
+    ["BOOTSTRAP_IDP_EMAIL_CLAIM", env.BOOTSTRAP_IDP_EMAIL_CLAIM],
+    ["BOOTSTRAP_IDP_PIN_CLAIM", env.BOOTSTRAP_IDP_PIN_CLAIM],
+    ["BOOTSTRAP_IDP_ACR_CLAIM", env.BOOTSTRAP_IDP_ACR_CLAIM],
+  ] as const;
+  for (const [name, value] of claimVariables) {
+    if (value !== undefined && (value.length > 255 || !CLAIM_NAME.test(value))) {
+      issues.push(`${name}: must be a claim name or dotted path`);
+    }
   }
   const scopes = commaOrSpaceList(env.BOOTSTRAP_IDP_SCOPES ?? "openid profile email");
   if (!scopes.includes("openid")) issues.push("BOOTSTRAP_IDP_SCOPES: must include openid");
 
   if (env.BOOTSTRAP_IDP_ISSUER === undefined || env.BOOTSTRAP_IDP_CLIENT_ID === undefined) {
-    return { idp: undefined, adminSubject: env.BOOTSTRAP_ADMIN_SUBJECT };
+    return none;
   }
   return {
     idp: {
@@ -455,9 +561,37 @@ function bootstrapConfig(env: Env, issues: string[]): Config["bootstrap"] {
       kind: env.BOOTSTRAP_IDP_KIND ?? "employee",
       displayName: env.BOOTSTRAP_IDP_DISPLAY_NAME ?? "Administrator sign-in",
       acr: env.BOOTSTRAP_IDP_ACR ?? "urn:portvakt:acr:employee",
+      claims: {
+        subject: env.BOOTSTRAP_IDP_SUBJECT_CLAIM ?? "sub",
+        name: env.BOOTSTRAP_IDP_NAME_CLAIM ?? "name",
+        email: env.BOOTSTRAP_IDP_EMAIL_CLAIM ?? "email",
+        pin: env.BOOTSTRAP_IDP_PIN_CLAIM,
+        acr: env.BOOTSTRAP_IDP_ACR_CLAIM,
+      },
+      trustEmail: env.BOOTSTRAP_IDP_TRUST_EMAIL ?? false,
     },
     adminSubject: env.BOOTSTRAP_ADMIN_SUBJECT,
+    adminPin,
   };
+}
+
+/** Upstream claim name, optionally a dotted path (as `claimMapping` accepts). */
+const CLAIM_NAME = /^[A-Za-z0-9_:/-]+(?:\.[A-Za-z0-9_:/-]+)*$/;
+
+function adminConfig(env: Env, isProduction: boolean, issues: string[]): Config["admin"] {
+  const value = env.ADMIN_PUBLIC_URL ?? (isProduction ? undefined : DEFAULT_DEV_ADMIN_PUBLIC_URL);
+  let publicUrl: string | undefined;
+  if (value !== undefined) {
+    const url = parseHttpUrl(value, "ADMIN_PUBLIC_URL", issues);
+    if (url !== undefined && url.pathname !== "/") {
+      issues.push("ADMIN_PUBLIC_URL: must be an origin without a path");
+    }
+    publicUrl = url?.origin;
+  }
+  if (env.ADMIN_CLIENT_SECRET !== undefined && env.ADMIN_CLIENT_SECRET.length < 32) {
+    issues.push("ADMIN_CLIENT_SECRET: at least 32 characters");
+  }
+  return { publicUrl, clientSecret: env.ADMIN_CLIENT_SECRET };
 }
 
 function commaOrSpaceList(value: string): string[] {
@@ -534,6 +668,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
   }
 
   const bootstrap = bootstrapConfig(env, issues);
+  const admin = adminConfig(env, isProduction, issues);
   if (isProduction) issues.push(...productionIssues(env, publicUrl));
   if (issues.length > 0 || publicUrl === undefined || database === undefined) {
     throw new ConfigError(issues);
@@ -571,6 +706,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
       retireAfterSeconds: env.KEY_RETIRE_AFTER,
     },
     bootstrap,
+    admin,
     acrRanking: env.ACR_RANKING,
     federation: {
       upstreamTimeoutSeconds: env.UPSTREAM_TIMEOUT,

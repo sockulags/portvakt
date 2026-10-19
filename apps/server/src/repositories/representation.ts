@@ -348,6 +348,16 @@ export class RepresentationGrantRepository {
     return rows.map((row) => this.#toGrant(row));
   }
 
+  /** Every grant of the tenant, newest first (administration). */
+  async list(tenantId: string, limit = 1000): Promise<RepresentationGrant[]> {
+    requireUuids({ tenantId });
+    const rows = await this.#db.query<GrantRow>(
+      `${SELECT_GRANT} WHERE g.tenant_id = $1 ORDER BY g.created_at DESC, g.id LIMIT $2`,
+      [tenantId, Math.min(Math.max(limit, 1), 1000)],
+    );
+    return rows.map((row) => this.#toGrant(row));
+  }
+
   async listForParty(tenantId: string, partyId: string): Promise<RepresentationGrant[]> {
     requireUuids({ tenantId, partyId });
     const rows = await this.#db.query<GrantRow>(
@@ -444,6 +454,30 @@ export class RepresentationGrantRepository {
         );
       }
     });
+    return this.#require(tenantId, grantId);
+  }
+
+  /**
+   * Changes a grant's validity window (`validTo` null: open-ended). Takes effect at the next
+   * refresh or authorization of a grant issued with it.
+   */
+  async setValidity(
+    tenantId: string,
+    grantId: string,
+    window: { readonly validFrom: Date; readonly validTo: Date | null },
+  ): Promise<RepresentationGrant> {
+    requireUuids({ tenantId, grantId });
+    if (window.validTo !== null && window.validTo.getTime() <= window.validFrom.getTime()) {
+      throw new ValidationError(["validTo: must be after validFrom"]);
+    }
+    const rows = await mapDbErrors(() =>
+      this.#db.query(
+        `UPDATE representation_grants SET valid_from = $3, valid_to = $4
+          WHERE tenant_id = $1 AND id = $2 RETURNING id`,
+        [tenantId, grantId, window.validFrom, window.validTo],
+      ),
+    );
+    if (rows.length === 0) throw new NotFoundError("Representation grant");
     return this.#require(tenantId, grantId);
   }
 

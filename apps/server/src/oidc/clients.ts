@@ -1,5 +1,5 @@
 import type { ClientMetadata } from "oidc-provider";
-import type { Application } from "../domain/application.js";
+import { type Application, expandRedirectUri } from "../domain/application.js";
 import { clientIdSchema } from "../domain/schemas.js";
 
 /** Resource indicator (RFC 8707) of an application: `urn:portvakt:app:{client_id}`. */
@@ -23,11 +23,13 @@ export const CLIENT_GRANT_TYPES = ["authorization_code", "refresh_token", "clien
 
 /**
  * oidc-provider client metadata for an application enabled in the tenant. `clientSecret` is the
- * decrypted secret for the secret-based methods and `null` for `private_key_jwt`.
+ * decrypted secret for the secret-based methods and `null` for `private_key_jwt`. `{tenant}` in
+ * redirect URIs becomes the tenant's slug.
  */
 export function clientMetadataFor(
   application: Application,
   clientSecret: string | null,
+  tenantSlug: string,
 ): ClientMetadata {
   const auth = application.clientAuth;
   const metadata: ClientMetadata = {
@@ -36,8 +38,10 @@ export function clientMetadataFor(
     application_type: "web",
     grant_types: CLIENT_GRANT_TYPES,
     response_types: ["code"],
-    redirect_uris: [...application.redirectUris],
-    post_logout_redirect_uris: [...application.postLogoutRedirectUris],
+    redirect_uris: application.redirectUris.map((uri) => expandRedirectUri(uri, tenantSlug)),
+    post_logout_redirect_uris: application.postLogoutRedirectUris.map((uri) =>
+      expandRedirectUri(uri, tenantSlug),
+    ),
     scope: [...STANDARD_SCOPES, ...application.allowedExtraScopes].join(" "),
     token_endpoint_auth_method: auth.method,
     id_token_signed_response_alg: "ES256",

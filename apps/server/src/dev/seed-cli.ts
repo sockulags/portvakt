@@ -1,4 +1,9 @@
-import { ConfigError, loadConfig } from "../config/index.js";
+import {
+  ConfigError,
+  DEFAULT_DEV_ADMIN_PUBLIC_URL,
+  DEV_ADMIN_CLIENT_SECRET,
+  loadConfig,
+} from "../config/index.js";
 import { createPool } from "../db/database.js";
 import { ValidationError } from "../repositories/errors.js";
 import { createLogger } from "../logging/logger.js";
@@ -97,6 +102,12 @@ async function main(): Promise<void> {
         clientId: "portvakt-dev",
         secret: value("MOCK_IDP_BANKID_CLIENT_SECRET", "dev-only-bankid-client-secret"),
       },
+      // The admin portal (ADMIN_PUBLIC_URL, default http://localhost:3400; ADMIN_CLIENT_SECRET,
+      // default the development secret of .env.example).
+      admin: {
+        publicUrl: config.admin.publicUrl ?? DEFAULT_DEV_ADMIN_PUBLIC_URL,
+        clientSecret: config.admin.clientSecret ?? DEV_ADMIN_CLIENT_SECRET,
+      },
       ...(isolationSlug === undefined
         ? {}
         : {
@@ -108,6 +119,10 @@ async function main(): Promise<void> {
           }),
     });
     console.log(`demo tenant: ${config.publicUrl}/t/${report.tenant.slug}`);
+    console.log(
+      `admin portal: ${config.admin.publicUrl ?? DEFAULT_DEV_ADMIN_PUBLIC_URL}/t/system/ ` +
+        "(erik-admin, platform admin) and /t/demo/ (anna-handlaggare, tenant admin)",
+    );
     for (const change of report.changes) console.log(`  ${change}`);
     if (report.changes.length === 0) console.log("  nothing to change");
     for (const [clientId, secret] of Object.entries(report.generatedSecrets)) {

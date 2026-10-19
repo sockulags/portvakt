@@ -641,6 +641,16 @@ export class LoginMethodRepository {
     return { kid: row.kid, publicJwk: publicJwkSchema.parse(row.public), privateJwk };
   }
 
+  /** How many identities link persons to the login method (a method with any cannot be deleted). */
+  async identityCount(tenantId: string, id: string): Promise<number> {
+    requireUuids({ tenantId, id });
+    const [row] = await this.#db.query<{ count: string }>(
+      "SELECT count(*) AS count FROM identities WHERE tenant_id = $1 AND login_method_id = $2",
+      [tenantId, id],
+    );
+    return Number(row?.count ?? 0);
+  }
+
   /** Deleting a login method that still has identities is refused; disable it instead. */
   async delete(tenantId: string, id: string): Promise<boolean> {
     requireUuids({ tenantId, id });

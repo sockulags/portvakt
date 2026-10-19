@@ -1,4 +1,6 @@
 import "@portvakt/design-system/tokens.css";
+import "@portvakt/fonts/fonts.css";
+import "./admin.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";

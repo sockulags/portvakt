@@ -5,6 +5,7 @@
  * Test helpers for other workspaces (`@portvakt/server/testing`): the SDK's and the demo
  * service's integration tests run an in-process Portvakt and mock IdP with them.
  */
+export * from "./admin.js";
 export * from "./federation.js";
 export * from "./fixtures.js";
 export * from "./oidc-flow.js";

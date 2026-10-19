@@ -4,6 +4,7 @@ import type { Db } from "../db/database.js";
 import { PIN_INDEX_SUBJECT_PREFIX } from "../domain/person.js";
 import { rewrapApplicationSecrets } from "./applications.js";
 import { rewrapLoginMethodSecrets } from "./login-methods.js";
+import { pendingAttributePinContext, pendingRolePinContext } from "./pending.js";
 import { identityPinContext } from "./persons.js";
 import { grantAgentContext, partyIdentifierContext } from "./representation.js";
 import { rewrapSpKeys } from "./saml.js";
@@ -17,6 +18,7 @@ export interface RewrapResult {
   readonly identityPins: number;
   readonly partyIdentifiers: number;
   readonly grantAgentIdentifiers: number;
+  readonly pendingAssignmentPins: number;
 }
 
 interface IndexedColumn {
@@ -63,6 +65,26 @@ const INDEXED_COLUMNS: readonly IndexedColumn[] = [
     purpose: () => "pin",
     extraColumns: "",
     context: grantAgentContext,
+  },
+  {
+    table: "pending_role_assignments",
+    idColumn: "id",
+    encrypted: "pin_encrypted",
+    index: "pin_index",
+    indexKey: "pin_index_key",
+    purpose: () => "pin",
+    extraColumns: "",
+    context: pendingRolePinContext,
+  },
+  {
+    table: "pending_attribute_assignments",
+    idColumn: "id",
+    encrypted: "pin_encrypted",
+    index: "pin_index",
+    indexKey: "pin_index_key",
+    purpose: () => "pin",
+    extraColumns: "",
+    context: pendingAttributePinContext,
   },
 ];
 
@@ -116,6 +138,9 @@ export async function rewrapAllSecrets(db: Db, keys: KeyRing): Promise<RewrapRes
       await rewrapIndexed(tx, keys, INDEXED_COLUMNS[1] as IndexedColumn),
       await rewrapIndexed(tx, keys, INDEXED_COLUMNS[2] as IndexedColumn),
     ];
+    const pendingAssignmentPins =
+      (await rewrapIndexed(tx, keys, INDEXED_COLUMNS[3] as IndexedColumn)) +
+      (await rewrapIndexed(tx, keys, INDEXED_COLUMNS[4] as IndexedColumn));
     return {
       applicationSecrets: await rewrapApplicationSecrets(tx, keys.secrets),
       loginMethodSecrets: await rewrapLoginMethodSecrets(tx, keys.secrets),
@@ -124,6 +149,7 @@ export async function rewrapAllSecrets(db: Db, keys: KeyRing): Promise<RewrapRes
       identityPins,
       partyIdentifiers,
       grantAgentIdentifiers,
+      pendingAssignmentPins,
     };
   });
 }

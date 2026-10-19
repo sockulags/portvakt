@@ -51,6 +51,17 @@ export interface RotationResult {
   readonly retiredKids: readonly string[];
 }
 
+/** Extensions of a manual rotation that run inside its lock and transaction (admin API). */
+export interface RotateNowHooks {
+  /**
+   * Runs first, holding the rotation lock, before anything changes: throw to refuse the
+   * rotation (for example an If-Match precondition on the key set).
+   */
+  readonly check?: (repos: Repositories) => Promise<void>;
+  /** Further audit events, committed with the rotation. */
+  readonly audit?: (result: RotationResult) => readonly AppendAuditEventInput[];
+}
+
 export interface ScheduledRotationResult {
   /** False when another replica held the lock. */
   readonly ran: boolean;
@@ -175,7 +186,7 @@ export class KeyRotationService {
    * kid by refetching JWKS on an unknown kid. With `emergency` (key compromise) the previous key is
    * retired at once instead. Every forced transition is audited with the actor and reason.
    */
-  async rotateNow(input: RotateNowInput): Promise<RotationResult> {
+  async rotateNow(input: RotateNowInput, hooks: RotateNowHooks = {}): Promise<RotationResult> {
     const parsed = rotateNowInputSchema.safeParse(input);
     if (!parsed.success) {
       throw new ValidationError(parsed.error.issues.map((issue) => issue.message));
@@ -183,6 +194,7 @@ export class KeyRotationService {
     const { actor, reason, emergency } = parsed.data;
     const forced = { force: true, actor, reason } as const;
     const result = await this.#exclusive(true, async (repos): Promise<RotationResult> => {
+      await hooks.check?.(repos);
       const next = (await repos.signingKeys.list(["next"]))[0] ?? (await this.#createNext(repos));
       const activation = await repos.signingKeys.activate(next.kid, forced);
       const retiredKids: string[] = [];
@@ -205,11 +217,13 @@ export class KeyRotationService {
           },
         }),
       );
-      return {
+      const rotated: RotationResult = {
         activatedKid: activation.activated.kid,
         retiringKid: emergency ? null : (activation.retiring?.kid ?? null),
         retiredKids,
       };
+      for (const event of hooks.audit?.(rotated) ?? []) await this.#append(repos, event);
+      return rotated;
     });
     if (result === undefined) throw new Error("Key rotation lock was not acquired");
     this.#options.logger.warn(

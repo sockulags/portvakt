@@ -5,7 +5,9 @@ import type {
   CreateSamlLoginMethodInput,
   LoginMethod,
 } from "../domain/login-method.js";
-import type { Tenant } from "../domain/tenant.js";
+import { SYSTEM_TENANT_SLUG, type Tenant } from "../domain/tenant.js";
+import { ensureAdminApplication } from "../admin/bootstrap.js";
+import { ADMIN_CLIENT_ID, PLATFORM_ADMIN_ROLE, TENANT_ADMIN_ROLE } from "../admin/constants.js";
 import type { SamlLoginMethodAdmin } from "../federation/saml/admin.js";
 import type { Repositories } from "../repositories/index.js";
 
@@ -31,6 +33,10 @@ export const SEED_PERSON_PARTY = {
   identifier: "199001612382",
   displayName: "Samuel Samordning",
 } as const;
+
+/** Mock Entra personas of the admin portal: Erik is platform admin, Anna tenant admin of demo. */
+export const SEED_PLATFORM_ADMIN_OID = "a3d9e0f4-71c2-4b8e-b5a6-2c4f9d1e8b77";
+export const SEED_TENANT_ADMIN_OID = "6f1c8a52-3b7e-4d2a-9c41-8e2f5b7a1d03";
 
 export interface SeedService {
   /**
@@ -66,6 +72,8 @@ export interface DevSeedOptions {
     readonly name: string;
     readonly clientIds: readonly SeedService["clientId"][];
   };
+  /** The admin portal (`portvakt-admin`): its origin and client secret. Off unless set. */
+  readonly admin?: { readonly publicUrl: string; readonly clientSecret: string };
 }
 
 export interface SeedReport {
@@ -312,7 +320,90 @@ export async function seedDev(target: SeedTarget, options: DevSeedOptions): Prom
     await seedIsolationTenant(repos, options.isolationTenant, byClientId, changes);
   }
 
+  if (options.admin !== undefined) {
+    await seedAdmin(repos, options, tenantId, methodIds.entra!, changes);
+  }
+
   return { tenant, applications, generatedSecrets, loginMethods: methodIds, changes };
+}
+
+/**
+ * The admin portal (apps/admin on :3400): the `system` tenant with a Mock Entra login method,
+ * `portvakt-admin` enabled in `system` and `demo`, Erik (`erik-admin`) as platform admin and
+ * Anna (`anna-handlaggare`) as tenant admin of `demo`, as pending assignments by upstream subject
+ * until they first sign in (what the bootstrap and the admin API do in production).
+ */
+async function seedAdmin(
+  repos: Repositories,
+  options: DevSeedOptions,
+  demoTenantId: string,
+  demoEntraId: string,
+  changes: string[],
+): Promise<void> {
+  const admin = options.admin!;
+  let system = await repos.tenants.findBySlug(SYSTEM_TENANT_SLUG);
+  if (system === null) {
+    system = await repos.tenants.create({ slug: SYSTEM_TENANT_SLUG, name: "Portvakt" });
+    changes.push(`tenant ${SYSTEM_TENANT_SLUG} created`);
+  }
+  const { application, created } = await ensureAdminApplication(
+    repos,
+    admin.publicUrl,
+    admin.clientSecret,
+  );
+  if (created) changes.push(`application ${ADMIN_CLIENT_ID} created`);
+  for (const tenantId of [system.id, demoTenantId]) {
+    const attached = (await repos.applications.listForTenant(tenantId)).find(
+      (entry) => entry.application.id === application.id,
+    );
+    if (attached?.enabled !== true) {
+      await repos.applications.enableForTenant(tenantId, application.id);
+      changes.push(
+        `application ${ADMIN_CLIENT_ID} enabled in ${tenantId === system.id ? SYSTEM_TENANT_SLUG : DEMO_TENANT_SLUG}`,
+      );
+    }
+  }
+  const systemMethods = await repos.loginMethods.list(system.id);
+  const input = {
+    ...oidcMethods(options).find((method) => method.key === "entra")!,
+    displayName: "Mock Entra (administratörer)",
+    homeRealmDomains: [],
+  };
+  const { key: _key, ...methodInput } = input;
+  void _key;
+  const found = systemMethods.find((method) => method.displayName === methodInput.displayName);
+  const systemEntra =
+    found === undefined
+      ? await repos.loginMethods.create(system.id, methodInput)
+      : await repos.loginMethods.update(system.id, found.id, methodInput);
+  if (found === undefined) changes.push(`login method ${methodInput.displayName} created`);
+
+  const grants: readonly [string, string, string, string][] = [
+    [system.id, systemEntra.id, SEED_PLATFORM_ADMIN_OID, PLATFORM_ADMIN_ROLE],
+    [demoTenantId, demoEntraId, SEED_TENANT_ADMIN_OID, TENANT_ADMIN_ROLE],
+  ];
+  for (const [tenantId, loginMethodId, subject, role] of grants) {
+    const target = { loginMethodId, subject };
+    const persons = await repos.persons.matchPendingTarget(tenantId, target);
+    if (persons.length > 0) {
+      for (const personId of persons) {
+        await repos.access.assignRole(tenantId, { personId, applicationId: application.id, role });
+      }
+      continue;
+    }
+    const pending = await repos.pending.listRoles(tenantId, { applicationId: application.id });
+    const present = pending.some(
+      (item) =>
+        item.role === role &&
+        item.target.kind === "identity" &&
+        item.target.loginMethodId === loginMethodId &&
+        item.target.subject === subject,
+    );
+    if (!present) {
+      await repos.pending.createRole(tenantId, { applicationId: application.id, role, target });
+      changes.push(`pending ${role} assignment created`);
+    }
+  }
 }
 
 async function seedIsolationTenant(

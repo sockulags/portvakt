@@ -8,6 +8,53 @@ import {
   roleNameSchema,
 } from "./schemas.js";
 
+/**
+ * Placeholder for the tenant slug in an application's redirect and post-logout URIs: an
+ * application used in many tenants with per-tenant paths (the admin portal:
+ * `https://admin.example.org/t/{tenant}/auth/callback`) registers one template, expanded to the
+ * tenant's slug when the tenant's provider loads the client. Only allowed as a whole path segment.
+ */
+export const TENANT_PLACEHOLDER = "{tenant}";
+const PLACEHOLDER_SAMPLE = "pv-tenant-placeholder";
+
+/** A redirect URI with every `{tenant}` placeholder replaced by the tenant's slug. */
+export const expandRedirectUri = (uri: string, tenantSlug: string): string =>
+  uri.split(TENANT_PLACEHOLDER).join(tenantSlug);
+
+/**
+ * An absolute http(s) redirect URI without a fragment, optionally with `{tenant}` path segments
+ * (see {@link TENANT_PLACEHOLDER}).
+ */
+export const redirectUriSchema = z
+  .string()
+  .max(2000)
+  .superRefine((value, ctx) => {
+    const sample = value.split(TENANT_PLACEHOLDER).join(PLACEHOLDER_SAMPLE);
+    if (/[{}]/.test(sample)) {
+      ctx.addIssue({ code: "custom", message: "only the {tenant} placeholder is allowed" });
+      return;
+    }
+    if (!absoluteUrlSchema.safeParse(sample).success) {
+      ctx.addIssue({
+        code: "custom",
+        message: "must be an absolute http(s) URL without a fragment",
+      });
+      return;
+    }
+    if (!value.includes(TENANT_PLACEHOLDER)) return;
+    const url = new URL(sample);
+    const segments = url.pathname.split("/");
+    if (
+      url.host.includes(PLACEHOLDER_SAMPLE) ||
+      url.search.includes(PLACEHOLDER_SAMPLE) ||
+      segments.some(
+        (segment) => segment.includes(PLACEHOLDER_SAMPLE) && segment !== PLACEHOLDER_SAMPLE,
+      )
+    ) {
+      ctx.addIssue({ code: "custom", message: "{tenant} is only allowed as a whole path segment" });
+    }
+  });
+
 /** Scopes an application must be allowed: `pin` (personal identity number), `hsa` (SITHS). */
 export const EXTRA_SCOPES = ["pin", "hsa"] as const;
 export type ExtraScope = (typeof EXTRA_SCOPES)[number];
@@ -109,8 +156,8 @@ export const createApplicationInputSchema = z.object({
   name: displayNameSchema,
   enabled: z.boolean().default(true),
   clientAuth: clientAuthSchema,
-  redirectUris: z.array(absoluteUrlSchema).min(1).max(50),
-  postLogoutRedirectUris: z.array(absoluteUrlSchema).max(50).default([]),
+  redirectUris: z.array(redirectUriSchema).min(1).max(50),
+  postLogoutRedirectUris: z.array(redirectUriSchema).max(50).default([]),
   roles: z
     .array(declaredRoleSchema)
     .max(200)
@@ -131,8 +178,8 @@ export const updateApplicationInputSchema = z
     name: displayNameSchema,
     enabled: z.boolean(),
     clientAuth: clientAuthSchema,
-    redirectUris: z.array(absoluteUrlSchema).min(1).max(50),
-    postLogoutRedirectUris: z.array(absoluteUrlSchema).max(50),
+    redirectUris: z.array(redirectUriSchema).min(1).max(50),
+    postLogoutRedirectUris: z.array(redirectUriSchema).max(50),
     allowedExtraScopes: z.array(z.enum(EXTRA_SCOPES)),
     representationMode: z.enum(REPRESENTATION_MODES),
   })

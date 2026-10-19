@@ -208,7 +208,7 @@ export function buildTenantProvider(
       application.clientAuth.method === "private_key_jwt"
         ? null
         : await repos.applications.getClientSecret(application.id);
-    return clientMetadataFor(application, secret);
+    return clientMetadataFor(application, secret, tenant.slug);
   };
 
   const findAccount: FindAccount = async (ctx, sub, token) => {

@@ -229,6 +229,7 @@ describe.skipIf(testDb === undefined)("SigningKeyRepository", () => {
       identityPins: 1,
       partyIdentifiers: 1,
       grantAgentIdentifiers: 1,
+      pendingAssignmentPins: 0,
     });
     expect(result.loginMethodSecrets).toBeGreaterThanOrEqual(1);
     expect(result.applicationSecrets).toBeGreaterThanOrEqual(1);
@@ -272,6 +273,7 @@ describe.skipIf(testDb === undefined)("SigningKeyRepository", () => {
       identityPins: 0,
       partyIdentifiers: 0,
       grantAgentIdentifiers: 0,
+      pendingAssignmentPins: 0,
     });
   });
 });

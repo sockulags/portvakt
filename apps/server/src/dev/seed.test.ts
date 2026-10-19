@@ -60,6 +60,10 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
     isolationTenant: { slug: "demo-isolation", name: "Isoleringstest", clientIds: ["service-c"] },
     entraClient: { clientId: "portvakt-dev", secret: "dev-only-entra-client-secret" },
     bankidClient: { clientId: "portvakt-dev", secret: "dev-only-bankid-client-secret" },
+    admin: {
+      publicUrl: "http://localhost:3400",
+      clientSecret: "dev-only-admin-client-secret-0123456789abcdef",
+    },
   });
 
   it("creates the demo tenant and converges on the same state when run again", async () => {
@@ -79,6 +83,7 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
     expect(await repos.applications.findEnabledByClientId(tenantId, "service-b")).toBeNull();
     const attached = await repos.applications.listForTenant(tenantId);
     expect(attached.map((entry) => [entry.application.clientId, entry.enabled]).sort()).toEqual([
+      ["portvakt-admin", true],
       ["service-a", true],
       ["service-b", false],
       ["service-c", true],
@@ -119,6 +124,23 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
     for (const party of parties) {
       expect((await repos.grants.listForParty(tenantId, party.id)).length).toBe(1);
     }
+
+    // The admin portal: system tenant, Erik platform admin and Anna tenant admin (pending).
+    const system = (await repos.tenants.findBySlug("system"))!;
+    const admin = (await repos.applications.findByClientId("portvakt-admin"))!;
+    expect(admin.redirectUris).toEqual(["http://localhost:3400/t/{tenant}/auth/callback"]);
+    expect(
+      await repos.applications.findEnabledByClientId(system.id, "portvakt-admin"),
+    ).not.toBeNull();
+    expect((await repos.pending.listRoles(system.id)).map((item) => item.role)).toEqual([
+      "platform-admin",
+    ]);
+    expect((await repos.pending.listRoles(tenantId)).map((item) => item.role)).toEqual([
+      "tenant-admin",
+    ]);
+    expect((await repos.loginMethods.list(system.id)).map((method) => method.displayName)).toEqual([
+      "Mock Entra (administratörer)",
+    ]);
 
     // Run again (after a mock IdP restart the SAML metadata is fetched again): no changes.
     const second = await seedDev(target, options());

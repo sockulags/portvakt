@@ -460,6 +460,21 @@ export class FederationService {
           details: { loginMethodId: method.id },
         });
       }
+      for (const resolved of jit.resolved) {
+        await record({
+          action: "assignment.pending_resolved",
+          tenantId: tenant.id,
+          actor: { type: "system", id: null },
+          subject: { type: "person", id: person.id },
+          details: {
+            pendingId: resolved.pendingId,
+            kind: resolved.kind,
+            applicationId: resolved.applicationId,
+            name: resolved.name,
+            targetKind: resolved.targetKind,
+          },
+        });
+      }
       await new FederationStateRepository(tx, keys.secrets).attachCompletion(
         tenant.id,
         result.stateHash,

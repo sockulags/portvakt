@@ -17,6 +17,7 @@ import {
   ApplicationNotInTenantError,
   InvalidReferenceError,
   mapDbErrors,
+  NotFoundError,
   parseInput,
   UndeclaredAttributeKeyError,
   requireUuids,
@@ -151,6 +152,94 @@ export class AccessRepository {
       params.values,
     );
     return rows.map(toAssignment);
+  }
+
+  /**
+   * The person's roles in one application now, in one query: direct assignments plus every rule
+   * of the login method used whose group is among the groups stored on the person's identity
+   * at that method (the latest login's groups). The admin API intersects the token's roles with
+   * these, so a removed role stops working at once instead of when the token expires.
+   */
+  async currentRoles(
+    tenantId: string,
+    personId: string,
+    applicationId: string,
+    loginMethodId: string,
+  ): Promise<string[]> {
+    requireUuids({ tenantId, personId, applicationId, loginMethodId });
+    const rows = await this.#db.query<{ role: string }>(
+      `SELECT role FROM role_assignments
+        WHERE tenant_id = $1 AND person_id = $2 AND application_id = $3
+       UNION
+       SELECT r.role FROM role_rules r
+         JOIN identities i ON i.tenant_id = r.tenant_id AND i.login_method_id = r.login_method_id
+        WHERE r.tenant_id = $1 AND r.application_id = $3 AND r.login_method_id = $4
+          AND i.person_id = $2 AND (i.attributes -> 'groups') ? r.group_value`,
+      [tenantId, personId, applicationId, loginMethodId],
+    );
+    return rows.map((row) => row.role);
+  }
+
+  async findAssignment(tenantId: string, id: string): Promise<RoleAssignment | null> {
+    requireUuids({ tenantId, id });
+    const [row] = await this.#db.query<RoleAssignmentRow>(
+      `SELECT ${ASSIGNMENT_COLUMNS} FROM role_assignments WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, id],
+    );
+    return row === undefined ? null : toAssignment(row);
+  }
+
+  async deleteAssignment(tenantId: string, id: string): Promise<boolean> {
+    requireUuids({ tenantId, id });
+    const rows = await this.#db.query(
+      "DELETE FROM role_assignments WHERE tenant_id = $1 AND id = $2 RETURNING id",
+      [tenantId, id],
+    );
+    return rows.length > 0;
+  }
+
+  async findRule(tenantId: string, id: string): Promise<RoleRule | null> {
+    requireUuids({ tenantId, id });
+    const [row] = await this.#db.query<RoleRuleRow>(
+      `SELECT ${RULE_COLUMNS} FROM role_rules WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, id],
+    );
+    return row === undefined ? null : toRule(row);
+  }
+
+  async findAttribute(tenantId: string, id: string): Promise<AttributeAssignment | null> {
+    requireUuids({ tenantId, id });
+    const [row] = await this.#db.query<AttributeRow>(
+      `SELECT ${ATTRIBUTE_COLUMNS} FROM attribute_assignments WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, id],
+    );
+    return row === undefined ? null : toAttribute(row);
+  }
+
+  async setAttributeValue(
+    tenantId: string,
+    id: string,
+    value: string,
+  ): Promise<AttributeAssignment> {
+    requireUuids({ tenantId, id });
+    const [row] = await mapDbErrors(() =>
+      this.#db.query<AttributeRow>(
+        `UPDATE attribute_assignments SET value = $3 WHERE tenant_id = $1 AND id = $2
+         RETURNING ${ATTRIBUTE_COLUMNS}`,
+        [tenantId, id, value],
+      ),
+    );
+    if (row === undefined) throw new NotFoundError("Attribute assignment");
+    return toAttribute(row);
+  }
+
+  async deleteAttribute(tenantId: string, id: string): Promise<boolean> {
+    requireUuids({ tenantId, id });
+    const rows = await this.#db.query(
+      "DELETE FROM attribute_assignments WHERE tenant_id = $1 AND id = $2 RETURNING id",
+      [tenantId, id],
+    );
+    return rows.length > 0;
   }
 
   async createRule(tenantId: string, input: CreateRoleRuleInput): Promise<RoleRule> {

@@ -2,6 +2,8 @@ import { createServer, type RequestListener, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import express, { Router, type Express } from "express";
 import type { Pool } from "pg";
+import { adminApiRouter } from "./admin/api/index.js";
+import { runBootstrap, type BootstrapResult } from "./admin/bootstrap.js";
 import { createApp, type ReadinessReport } from "./app.js";
 import { AuditLog, type AuditSink } from "./audit/audit-log.js";
 import type { Config } from "./config/index.js";
@@ -73,6 +75,8 @@ export interface Portvakt {
   readonly samlAdmin: SamlLoginMethodAdmin;
   /** In-process counters (M8 exposes them to Prometheus). */
   readonly metrics: MetricRegistry;
+  /** First-start bootstrap (also run by `start()`); does nothing once a tenant exists. */
+  readonly bootstrap: () => Promise<BootstrapResult>;
   readonly readiness: () => Promise<ReadinessReport>;
   /** The scheduled jobs, runnable on demand (tests, operations). */
   readonly jobs: {
@@ -203,6 +207,26 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     saml: federation.saml,
     production: config.isProduction,
   });
+  const repositoryOptions = {
+    maxSessionSeconds: config.tokens.sessionSeconds,
+    acrRanking: config.acrRanking,
+  };
+  const adminApi = adminApiRouter({
+    config,
+    db,
+    keys,
+    repos,
+    repositoryOptions,
+    keyCache,
+    rotation,
+    saml: federation.saml,
+    samlAdmin,
+    auditLog,
+    outbound,
+    logger,
+  });
+  const bootstrap = (): Promise<BootstrapResult> =>
+    runBootstrap({ config, db, keys, repositoryOptions, auditLog, outbound, logger });
 
   const onEvent = async (event: ChangeEvent): Promise<void> => {
     switch (event.type) {
@@ -332,6 +356,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     readiness,
     isDraining: () => closing,
     routes: [
+      adminApi,
       loginUiAssets(shell.dir, config.isProduction),
       samlAssetRoutes(),
       tenantRoutes({
@@ -373,6 +398,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     federation,
     samlAdmin,
     metrics,
+    bootstrap,
     readiness,
     jobs,
     async start() {
@@ -381,6 +407,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
       if (config.isProduction) shell.assertBuilt();
       await rotation.ensureActiveKey();
       await reloadKeys();
+      await bootstrap();
       await listener.start();
       for (const task of tasks) task.start();
       started = true;

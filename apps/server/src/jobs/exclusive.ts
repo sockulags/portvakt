@@ -8,6 +8,7 @@ export const JOB_LOCKS = {
   payloadCleanup: "payload-cleanup",
   keyRotation: "key-rotation",
   samlMetadataRefresh: "saml-metadata-refresh",
+  bootstrap: "bootstrap",
 } as const;
 export type JobLock = (typeof JOB_LOCKS)[keyof typeof JOB_LOCKS];
 

@@ -25,6 +25,8 @@ const acr = z.string().min(1).max(255).regex(/^\S+$/);
 /** A fixed reason or detail code chosen by Portvakt. */
 const code = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
 const kid = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
+const roleName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/);
+const attributeKey = z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/);
 
 const loginFailureReason = z.enum(LOGIN_ERROR_CODES);
 
@@ -73,6 +75,101 @@ const event = <O extends AuditOutcome, D extends z.ZodType>(
   details: D,
   description: string,
 ) => ({ outcome, details, description });
+
+/** A value in an admin change diff: a short scalar or a list of short scalars. */
+const diffScalar = z.union([z.string().max(2048), z.number(), z.boolean(), z.null()]);
+const diffValue = z.union([diffScalar, z.array(diffScalar).max(100)]);
+/**
+ * One changed field: its old and new value, or only `changed` for a field whose value is a
+ * secret or personal data (or too large to record).
+ */
+const diffEntry = z.union([
+  z.object({ from: diffValue.optional(), to: diffValue.optional() }).strict(),
+  z.object({ changed: z.literal(true) }).strict(),
+]);
+const fieldPath = z
+  .string()
+  .max(128)
+  .regex(/^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*)*$/);
+
+/**
+ * The `changes` of an admin event: field paths (dotted, below the listed top-level fields) and
+ * their old and new values. Fields in `redacted` (and anything below them) may only say
+ * `changed`: their values never reach the audit log.
+ */
+function changesOf(fields: readonly string[], redacted: readonly string[]) {
+  const top = new Set(fields);
+  const isRedacted = (path: string): boolean =>
+    redacted.some((field) => path === field || path.startsWith(`${field}.`));
+  return z
+    .record(fieldPath, diffEntry)
+    .refine((changes) => Object.keys(changes).length <= 200, "too many changes")
+    .refine(
+      (changes) => Object.keys(changes).every((path) => top.has(path.split(".")[0]!)),
+      "unknown field",
+    )
+    .refine(
+      (changes) =>
+        Object.entries(changes).every(([path, entry]) => !isRedacted(path) || "changed" in entry),
+      "a redacted field carries a value",
+    );
+}
+
+const TENANT_FIELDS = ["slug", "name", "status", "representationSources"] as const;
+const APPLICATION_FIELDS = [
+  "clientId",
+  "name",
+  "enabled",
+  "clientAuth",
+  "redirectUris",
+  "postLogoutRedirectUris",
+  "allowedExtraScopes",
+  "representationMode",
+  "roles",
+  "attributeKeys",
+] as const;
+/** Secrets and keys of an application: only "changed". */
+const APPLICATION_REDACTED = ["clientAuth.clientSecret", "clientAuth.jwks"] as const;
+const LOGIN_METHOD_FIELDS = [
+  "protocol",
+  "kind",
+  "displayName",
+  "assertedAcr",
+  "homeRealmDomains",
+  "secretExpiresAt",
+  "sessionPolicy",
+  "linkByPin",
+  "trustPinForRepresentation",
+  "enabled",
+  "issuer",
+  "clientId",
+  "clientSecret",
+  "clientAuthMethod",
+  "useUserinfo",
+  "clientAssertionAudience",
+  "allowedUpstreamTenants",
+  "trustUpstreamEmail",
+  "pinLoginHint",
+  "scopes",
+  "claimMapping",
+  "saml",
+] as const;
+const LOGIN_METHOD_REDACTED = [
+  "clientSecret",
+  "saml.metadataXml",
+  "saml.metadataSigningCertificate",
+] as const;
+/** A person party's display name is personal data; party names are never recorded. */
+const PARTY_FIELDS = ["type", "identifier", "displayName", "protectedIdentity"] as const;
+const PARTY_REDACTED = ["identifier", "displayName"] as const;
+const GRANT_FIELDS = ["allApplications", "applicationIds", "validFrom", "validTo"] as const;
+const ATTRIBUTE_FIELDS = ["value"] as const;
+
+/** Who the admin change was made for (never the subject or number itself). */
+const ASSIGNMENT_TARGET_KINDS = ["person", "identity", "pin"] as const;
+
+/** The administrator's own tenant (`null` for the system bootstrap). */
+const actorTenantId = uuid.nullable();
 
 export const AUDIT_EVENTS = {
   "login.success": event(
@@ -261,6 +358,321 @@ export const AUDIT_EVENTS = {
     "success",
     z.object({ loginMethodId: uuid }).strict(),
     "A SAML login method was saved with an unsigned metadata URL (an explicit opt-out).",
+  ),
+  "assignment.pending_resolved": event(
+    "success",
+    z
+      .object({
+        pendingId: uuid,
+        kind: z.enum(["role", "attribute"]),
+        applicationId: uuid,
+        /** The role, or the attribute key (never the attribute value). */
+        name: roleName,
+        targetKind: z.enum(["identity", "pin"]),
+      })
+      .strict(),
+    "A login turned a pending role or attribute assignment into an assignment of the person " +
+      "(subject: the person).",
+  ),
+  // Administration (admin API, M6). Actor: the administrator (person id; `actorTenantId` is
+  // their own tenant). `changes` lists non-secret fields only; secrets and personal data say
+  // `changed` and nothing else.
+  "admin.bootstrap": event(
+    "success",
+    z
+      .object({
+        applicationId: uuid,
+        loginMethodId: uuid,
+        pendingAssignmentId: uuid,
+        targetKind: z.enum(["identity", "pin"]),
+      })
+      .strict(),
+    "First start on an empty database: the system tenant, portvakt-admin, the bootstrap login " +
+      "method and a pending platform-admin assignment were created (subject: the tenant).",
+  ),
+  "admin.tenant.create": event(
+    "success",
+    z.object({ actorTenantId, changes: changesOf(TENANT_FIELDS, []) }).strict(),
+    "An administrator created a tenant (subject: the tenant).",
+  ),
+  "admin.tenant.update": event(
+    "success",
+    z.object({ actorTenantId, changes: changesOf(TENANT_FIELDS, []) }).strict(),
+    "An administrator changed a tenant (subject: the tenant).",
+  ),
+  "admin.tenant.suspend": event(
+    "success",
+    z.object({ actorTenantId }).strict(),
+    "An administrator suspended a tenant: its issuer answers 404 (subject: the tenant).",
+  ),
+  "admin.tenant.reactivate": event(
+    "success",
+    z.object({ actorTenantId }).strict(),
+    "An administrator reactivated a suspended tenant (subject: the tenant).",
+  ),
+  "admin.application.create": event(
+    "success",
+    z
+      .object({ actorTenantId, changes: changesOf(APPLICATION_FIELDS, APPLICATION_REDACTED) })
+      .strict(),
+    "An administrator registered an application (subject: the application).",
+  ),
+  "admin.application.update": event(
+    "success",
+    z
+      .object({ actorTenantId, changes: changesOf(APPLICATION_FIELDS, APPLICATION_REDACTED) })
+      .strict(),
+    "An administrator changed an application (subject: the application).",
+  ),
+  "admin.application.secret_rotate": event(
+    "success",
+    z.object({ actorTenantId }).strict(),
+    "An administrator replaced an application's client secret (subject: the application).",
+  ),
+  "admin.tenant_application.attach": event(
+    "success",
+    z.object({ actorTenantId, applicationId: uuid }).strict(),
+    "An administrator attached an application to the tenant and enabled it (subject: the " +
+      "application).",
+  ),
+  "admin.tenant_application.update": event(
+    "success",
+    z.object({ actorTenantId, applicationId: uuid, changes: changesOf(["enabled"], []) }).strict(),
+    "An administrator enabled or disabled an application in the tenant (subject: the " +
+      "application).",
+  ),
+  "admin.login_method.create": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        protocol: z.enum(["oidc", "saml"]),
+        changes: changesOf(LOGIN_METHOD_FIELDS, LOGIN_METHOD_REDACTED),
+      })
+      .strict(),
+    "An administrator created a login method (subject: the login method).",
+  ),
+  "admin.login_method.update": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        protocol: z.enum(["oidc", "saml"]),
+        changes: changesOf(LOGIN_METHOD_FIELDS, LOGIN_METHOD_REDACTED),
+      })
+      .strict(),
+    "An administrator changed a login method (subject: the login method).",
+  ),
+  "admin.login_method.sp_keys_prepare": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        purposes: z
+          .array(z.enum(["signing", "encryption"]))
+          .min(1)
+          .max(2),
+        keyIds: z.array(uuid).max(2),
+      })
+      .strict(),
+    "An administrator added `next` SAML SP keys, published next to the active ones (subject: " +
+      "the login method).",
+  ),
+  "admin.login_method.sp_keys_rotate": event(
+    "success",
+    z
+      .object({ actorTenantId, purposes: z.array(z.enum(["signing", "encryption"])).max(2) })
+      .strict(),
+    "An administrator made the `next` SAML SP keys active (subject: the login method).",
+  ),
+  "admin.role_rule.create": event(
+    "success",
+    z.object({ actorTenantId, applicationId: uuid, loginMethodId: uuid, role: roleName }).strict(),
+    "An administrator created a role rule; the group value is not recorded (subject: the rule).",
+  ),
+  "admin.role_rule.delete": event(
+    "success",
+    z.object({ actorTenantId, applicationId: uuid, loginMethodId: uuid, role: roleName }).strict(),
+    "An administrator deleted a role rule (subject: the rule).",
+  ),
+  "admin.role_assignment.create": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        applicationId: uuid,
+        role: roleName,
+        targetKind: z.enum(ASSIGNMENT_TARGET_KINDS),
+        pending: z.boolean(),
+        loginMethodId: uuid.optional(),
+      })
+      .strict(),
+    "An administrator assigned a role, to a person or pending for an identity reference or a " +
+      "personal identity number (subject: the person, or the pending assignment).",
+  ),
+  "admin.role_assignment.delete": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        applicationId: uuid,
+        role: roleName,
+        targetKind: z.enum(ASSIGNMENT_TARGET_KINDS),
+        pending: z.boolean(),
+      })
+      .strict(),
+    "An administrator removed a role assignment (subject: the person, or the pending " +
+      "assignment).",
+  ),
+  "admin.attribute_assignment.create": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        applicationId: uuid,
+        key: attributeKey,
+        targetKind: z.enum(ASSIGNMENT_TARGET_KINDS),
+        pending: z.boolean(),
+        changes: changesOf(ATTRIBUTE_FIELDS, ATTRIBUTE_FIELDS),
+      })
+      .strict(),
+    "An administrator set an attribute; its value is not recorded (subject: the person, or " +
+      "the pending assignment).",
+  ),
+  "admin.attribute_assignment.update": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        applicationId: uuid,
+        key: attributeKey,
+        pending: z.boolean(),
+        changes: changesOf(ATTRIBUTE_FIELDS, ATTRIBUTE_FIELDS),
+      })
+      .strict(),
+    "An administrator changed an attribute value (subject: the person, or the pending " +
+      "assignment).",
+  ),
+  "admin.attribute_assignment.delete": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        applicationId: uuid,
+        key: attributeKey,
+        pending: z.boolean(),
+      })
+      .strict(),
+    "An administrator removed an attribute assignment (subject: the person, or the pending " +
+      "assignment).",
+  ),
+  "admin.person.protected_identity_clear": event(
+    "success",
+    z.object({ actorTenantId }).strict(),
+    "An administrator cleared a person's protected identity flag (subject: the person).",
+  ),
+  "admin.party.create": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        partyType: z.enum(PARTY_TYPES),
+        changes: changesOf(PARTY_FIELDS, PARTY_REDACTED),
+      })
+      .strict(),
+    "An administrator created a party; its identifier and name are not recorded (subject: the " +
+      "party).",
+  ),
+  "admin.party.update": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        partyType: z.enum(PARTY_TYPES),
+        changes: changesOf(PARTY_FIELDS, PARTY_REDACTED),
+      })
+      .strict(),
+    "An administrator changed a party (subject: the party).",
+  ),
+  "admin.grant.create": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        partyId: uuid,
+        agentKind: z.enum(["person", "pin"]),
+        agentPersonId: uuid.optional(),
+        changes: changesOf(GRANT_FIELDS, []),
+      })
+      .strict(),
+    "An administrator created a representation grant; an agent personal identity number is " +
+      "not recorded (subject: the grant).",
+  ),
+  "admin.grant.update": event(
+    "success",
+    z.object({ actorTenantId, partyId: uuid, changes: changesOf(GRANT_FIELDS, []) }).strict(),
+    "An administrator changed which applications a representation grant covers (subject: " +
+      "the grant).",
+  ),
+  "admin.grant.revoke": event(
+    "success",
+    z.object({ actorTenantId, partyId: uuid }).strict(),
+    "An administrator revoked a representation grant; refreshes of tokens issued with it fail " +
+      "(subject: the grant).",
+  ),
+  "admin.login_method.delete": event(
+    "success",
+    z.object({ actorTenantId, protocol: z.enum(["oidc", "saml"]) }).strict(),
+    "An administrator deleted a login method that had no identities (subject: the login " +
+      "method).",
+  ),
+  "admin.tenant_application.detach": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        applicationId: uuid,
+        /** What the detach deleted with the attachment (counts). */
+        removed: z
+          .object({
+            roleAssignments: z.number().int().min(0),
+            pendingRoleAssignments: z.number().int().min(0),
+            roleRules: z.number().int().min(0),
+            attributeAssignments: z.number().int().min(0),
+            pendingAttributeAssignments: z.number().int().min(0),
+            grantLimits: z.number().int().min(0),
+          })
+          .strict(),
+      })
+      .strict(),
+    "An administrator detached an application from the tenant, deleting its assignments, rules " +
+      "and grant limits there (subject: the application).",
+  ),
+  "admin.person.identity_unlink": event(
+    "success",
+    z.object({ actorTenantId, loginMethodId: uuid }).strict(),
+    "An administrator removed one identity of a person; the upstream subject is not recorded " +
+      "(subject: the person).",
+  ),
+  "admin.person.delete": event(
+    "success",
+    z.object({ actorTenantId, identities: z.number().int().min(0) }).strict(),
+    "An administrator deleted a person with their identities, assignments and the grants made " +
+      "out to them (subject: the person).",
+  ),
+  "admin.signing_key.rotate": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        emergency: z.boolean(),
+        activatedKid: kid,
+        retiringKid: kid.nullable(),
+        retiredKids: z.array(kid).max(10),
+      })
+      .strict(),
+    "An administrator rotated the signing keys (also `key.rotate`, with the reason; subject: " +
+      "the new active key).",
   ),
 } as const;
 

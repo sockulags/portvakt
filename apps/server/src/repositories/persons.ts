@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { KeyRing } from "../crypto/keyring.js";
 import type { Db } from "../db/database.js";
+import { personnummerSchema } from "../domain/personnummer.js";
 import {
   type Identity,
   type IdentityAttributes,
@@ -18,6 +19,7 @@ import {
   parseInput,
   requireUuids,
 } from "./errors.js";
+import { resolvePending } from "./pending.js";
 import { requireRow } from "./sql.js";
 
 interface PersonRow {
@@ -45,6 +47,47 @@ interface IdentityRow {
 const PERSON_COLUMNS = "id, tenant_id, created_at, updated_at, last_login_at, protected_identity";
 const IDENTITY_COLUMNS =
   "id, tenant_id, person_id, login_method_id, subject, attributes, pin_index, created_at, updated_at, last_login_at";
+
+interface PersonSummaryRow {
+  id: string;
+  created_at: Date;
+  last_login_at: Date | null;
+  protected_identity: boolean;
+  name: string | null;
+  email: string | null;
+}
+
+/** A person as the admin search lists it: the latest name and email of any identity. */
+export interface PersonSummary {
+  readonly id: string;
+  readonly createdAt: Date;
+  readonly lastLoginAt: Date | null;
+  readonly protectedIdentity: boolean;
+  /** `null` for a protected identity (no name is stored) or when no upstream sent one. */
+  readonly displayName: string | null;
+  readonly email: string | null;
+}
+
+const SELECT_SUMMARY = `
+  SELECT p.id, p.created_at, p.last_login_at, p.protected_identity, latest.name, latest.email
+    FROM persons p
+    LEFT JOIN LATERAL (
+      SELECT i.attributes ->> 'name' AS name, i.attributes ->> 'email' AS email
+        FROM identities i
+       WHERE i.tenant_id = p.tenant_id AND i.person_id = p.id
+         AND (i.attributes ? 'name' OR i.attributes ? 'email')
+       ORDER BY i.last_login_at DESC, i.id
+       LIMIT 1
+    ) latest ON true`;
+
+const toSummary = (row: PersonSummaryRow): PersonSummary => ({
+  id: row.id,
+  createdAt: row.created_at,
+  lastLoginAt: row.last_login_at,
+  protectedIdentity: row.protected_identity,
+  displayName: row.protected_identity ? null : row.name,
+  email: row.protected_identity ? null : row.email,
+});
 
 /** AAD context binding an encrypted personal identity number to its identity. */
 export const identityPinContext = (identityId: string): string => `identity:${identityId}:pin`;
@@ -282,8 +325,13 @@ export class PersonRepository {
         : [data.subject];
 
     return this.#db.transaction(async (tx) => {
-      const [method] = await tx.query<{ link_by_pin: boolean; asserted_acr: string }>(
-        "SELECT link_by_pin, asserted_acr FROM login_methods WHERE tenant_id = $1 AND id = $2",
+      const [method] = await tx.query<{
+        link_by_pin: boolean;
+        asserted_acr: string;
+        trust_pin_for_representation: boolean;
+      }>(
+        `SELECT link_by_pin, asserted_acr, trust_pin_for_representation
+           FROM login_methods WHERE tenant_id = $1 AND id = $2`,
         [tenantId, data.loginMethodId],
       );
       if (method === undefined) throw new InvalidReferenceError("Login method not in tenant");
@@ -404,8 +452,109 @@ export class PersonRepository {
           ]),
         );
       }
-      return { person: toPerson(personRow), identity: toIdentity(identity), created, linked };
+      // Assignments made before this person signed in (admin API) become theirs now.
+      const resolved = await resolvePending(tx, tenantId, {
+        personId: personRow.id,
+        loginMethodId: data.loginMethodId,
+        subjects: subjectCandidates,
+        trustedPinIndexes:
+          pin !== null && method.trust_pin_for_representation ? pin.candidates : [],
+      });
+      return {
+        person: toPerson(personRow),
+        identity: toIdentity(identity),
+        created,
+        linked,
+        resolved,
+      };
     });
+  }
+
+  /**
+   * Administration: persons of the tenant whose latest known name or email (of any identity)
+   * starts with `query`, or has a word starting with it, case-insensitively. Protected persons
+   * keep no name or email, so they are only found by personal identity number
+   * ({@link findByPin}). Personal data: never log the query or the result.
+   */
+  async search(tenantId: string, query: string, limit = 25): Promise<PersonSummary[]> {
+    requireUuids({ tenantId });
+    const needle = query
+      .trim()
+      .toLowerCase()
+      .replace(/[!%_]/g, (char) => `!${char}`);
+    if (needle.length === 0) return [];
+    const rows = await this.#db.query<PersonSummaryRow>(
+      `${SELECT_SUMMARY}
+        WHERE p.tenant_id = $1 AND p.id IN (
+          SELECT i.person_id FROM identities i
+           WHERE i.tenant_id = $1
+             AND (lower(i.attributes ->> 'name') LIKE $2 || '%' ESCAPE '!'
+                  OR lower(i.attributes ->> 'email') LIKE $2 || '%' ESCAPE '!'
+                  OR lower(i.attributes ->> 'name') LIKE '% ' || $2 || '%' ESCAPE '!'))
+        ORDER BY latest.name NULLS LAST, p.id
+        LIMIT $3`,
+      [tenantId, needle, Math.min(Math.max(limit, 1), 100)],
+    );
+    return rows.map(toSummary);
+  }
+
+  /**
+   * Administration: the persons of the tenant with an identity carrying this personal identity
+   * number (blind index under every master key). Never log the number.
+   */
+  async findByPin(tenantId: string, pin: string): Promise<PersonSummary[]> {
+    requireUuids({ tenantId });
+    const canonical = personnummerSchema.safeParse(pin);
+    if (!canonical.success) return [];
+    const rows = await this.#db.query<PersonSummaryRow>(
+      `${SELECT_SUMMARY}
+        WHERE p.tenant_id = $1 AND p.id IN (
+          SELECT i.person_id FROM identities i
+           WHERE i.tenant_id = $1 AND i.pin_index = ANY ($2::text[]))
+        ORDER BY p.created_at, p.id`,
+      [tenantId, this.#keys.index.candidates("pin", canonical.data)],
+    );
+    return rows.map(toSummary);
+  }
+
+  /** Administration: the summary (latest name and email) of one person. */
+  async summary(tenantId: string, personId: string): Promise<PersonSummary | null> {
+    requireUuids({ tenantId, personId });
+    const [row] = await this.#db.query<PersonSummaryRow>(
+      `${SELECT_SUMMARY} WHERE p.tenant_id = $1 AND p.id = $2`,
+      [tenantId, personId],
+    );
+    return row === undefined ? null : toSummary(row);
+  }
+
+  /**
+   * The persons of the tenant with an identity for (login method, upstream subject), or whose
+   * identity through a method trusted for personal identity numbers carries this number: who a
+   * new pending assignment would resolve to right away.
+   */
+  async matchPendingTarget(
+    tenantId: string,
+    target: { readonly loginMethodId: string; readonly subject: string } | { readonly pin: string },
+  ): Promise<string[]> {
+    requireUuids({ tenantId });
+    if ("pin" in target) {
+      const rows = await this.#db.query<{ person_id: string }>(
+        `SELECT DISTINCT i.person_id FROM identities i
+           JOIN login_methods lm ON lm.tenant_id = i.tenant_id AND lm.id = i.login_method_id
+          WHERE i.tenant_id = $1 AND i.pin_index = ANY ($2::text[])
+            AND lm.trust_pin_for_representation
+          ORDER BY i.person_id`,
+        [tenantId, this.#keys.index.candidates("pin", target.pin)],
+      );
+      return rows.map((row) => row.person_id);
+    }
+    requireUuids({ loginMethodId: target.loginMethodId });
+    const rows = await this.#db.query<{ person_id: string }>(
+      `SELECT person_id FROM identities
+        WHERE tenant_id = $1 AND login_method_id = $2 AND subject = $3`,
+      [tenantId, target.loginMethodId, target.subject],
+    );
+    return rows.map((row) => row.person_id);
   }
 
   /**
@@ -417,6 +566,32 @@ export class PersonRepository {
     requireUuids({ tenantId, personId });
     const rows = await this.#db.query(
       `UPDATE persons SET protected_identity = false WHERE tenant_id = $1 AND id = $2 RETURNING id`,
+      [tenantId, personId],
+    );
+    return rows.length > 0;
+  }
+
+  /**
+   * Administration: removes one identity of a person (the person keeps their other identities,
+   * assignments and grants). Returns false when the person has no such identity.
+   */
+  async deleteIdentity(tenantId: string, personId: string, identityId: string): Promise<boolean> {
+    requireUuids({ tenantId, personId, identityId });
+    const rows = await this.#db.query(
+      "DELETE FROM identities WHERE tenant_id = $1 AND person_id = $2 AND id = $3 RETURNING id",
+      [tenantId, personId, identityId],
+    );
+    return rows.length > 0;
+  }
+
+  /**
+   * Administration: deletes a person with their identities, role and attribute assignments and
+   * the representation grants made out to them (cascades). Returns false for an unknown person.
+   */
+  async delete(tenantId: string, personId: string): Promise<boolean> {
+    requireUuids({ tenantId, personId });
+    const rows = await this.#db.query(
+      "DELETE FROM persons WHERE tenant_id = $1 AND id = $2 RETURNING id",
       [tenantId, personId],
     );
     return rows.length > 0;

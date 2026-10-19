@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ResolvedPendingAssignment } from "./access.js";
 import { personnummerSchema } from "./personnummer.js";
 
 /**
@@ -82,4 +83,6 @@ export interface JitLoginResult {
   readonly created: boolean;
   /** True when this first login linked the identity to an existing person by pin. */
   readonly linked: boolean;
+  /** Pending assignments (admin API) this login turned into assignments of the person. */
+  readonly resolved: readonly ResolvedPendingAssignment[];
 }

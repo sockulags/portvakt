@@ -1,0 +1,461 @@
+/* Layout of the admin portal. Visual language (colours, type, radii, motion) comes from the
+   design system's tokens; components come from @portvakt/design-system. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+}
+
+.pv-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.pv-brand {
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.pv-muted {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.pv-error {
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
+/* Gate: sign in, no access, errors before the portal loads */
+
+.pv-gate {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--space-4);
+}
+
+.pv-gate-bar {
+  width: 100%;
+  max-width: 32rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-block: var(--space-2) var(--space-8);
+}
+
+.pv-gate-main {
+  width: 100%;
+  max-width: 32rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.pv-gate-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-3xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+.pv-gate-text {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+/* Portal frame */
+
+.pv-portal [data-ds="sidebar"] {
+  min-width: 0;
+}
+
+.pv-switcher {
+  display: block;
+  width: 100%;
+}
+
+.pv-tenant-name {
+  display: block;
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.pv-user {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.pv-user-name {
+  flex: 1 1 8rem;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pv-drawer {
+  position: fixed;
+  z-index: 40;
+  inset: 56px 0 0 0;
+  display: flex;
+  background: color-mix(in oklab, var(--color-bg) 60%, transparent);
+}
+
+.pv-drawer [data-ds="sidebar"] {
+  width: min(85vw, 300px);
+  height: 100%;
+  box-shadow: var(--shadow-lg);
+}
+
+.pv-content {
+  width: 100%;
+  max-width: 76rem;
+  margin-inline: auto;
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.pv-portal[data-narrow] .pv-content {
+  padding: var(--space-4);
+  gap: var(--space-4);
+}
+
+.pv-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  color: var(--color-text-muted);
+}
+
+/* Overview */
+
+.pv-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr));
+  gap: var(--space-4);
+}
+
+.pv-stats > div {
+  min-width: 0;
+  /* Long Swedish compounds (Inloggningsmetoder) wrap inside narrow cards. */
+  hyphens: auto;
+  overflow-wrap: anywhere;
+}
+
+.pv-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.pv-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.pv-section-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.pv-warnings,
+.pv-plain-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pv-warning {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+}
+
+.pv-warning-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pv-card {
+  padding: var(--space-4);
+  min-width: 0;
+}
+
+.pv-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 18rem), 1fr));
+  gap: var(--space-4);
+}
+
+.pv-card-title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+/* Tables and lists */
+
+.pv-cell-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* Names stay readable when a wide table scrolls on a phone. */
+  min-width: 8rem;
+  overflow-wrap: anywhere;
+}
+
+.pv-row-actions,
+.pv-header-actions,
+.pv-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.pv-badges {
+  justify-content: flex-start;
+}
+
+.pv-link,
+.pv-link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-primary);
+  font: inherit;
+  font-weight: var(--weight-medium);
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.pv-link:focus-visible,
+.pv-link-button:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--radius-xs);
+}
+
+.pv-code,
+.pv-code-inline {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.pv-code {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-thin) solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-sunken);
+}
+
+.pv-details {
+  display: block;
+  max-width: 28rem;
+  color: var(--color-text-muted);
+}
+
+/* Forms */
+
+.pv-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.pv-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.pv-inline-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  gap: var(--space-3);
+}
+
+.pv-fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.pv-fieldset > p {
+  width: 100%;
+  margin: 0;
+}
+
+.pv-legend {
+  width: 100%;
+  margin-bottom: var(--space-1);
+  padding: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.pv-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.pv-search > label {
+  flex: 1 1 18rem;
+}
+
+.pv-search > button {
+  margin-top: 1.6rem;
+}
+
+.pv-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 11rem), 1fr));
+  align-items: end;
+  gap: var(--space-3);
+}
+
+.pv-filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.pv-copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.pv-copy-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.pv-copy-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.pv-notice,
+.pv-alerts {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.pv-notice > [data-ds="alert"],
+.pv-alerts > [data-ds="alert"] {
+  width: 100%;
+}
+
+/* Modal: the design system's dialog stage, fixed over the page */
+
+.pv-modal {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  overflow-y: auto;
+}
+
+.pv-modal > div {
+  min-height: 100%;
+  border-radius: 0;
+  background: transparent;
+}
+
+.pv-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.pv-dialog-text {
+  margin: 0 0 var(--space-3);
+}
+
+@media (max-width: 767px) {
+  .pv-content {
+    max-width: 100%;
+  }
+
+  .pv-search > button {
+    margin-top: 0;
+  }
+}
+
+.pv-break {
+  display: inline-block;
+  min-width: 9rem;
+  overflow-wrap: anywhere;
+}

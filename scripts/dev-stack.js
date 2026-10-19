@@ -5,7 +5,8 @@
  * 1. Postgres (`npm run db:up`) and migrations;
  * 2. the login UI and the demo SPA builds (when missing, or always with `--build`);
  * 3. the mock IdP on :4500, then the dev seed (it fetches SAML metadata from the mock);
- * 4. Portvakt on :3000, then the demo service as Service A on :3100 and Service B on :3200.
+ * 4. Portvakt on :3000, then the demo service as Service A on :3100 and Service B on :3200, and
+ *    the admin portal on :3400 (/t/system/: erik-admin, platform admin; /t/demo/: anna-handlaggare).
  *
  * Ctrl+C stops every process it started (the database keeps running: `npm run db:down`).
  * Without a root .env the values of .env.example are used.
@@ -27,9 +28,10 @@ const npmCli = process.env.npm_execpath;
 const npmDirect = npmCli !== undefined && /.c?js$/.test(npmCli) && existsSync(npmCli);
 const forceBuild = process.argv.includes("--build");
 
-const PORTS = { server: 3000, mockIdp: 4500, serviceA: 3100, serviceB: 3200 };
+const PORTS = { server: 3000, mockIdp: 4500, serviceA: 3100, serviceB: 3200, admin: 3400 };
 const PORTVAKT_URL = `http://localhost:${PORTS.server}`;
 const MOCK_IDP_URL = `http://localhost:${PORTS.mockIdp}`;
+const ADMIN_URL = `http://localhost:${PORTS.admin}`;
 
 /** The environment every child starts from: ours, plus .env.example when there is no .env. */
 function baseEnvironment() {
@@ -47,6 +49,7 @@ function baseEnvironment() {
       "DEMO_SERVICE_A_CLIENT_SECRET",
       "DEMO_SERVICE_B_CLIENT_SECRET",
       "DEMO_SERVICE_C_CLIENT_SECRET",
+      "ADMIN_CLIENT_SECRET",
     ]) {
       const value = local[key];
       if (env[key] === undefined && value !== undefined && value !== "") env[key] = value;
@@ -62,6 +65,7 @@ const secrets = {
   // The Java demo (examples/demo-service-java, Tjänst C on :3300) is not started here; the seed
   // registers service-c with this secret, its development default.
   c: env.DEMO_SERVICE_C_CLIENT_SECRET ?? "dev-only-service-c-client-secret-0123456789",
+  admin: env.ADMIN_CLIENT_SECRET ?? "dev-only-admin-client-secret-0123456789abcdef",
 };
 
 /** @type {Map<string, import("node:child_process").ChildProcess>} */
@@ -203,6 +207,9 @@ async function main() {
   if (forceBuild || !existsSync(join(root, "examples/demo-service/dist/web/index.html"))) {
     await step("demo-web", ["run", "build", "-w", "examples/demo-service"]);
   }
+  if (forceBuild || !existsSync(join(root, "apps/admin/dist/web/index.html"))) {
+    await step("admin-web", ["run", "build", "-w", "apps/admin"]);
+  }
 
   service("mock-idp", ["run", "start", "-w", "apps/mock-idp"], {
     ...env,
@@ -219,6 +226,8 @@ async function main() {
     DEMO_SERVICE_A_CLIENT_SECRET: secrets.a,
     DEMO_SERVICE_B_CLIENT_SECRET: secrets.b,
     DEMO_SERVICE_C_CLIENT_SECRET: secrets.c,
+    ADMIN_PUBLIC_URL: ADMIN_URL,
+    ADMIN_CLIENT_SECRET: secrets.admin,
   });
 
   service("portvakt", ["run", "start", "-w", "apps/server"], {
@@ -232,6 +241,15 @@ async function main() {
   service("service-b", ["run", "start", "-w", "examples/demo-service"], demoEnvironment("B"));
   await waitFor("service-a", `http://localhost:${PORTS.serviceA}/healthz`);
   await waitFor("service-b", `http://localhost:${PORTS.serviceB}/healthz`);
+  service("admin", ["run", "start", "-w", "apps/admin"], {
+    ...env,
+    NODE_ENV: "development",
+    ADMIN_PORT: String(PORTS.admin),
+    ADMIN_PUBLIC_URL: ADMIN_URL,
+    PORTVAKT_PUBLIC_URL: PORTVAKT_URL,
+    ADMIN_CLIENT_SECRET: secrets.admin,
+  });
+  await waitFor("admin", `${ADMIN_URL}/healthz`);
 
   console.log(
     [
@@ -241,6 +259,7 @@ async function main() {
       `  Mock IdP     ${MOCK_IDP_URL}`,
       `  Tjänst A     http://localhost:${PORTS.serviceA}`,
       `  Tjänst B     http://localhost:${PORTS.serviceB} (disabled in the tenant until enabled)`,
+      `  Admin        ${ADMIN_URL}/t/system/ (erik-admin) and ${ADMIN_URL}/t/demo/ (anna-handlaggare)`,
       "  Ctrl+C stops everything (the database keeps running).",
       "",
     ].join("\n"),
