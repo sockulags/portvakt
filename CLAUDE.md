@@ -9,19 +9,21 @@ there are not reopened during delivery.
 
 ## Layout
 
-| Path                     | Contents                                                          |
-| ------------------------ | ----------------------------------------------------------------- |
-| `apps/server`            | Broker (Express 5); `createApp()` in `src/app.ts`                 |
-| `apps/login`             | Login/interaction SPA (Vite + React 19), served by the server     |
-| `apps/admin`             | Admin portal SPA (Vite + React 19)                                |
-| `apps/mock-idp`          | Dev/test upstream IdPs: OIDC `/entra`, `/bankid`; SAML `/saml/*`  |
-| `packages/sdk-node`      | `@portvakt/sdk-node`: BFF, access token validation, s2s tokens    |
-| `packages/design-system` | Delivered design system; source in `src/` kept as delivered       |
-| `packages/fonts`         | Self-hosted design-system fonts (`@portvakt/fonts/fonts.css`)     |
-| `examples/demo-service`  | Demo service (Express + SDK, React SPA in `web/`), run as A and B |
-| `e2e`                    | Playwright suite                                                  |
-| `deploy`                 | `docker-compose.dev.yml` (dev/test Postgres), later images/Helm   |
-| `docs`                   | Plan, claims contract (`claims.md`); architecture later           |
+| Path                         | Contents                                                            |
+| ---------------------------- | ------------------------------------------------------------------- |
+| `apps/server`                | Broker (Express 5); `createApp()` in `src/app.ts`                   |
+| `apps/login`                 | Login/interaction SPA (Vite + React 19), served by the server       |
+| `apps/admin`                 | Admin portal SPA (Vite + React 19)                                  |
+| `apps/mock-idp`              | Dev/test upstream IdPs: OIDC `/entra`, `/bankid`; SAML `/saml/*`    |
+| `packages/sdk-node`          | `@portvakt/sdk-node`: BFF, access token validation, s2s tokens      |
+| `packages/design-system`     | Delivered design system; source in `src/` kept as delivered         |
+| `packages/fonts`             | Self-hosted design-system fonts (`@portvakt/fonts/fonts.css`)       |
+| `examples/demo-service`      | Demo service (Express + SDK, React SPA in `web/`), run as A and B   |
+| `sdk-java`                   | Java SDK (Maven, Java 21): `portvakt-sdk-core`, Spring Boot starter |
+| `examples/demo-service-java` | Java demo "Tjänst C" (Spring Boot + starter, Thymeleaf), :3300      |
+| `e2e`                        | Playwright suite                                                    |
+| `deploy`                     | `docker-compose.dev.yml` (dev/test Postgres), later images/Helm     |
+| `docs`                       | Plan, claims contract (`claims.md`); architecture later             |
 
 Shared config at the root: `tsconfig.base.json` (strict), `tsconfig.node.json` (NodeNext, Node
 packages), `tsconfig.vite.json` (Bundler resolution, Vite apps), `eslint.config.js`,
@@ -50,12 +52,15 @@ npm run dev:stack                      # whole local stack (below); Ctrl+C stops
 npm run seed:dev -w apps/server        # demo tenant (idempotent); needs the mock IdP running
 npm run build -w examples/demo-service # demo SPA into examples/demo-service/dist/web
 npm run build -w packages/sdk-node     # SDK into packages/sdk-node/dist (JS + .d.ts)
+npm run test:java      # Java SDK and Java demo: mvn verify in Docker against a real Portvakt
 ```
 
 Local stack (`npm run dev:stack`, `scripts/dev-stack.js`, plain Node, works on Windows): db:up,
 migrate, the login UI and demo SPA builds when missing (`npm run dev:stack -- --build` forces
 them), the mock IdP (:4500), `seed:dev`, Portvakt (:3000), the demo as Tjänst A (:3100,
-`service-a`, enabled) and Tjänst B (:3200, `service-b`, attached but disabled). Without a root
+`service-a`, enabled) and Tjänst B (:3200, `service-b`, attached but disabled). The seed also
+registers `service-c` (Tjänst C, the Java demo on :3300, enabled), which dev:stack does not
+start (see "Java SDK" below). Without a root
 `.env` it uses the values of `.env.example`. The demo tenant's issuer is
 `http://localhost:3000/t/demo`. Its login methods: Mock Entra (employees, home realm
 `kommun.example`, groups to roles), Mock BankID OIDC (loa3) and Mock BankID hög OIDC (loa4, the
@@ -164,6 +169,58 @@ dependency would only wrap.
 Integration tests (`integration.test.ts`, the demo's `smoke.test.ts`) run an in-process Portvakt
 and mock IdP through `@portvakt/server/testing` (the server package's only export). The dev seed
 lives in `apps/server/src/dev` (`seed.ts`, `seed-cli.ts`).
+
+## Java SDK (`sdk-java`, `examples/demo-service-java`)
+
+Maven multi-module (Java 21, groupId `se.portvakt`, 1.0.0-SNAPSHOT). The reactor is
+`sdk-java/pom.xml`; it includes `../examples/demo-service-java`. Spring Boot 4.1 (Spring
+Framework 7, Spring Security 7.1, Jackson 3 `tools.jackson`, JUnit 6 from Boot's BOM); Boot 3.5 is
+not supported. Versions are pinned in the parent POM (the Spring Boot BOM is imported for
+dependency versions only; Nimbus pinned to the version Spring Security declares; every plugin
+pinned) and the Maven Enforcer checks the Maven and Java versions, pinned
+plugins, no SNAPSHOT dependencies, upper bounds and convergence. Same behaviour as the
+TypeScript SDK; `sdk-java/README.md` is the user documentation.
+
+| Module                         | Contents                                                                    |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| `portvakt-sdk-core`            | `PortvaktConfig` (builder, validation), `PortvaktClient`, discovery, JWKS   |
+|                                | cache, `PortvaktTokenVerifier` (Nimbus), `PortvaktPrincipal`, `AcrRanking`, |
+|                                | `ClientCredentialsTokenProvider`, typed exceptions (RFC 6750 codes)         |
+| `portvakt-spring-boot-starter` | `PortvaktAutoConfiguration`, `PortvaktProperties` (`portvakt.*`), `login/`  |
+|                                | (oauth2Login wiring, token store: memory/JDBC), `resource/` (JwtDecoder,    |
+|                                | converter enforcing the defaults, RFC 6750),                                |
+|                                | `web/` (`@RequireAcr` interceptor, exception resolver), `PortvaktSecurity`  |
+| `examples/demo-service-java`   | Demo pages, `/api/whoami`, and `it/DemoServiceIT` (failsafe) with           |
+|                                | `TestBrowser` and `FlowDriver`, Java ports of the TypeScript test helpers   |
+
+Build and test only in Docker (no local JDK). `npm run test:java` (`scripts/test-java.js`):
+db:up, a fresh database `portvakt_java_test`, migrations, the login UI build when missing, the
+mock IdP on :4900, `seed:dev` (with `SEED_ISOLATION_TENANT=demo-isolation` and service-d with
+private_key_jwt, a key made for the run: `DEMO_SERVICE_D_PUBLIC_JWK`), Portvakt on :3900,
+then `mvn verify` in `maven:3.9-eclipse-temurin-21` (the named volume `portvakt-m2` holds
+~/.m2, or the host directory `PORTVAKT_M2_DIR`, as in CI), then it stops what it started.
+`--build` rebuilds the login UI, `--keep` leaves Portvakt and the mock running, every other
+argument goes to Maven (`npm run test:java -- -pl portvakt-sdk-core`). Unit tests alone:
+
+```sh
+docker run --rm -v "<repo>:/workspace" -v portvakt-m2:/root/.m2 -w /workspace/sdk-java \
+  maven:3.9-eclipse-temurin-21 mvn -B -ntp verify
+```
+
+The integration tests (the demo's `DemoServiceIT`, the starter's `JdbcTokenStoreIT` against the
+stack's Postgres) skip without `portvakt.it.issuer` / `portvakt.it.jdbc-url`; with
+`portvakt.it.required=true` (the orchestrator) they fail instead. To run the Java demo by hand against `npm run dev:stack`
+(Portvakt :3000, mock :4500), open http://localhost:3300 after:
+
+```sh
+docker run --rm -p 3300:3300 -v "<repo>:/workspace" -v portvakt-m2:/root/.m2 \
+  -w /workspace/sdk-java maven:3.9-eclipse-temurin-21 sh -c "java \
+  /workspace/scripts/java-test/PortForward.java host.docker.internal 3000 4500 & \
+  mvn -B -ntp -q -DskipTests package && java -jar \
+  ../examples/demo-service-java/target/portvakt-demo-service-java-1.0.0-SNAPSHOT.jar"
+```
+
+(on Linux add `--add-host=host.docker.internal:host-gateway`).
 
 ## Conventions
 
@@ -583,6 +640,61 @@ packages/sdk-node` emits `dist/` with declarations. Publishing (exports pointing
   every store operation inside the lock on that connection (AsyncLocalStorage), never a second
   one: lock holders waiting for more connections would deadlock a small pool. Writes inside the
   lock are committed even when the locked function throws.
+- Java builds run in Docker only. In Git Bash prefix `docker run` with `MSYS_NO_PATHCONV=1` (or
+  use PowerShell); `scripts/test-java.js` spawns docker without a shell.
+- Java integration test networking: Portvakt and the mock IdP run on the host and must have the
+  same URL in the container (issuer pinning, redirects, SAML endpoints), so both sides use
+  `http://localhost:3900` and `:4900` (and Postgres `localhost:5433` for the JDBC store tests). In the container `scripts/java-test/PortForward.java`
+  forwards those localhost ports to `host.docker.internal` (built into Docker Desktop;
+  `--add-host=host.docker.internal:host-gateway` on Linux). The host never uses
+  `host.docker.internal`: Docker Desktop writes a LAN address into the Windows hosts file that
+  goes stale when the network changes (seen here), and its host networking is opt-in. The Java
+  demo runs inside the container on localhost:3300, the redirect URI of `service-c`.
+- The Java demo's failsafe runs against `target/classes` (`classesDirectory`): the Spring Boot
+  repackaged jar hides the classes ("Failed to find merged annotation for @BootstrapWith").
+- Starter: `DefaultOidcUser.getClaims()` calls `getAttributes()`; overriding `getAttributes()`
+  to return the claims recurses forever.
+- Starter: tokens and pending logins never live in the HTTP session. A Spring Session snapshot
+  written back by a concurrent request would bring an old refresh token back (a replay, and
+  Portvakt revokes the grant), and a lock alone cannot prevent that. The session holds the grant
+  id (`PortvaktSessionState`, kept across `changeSessionId`); `PortvaktTokenStore` holds the
+  tokens; `PortvaktAuthorizedClientManager` checks, refreshes and writes inside the store's
+  exclusive update (JDBC: one transaction with `SELECT ... FOR UPDATE`). Spring's
+  `DefaultOAuth2AuthorizedClientManager` is not used: its repository write happens outside any
+  lock. Keep `changeSessionId`; the login callback's grant id travels to the success handler as a
+  request attribute.
+- Starter: the step-up's `acr_not_met` comes from `PortvaktLoginAuthenticationManager`, which
+  wraps the callback filter's AuthenticationManager (an ObjectPostProcessor), so it fails before
+  Spring stores the new context or authorized client. An extra AuthenticationProvider cannot do
+  it: ProviderManager would try the next provider, which redeems the code again (a replay, and
+  Portvakt revokes the grant).
+- Starter: Spring's token response clients read the OAuth error body of a 400 only; Portvakt
+  answers `invalid_client` with 401 (`PortvaktTokenEndpointErrors` reads both). Requests to the
+  token endpoint have one deadline for the whole request (`DeadlineInterceptor`), as the core's
+  `Http` (`sendAsync` with a bounded body subscriber).
+- Starter: the resource server's defaults (`allow-service`, `allow-representation`) are enforced
+  by `PortvaktJwtAuthenticationConverter`: a refused token is unauthenticated with no authorities
+  (`restriction()`), so app-defined `authenticated()` rules refuse it; only
+  `portvakt.accessToken(r -> ...)` can relax them.
+- Starter: the idle timeout is the starter's (`lastSeenAt`, touched by protected requests and
+  `getAccessToken`, at most once a minute), not the servlet timeout (set just above it).
+- Starter: `OAuth2AuthorizationRequest.Builder.from(...)` copies the built authorization URI, so
+  parameters added afterwards are lost; `PortvaktAuthorizationRequestResolver` adds `acr_values`,
+  `prompt` and `login_hint` through the delegate's request customizer.
+- Starter filters (`PortvaktSessionExpiryFilter`, `PortvaktSessionInfoFilter`) are created by
+  the configurer, never as beans: Spring Boot would also register a Filter bean in the servlet
+  container, outside the security chain.
+- Boot 4 moved the security auto-configurations to `org.springframework.boot.security.*` (the
+  filter chain order constant is `SecurityFilterProperties.BASIC_AUTH_ORDER`) and MockMvc's
+  annotation to `org.springframework.boot.webmvc.test.autoconfigure`. The starter's ordering uses
+  class literals plus `afterName` for the optional `DataSourceAutoConfiguration`;
+  `PortvaktAutoConfigurationTest` checks every name resolves (a wrong name is silently ignored).
+  A `SpringApplicationBuilder.properties(...)` value loses against `application.yml`; tests that
+  start a second demo instance pass command-line arguments.
+- Java `safeReturnTo` resolves `%2e` as a dot segment (browsers do), so `/%2e//evil` is refused.
+- Windows Python writes CRLF in text mode; edit repo files with `newline=""` (the repo is LF,
+  `.gitattributes` has `eol=lf`, and prettier checks it).
 - BFF step-up and representation switches refuse cross-site starts (`Sec-Fetch-Site` same-origin
-  or none, else a same-origin Referer or the session's `csrf` token). Tests driving them with
+  or none, else a same-origin Referer or the session's `csrf` token); so do logins with `acr` or
+  `prompt`, and any login while a session exists (both SDKs). Tests driving them with
   Node's fetch send `sec-fetch-site: same-origin` explicitly.

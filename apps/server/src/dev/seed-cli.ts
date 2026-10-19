@@ -11,9 +11,16 @@ import { seedDev, type SeedService } from "./seed.js";
  * from it). Environment, besides the server's own:
  *
  * - MOCK_IDP_PUBLIC_URL (default http://localhost:4500);
- * - DEMO_SERVICE_A_URL / DEMO_SERVICE_B_URL (default http://localhost:3100 / :3200);
- * - DEMO_SERVICE_A_CLIENT_SECRET / DEMO_SERVICE_B_CLIENT_SECRET: set (or reset) the client
- *   secrets; without them a new application gets a generated secret, printed once;
+ * - DEMO_SERVICE_A_URL / DEMO_SERVICE_B_URL / DEMO_SERVICE_C_URL (default
+ *   http://localhost:3100 / :3200 / :3300; C is the Java demo of sdk-java);
+ * - DEMO_SERVICE_A_CLIENT_SECRET / DEMO_SERVICE_B_CLIENT_SECRET / DEMO_SERVICE_C_CLIENT_SECRET:
+ *   set (or reset) the client secrets; without them a new application gets a generated secret,
+ *   printed once;
+ * - DEMO_SERVICE_D_PUBLIC_JWK (a public JWK, JSON) and DEMO_SERVICE_D_URL (default
+ *   http://localhost:3301): service-d, the Java demo with private_key_jwt, for the Java
+ *   integration tests (npm run test:java); off when unset;
+ * - SEED_ISOLATION_TENANT: the slug of a second tenant (no login methods) where service-c is
+ *   enabled too, for issuer pinning tests (npm run test:java); off when unset;
  * - MOCK_IDP_ENTRA_CLIENT_SECRET / MOCK_IDP_BANKID_CLIENT_SECRET: the mock's `portvakt-dev`
  *   client secrets (defaults as in .env.example).
  */
@@ -48,7 +55,25 @@ async function main(): Promise<void> {
       secret: optional("DEMO_SERVICE_B_CLIENT_SECRET"),
       enabled: false,
     },
+    {
+      clientId: "service-c",
+      name: "Tjänst C",
+      url: value("DEMO_SERVICE_C_URL", "http://localhost:3300").replace(/\/+$/, ""),
+      secret: optional("DEMO_SERVICE_C_CLIENT_SECRET"),
+      enabled: true,
+    },
   ];
+  const serviceDJwk = optional("DEMO_SERVICE_D_PUBLIC_JWK");
+  if (serviceDJwk !== undefined) {
+    services.push({
+      clientId: "service-d",
+      name: "Tjänst D",
+      url: value("DEMO_SERVICE_D_URL", "http://localhost:3301").replace(/\/+$/, ""),
+      jwks: { keys: [JSON.parse(serviceDJwk) as { kty: string }] },
+      enabled: true,
+    });
+  }
+  const isolationSlug = optional("SEED_ISOLATION_TENANT");
 
   const pool = createPool({
     url: config.database.url,
@@ -72,6 +97,15 @@ async function main(): Promise<void> {
         clientId: "portvakt-dev",
         secret: value("MOCK_IDP_BANKID_CLIENT_SECRET", "dev-only-bankid-client-secret"),
       },
+      ...(isolationSlug === undefined
+        ? {}
+        : {
+            isolationTenant: {
+              slug: isolationSlug,
+              name: "Isoleringstest",
+              clientIds: ["service-c"],
+            },
+          }),
     });
     console.log(`demo tenant: ${config.publicUrl}/t/${report.tenant.slug}`);
     for (const change of report.changes) console.log(`  ${change}`);

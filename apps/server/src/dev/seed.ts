@@ -1,5 +1,5 @@
 import { generateClientSecret } from "../crypto/secrets.js";
-import type { Application } from "../domain/application.js";
+import type { Application, ClientJwks } from "../domain/application.js";
 import type {
   CreateLoginMethodInput,
   CreateSamlLoginMethodInput,
@@ -33,12 +33,18 @@ export const SEED_PERSON_PARTY = {
 } as const;
 
 export interface SeedService {
-  readonly clientId: "service-a" | "service-b";
+  /**
+   * service-a and service-b: the TypeScript demo; service-c: the Java demo (sdk-java);
+   * service-d: the Java demo with private_key_jwt (the Java integration tests).
+   */
+  readonly clientId: "service-a" | "service-b" | "service-c" | "service-d";
   readonly name: string;
   /** Origin of the demo instance: redirect URI `{url}/auth/callback`, post-logout `{url}/`. */
   readonly url: string;
   /** Client secret from the environment; generated (and reported once) when absent. */
   readonly secret?: string | undefined;
+  /** private_key_jwt with these public keys instead of a client secret. */
+  readonly jwks?: ClientJwks | undefined;
   /** Enabled in the tenant (Service B stays disabled until e2e scenario 3 enables it). */
   readonly enabled: boolean;
 }
@@ -50,6 +56,16 @@ export interface DevSeedOptions {
   /** The mock IdP's development clients (`portvakt-dev` and its secrets, .env.example). */
   readonly entraClient: { readonly clientId: string; readonly secret: string };
   readonly bankidClient: { readonly clientId: string; readonly secret: string };
+  /**
+   * A second tenant with no login methods, where the listed seeded applications are enabled
+   * too: tokens of this tenant must be refused by the demo tenant's applications (issuer
+   * pinning; the Java SDK's integration tests). Off unless set.
+   */
+  readonly isolationTenant?: {
+    readonly slug: string;
+    readonly name: string;
+    readonly clientIds: readonly SeedService["clientId"][];
+  };
 }
 
 export interface SeedReport {
@@ -292,7 +308,46 @@ export async function seedDev(target: SeedTarget, options: DevSeedOptions): Prom
     }
   }
 
+  if (options.isolationTenant !== undefined) {
+    await seedIsolationTenant(repos, options.isolationTenant, byClientId, changes);
+  }
+
   return { tenant, applications, generatedSecrets, loginMethods: methodIds, changes };
+}
+
+async function seedIsolationTenant(
+  repos: Repositories,
+  isolation: NonNullable<DevSeedOptions["isolationTenant"]>,
+  byClientId: Readonly<Record<string, Application>>,
+  changes: string[],
+): Promise<void> {
+  let tenant = await repos.tenants.findBySlug(isolation.slug);
+  if (tenant === null) {
+    tenant = await repos.tenants.create({ slug: isolation.slug, name: isolation.name });
+    changes.push(`tenant ${isolation.slug} created`);
+  }
+  const attached = await repos.applications.listForTenant(tenant.id);
+  for (const clientId of isolation.clientIds) {
+    const application = byClientId[clientId];
+    if (application === undefined) throw new Error(`isolation tenant: ${clientId} is not seeded`);
+    const entry = attached.find((item) => item.application.id === application.id);
+    if (entry?.enabled !== true) {
+      await repos.applications.enableForTenant(tenant.id, application.id);
+      changes.push(`application ${clientId} enabled in ${isolation.slug}`);
+    }
+  }
+}
+
+/** JSON with sorted keys, to compare stored JWKS regardless of key order. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 async function ensureApplication(
@@ -308,14 +363,29 @@ async function ensureApplication(
   let application = await repos.applications.findByClientId(service.clientId);
   let created = false;
   let generated: string | undefined;
+  const jwks = service.jwks;
   if (application === null) {
-    generated = service.secret === undefined ? generateClientSecret() : undefined;
+    generated =
+      service.secret === undefined && jwks === undefined ? generateClientSecret() : undefined;
     application = await repos.applications.create({
       clientId: service.clientId,
-      clientAuth: { method: "client_secret_basic", clientSecret: service.secret ?? generated! },
+      clientAuth:
+        jwks === undefined
+          ? { method: "client_secret_basic", clientSecret: service.secret ?? generated! }
+          : { method: "private_key_jwt", jwks },
       ...declared,
     });
     created = true;
+  } else if (jwks !== undefined) {
+    const current = application.clientAuth;
+    const same =
+      current.method === "private_key_jwt" &&
+      "jwks" in current &&
+      canonical(current.jwks) === canonical(jwks);
+    application = await repos.applications.update(application.id, {
+      ...declared,
+      ...(same ? {} : { clientAuth: { method: "private_key_jwt", jwks } }),
+    });
   } else {
     const secret = service.secret;
     const secretChanged =

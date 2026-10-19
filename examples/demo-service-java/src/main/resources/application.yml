@@ -1,0 +1,55 @@
+# The Java demo service, "Tjänst C" by default (client service-c of the dev seed, port 3300).
+# Environment variables as for the TypeScript demo: APP_NAME, PORT, PUBLIC_URL, ISSUER,
+# CLIENT_ID, CLIENT_SECRET, COOKIE_NAME, STEP_UP_ACR, OUTAGE_GRACE, IDLE_TIMEOUT. Development
+# defaults; DEMO_PRODUCTION=true refuses the development secret and an http issuer.
+server:
+  port: ${PORT:3300}
+  servlet:
+    session:
+      cookie:
+        # Cookies on localhost ignore ports: every demo instance needs its own name.
+        name: ${COOKIE_NAME:demo_c_session}
+        http-only: true
+        same-site: lax
+        secure: ${COOKIE_SECURE:false}
+
+spring:
+  application:
+    name: demo-service-java
+  main:
+    banner-mode: off
+
+portvakt:
+  issuer: ${ISSUER:http://localhost:3000/t/demo}
+  client-id: ${CLIENT_ID:service-c}
+  client-secret: ${CLIENT_SECRET:dev-only-service-c-client-secret-0123456789}
+  # Local development only: Portvakt on http://localhost.
+  allow-insecure-requests: ${ALLOW_INSECURE_REQUESTS:true}
+  login:
+    enabled: true
+    redirect-uri: ${PUBLIC_URL:http://localhost:3300}/auth/callback
+    post-logout-redirect-uri: ${PUBLIC_URL:http://localhost:3300}/
+    outage-grace: ${OUTAGE_GRACE:0s}
+    idle-timeout: ${IDLE_TIMEOUT:30m}
+    public-paths:
+      - /
+      - /css/**
+      - /healthz
+      - /error
+      - /favicon.ico
+  resource-server:
+    enabled: true
+    # The API answers person tokens and other applications of the tenant alike.
+    allow-service: true
+  client-credentials:
+    enabled: true
+
+demo:
+  app-name: ${APP_NAME:Tjänst C}
+  step-up-acr: ${STEP_UP_ACR:http://id.elegnamnden.se/loa/1.0/loa4}
+  api-url: http://127.0.0.1:${server.port}
+  production: ${DEMO_PRODUCTION:false}
+
+logging:
+  level:
+    se.portvakt: info

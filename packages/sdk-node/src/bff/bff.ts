@@ -395,7 +395,15 @@ class BffEngine {
     if (kind === "step_up" && acr === undefined) {
       throw new LoginFailedError("invalid_request", "acr is required for a step-up");
     }
-    if (kind !== "login") await this.#requireSameSiteInitiation(req, query.data.csrf);
+    // A step-up, a representation switch, and a login that asks for an acr or a prompt, or that
+    // would replace an existing session, must come from the application itself. A plain login
+    // without a session may be started from anywhere (a "sign in" link on another site).
+    const steersOrReplaces =
+      kind !== "login" ||
+      acr !== undefined ||
+      prompt !== undefined ||
+      (await this.#load(req, undefined, false)) !== null;
+    if (steersOrReplaces) await this.#requireSameSiteInitiation(req, query.data.csrf);
     const returnTo = safeReturnTo(query.data.returnTo) ?? this.#options.defaultReturnTo;
     const configuration = await this.#discovery.get();
 

@@ -1,5 +1,8 @@
 node_modules
 dist
+# Maven build output (sdk-java, examples/demo-service-java)
+target
+.m2-cache
 coverage
 playwright-report
 test-results

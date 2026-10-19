@@ -111,9 +111,11 @@ async function harness(
   };
 }
 
-/** A full login through the fake OP; returns where it landed. */
+/** A full login through the fake OP, started from the application's own page. */
 async function login(h: Harness, browser: MiniBrowser, query = "returnTo=%2Fprivate") {
-  const start = await browser.request(`${h.base}/auth/login?${query}`);
+  const start = await browser.request(`${h.base}/auth/login?${query}`, {
+    headers: { "sec-fetch-site": "same-origin" },
+  });
   expect(start.status).toBe(302);
   const authorization = new URL(start.headers.get("location")!);
   expect(authorization.origin + authorization.pathname).toBe(`${op.issuer}/auth`);
@@ -166,7 +168,8 @@ describe("BFF login", () => {
       csrfToken: expect.any(String) as string,
     });
     const text = JSON.stringify(session);
-    expect(text).not.toMatch(/eyJ/);
+    // No JWT (header and payload start with "eyJ"); random base64 may contain "eyJ" by chance.
+    expect(text).not.toMatch(/eyJ[\w-]*\.eyJ/);
     expect(text).not.toContain("refresh");
     const privateRoute = await browser.request(`${h.base}/private`);
     expect(privateRoute.status).toBe(200);
@@ -192,6 +195,7 @@ describe("BFF login", () => {
     const browser = new MiniBrowser();
     const start = await browser.request(
       `${h.base}/auth/login?prompt=login&loginHint=anna%40kommun.example&uiLocales=sv%20en&acr=${encodeURIComponent(LOA3)}`,
+      { headers: { "sec-fetch-site": "same-origin" } },
     );
     const url = new URL(start.headers.get("location")!);
     expect(url.searchParams.get("prompt")).toBe("login");
@@ -276,7 +280,7 @@ describe("BFF login", () => {
       expect(write.key).not.toContain(cookieId);
       expect(write.value.startsWith("v1.")).toBe(true);
       expect(write.value).not.toContain(token);
-      expect(write.value).not.toContain("eyJ");
+      expect(write.value).not.toMatch(/eyJ[\w-]*\.eyJ/);
       expect(write.value).not.toContain("Anna");
     }
   });
@@ -650,8 +654,42 @@ describe("review regressions", () => {
         expect(await status(`${url}&csrf=wrong`, {})).toBe(403);
         expect(await status(`${url}&csrf=${encodeURIComponent(csrfToken)}`, {})).toBe(302);
       }
-      // The plain login may be linked from anywhere.
-      expect((await browser.navigate(`${h.base}/auth/login`, {})).status).toBe(302);
+      // A plain login without a session may be linked from anywhere; with one it may not.
+      expect((await new MiniBrowser().navigate(`${h.base}/auth/login`, {})).status).toBe(302);
+      expect(
+        (await browser.navigate(`${h.base}/auth/login`, { "sec-fetch-site": "cross-site" })).status,
+      ).toBe(403);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("refuses logins with prompt or acr, or over a session, started from another site", async () => {
+    const h = await harness();
+    try {
+      const stranger = new MiniBrowser();
+      const crossSite = { "sec-fetch-site": "cross-site" };
+      const status = async (browser: MiniBrowser, path: string, headers: Record<string, string>) =>
+        (await browser.navigate(`${h.base}${path}`, headers)).status;
+      // Without a session a plain login is fine from anywhere ...
+      expect(await status(stranger, "/auth/login", crossSite)).toBe(302);
+      // ... but not one that asks for the chooser, a prompt or an acr.
+      expect(await status(stranger, "/auth/login?prompt=select_account", crossSite)).toBe(403);
+      expect(await status(stranger, "/auth/login?prompt=login", crossSite)).toBe(403);
+      expect(await status(stranger, `/auth/login?acr=${encodeURIComponent(LOA4)}`, crossSite)).toBe(
+        403,
+      );
+      expect(await status(stranger, "/auth/login?prompt=select_account", {})).toBe(403);
+      expect(
+        await status(stranger, "/auth/login?prompt=select_account", {
+          "sec-fetch-site": "same-origin",
+        }),
+      ).toBe(302);
+      // With a session even a plain login must come from the application itself.
+      const signedIn = new MiniBrowser();
+      await login(h, signedIn);
+      expect(await status(signedIn, "/auth/login", crossSite)).toBe(403);
+      expect(await status(signedIn, "/auth/login", { referer: `${h.base}/page` })).toBe(302);
     } finally {
       await h.close();
     }

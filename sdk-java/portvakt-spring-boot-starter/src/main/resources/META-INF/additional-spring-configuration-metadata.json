@@ -1,0 +1,35 @@
+{
+  "properties": [
+    {
+      "name": "portvakt.scopes",
+      "defaultValue": ["openid", "profile", "email"]
+    },
+    {
+      "name": "portvakt.acr-ranking",
+      "defaultValue": [
+        "http://id.elegnamnden.se/loa/1.0/loa2",
+        "http://id.elegnamnden.se/loa/1.0/loa3",
+        "http://id.elegnamnden.se/loa/1.0/loa4"
+      ]
+    },
+    {
+      "name": "portvakt.login.public-paths",
+      "defaultValue": ["/error"]
+    }
+  ],
+  "hints": [
+    {
+      "name": "portvakt.scopes",
+      "values": [
+        { "value": "openid" },
+        { "value": "profile" },
+        { "value": "email" },
+        {
+          "value": "pin",
+          "description": "Personal identity number (only if the application is allowed it)."
+        },
+        { "value": "hsa", "description": "HSA-id and organisation affiliations (only if allowed)." }
+      ]
+    }
+  ]
+}

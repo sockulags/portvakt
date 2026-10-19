@@ -91,9 +91,11 @@ a GET accepting HTML) to the login or step-up and answer XHR/fetch with 401 JSON
 `{ "error": "login_required", "loginUrl" }` or `{ "error": "step_up_required", "acr", "stepUpUrl" }`.
 
 Step-up and the representation switch replace the session's login, so another site must not be
-able to start them: when the browser sends `Sec-Fetch-Site`, it must be `same-origin` or `none`
-(otherwise 403 `cross_site_request`); without it, a same-origin `Referer` or the session's CSRF
-token as `csrf` query parameter is required. Plain links from your own pages work as they are.
+able to start them; the same holds for `/auth/login` with `acr` or `prompt`, and for any login
+while a session exists. When the browser sends `Sec-Fetch-Site`, it must be `same-origin` or
+`none` (otherwise 403 `cross_site_request`); without it, a same-origin `Referer` or the session's
+CSRF token as `csrf` query parameter is required. Plain links from your own pages work as they
+are, and a plain login without a session may be linked from anywhere.
 A step-up whose login does not reach the requested level answers 403 `acr_not_met` and leaves
 the existing session exactly as it was.
 

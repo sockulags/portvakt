@@ -41,9 +41,13 @@ function baseEnvironment() {
       if (env[key] === undefined && value !== "") env[key] = value;
     }
   } else {
-    // The server scripts read .env themselves; the demo needs its two secrets from it.
+    // The server scripts read .env themselves; the demos need their secrets from it.
     const local = parseEnv(readFileSync(join(root, ".env"), "utf8"));
-    for (const key of ["DEMO_SERVICE_A_CLIENT_SECRET", "DEMO_SERVICE_B_CLIENT_SECRET"]) {
+    for (const key of [
+      "DEMO_SERVICE_A_CLIENT_SECRET",
+      "DEMO_SERVICE_B_CLIENT_SECRET",
+      "DEMO_SERVICE_C_CLIENT_SECRET",
+    ]) {
       const value = local[key];
       if (env[key] === undefined && value !== undefined && value !== "") env[key] = value;
     }
@@ -55,6 +59,9 @@ const env = baseEnvironment();
 const secrets = {
   a: env.DEMO_SERVICE_A_CLIENT_SECRET ?? "dev-only-service-a-client-secret-0123456789",
   b: env.DEMO_SERVICE_B_CLIENT_SECRET ?? "dev-only-service-b-client-secret-0123456789",
+  // The Java demo (examples/demo-service-java, Tjänst C on :3300) is not started here; the seed
+  // registers service-c with this secret, its development default.
+  c: env.DEMO_SERVICE_C_CLIENT_SECRET ?? "dev-only-service-c-client-secret-0123456789",
 };
 
 /** @type {Map<string, import("node:child_process").ChildProcess>} */
@@ -211,6 +218,7 @@ async function main() {
     DEMO_SERVICE_B_URL: `http://localhost:${PORTS.serviceB}`,
     DEMO_SERVICE_A_CLIENT_SECRET: secrets.a,
     DEMO_SERVICE_B_CLIENT_SECRET: secrets.b,
+    DEMO_SERVICE_C_CLIENT_SECRET: secrets.c,
   });
 
   service("portvakt", ["run", "start", "-w", "apps/server"], {

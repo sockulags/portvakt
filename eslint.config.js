@@ -17,6 +17,7 @@ export default tseslint.config(
       "**/node_modules/**",
       "**/dist/**",
       "**/coverage/**",
+      "**/target/**",
       "e2e/test-results/**",
       "e2e/playwright-report/**",
     ],

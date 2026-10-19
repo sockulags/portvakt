@@ -6,6 +6,15 @@ import { startTestServer } from "../testing/test-server.js";
 import { DEMO_TENANT_SLUG, seedDev, type DevSeedOptions } from "./seed.js";
 
 const ts = await startTestServer();
+
+/** A public P-256 JWK (the private part is not needed here). */
+const SERVICE_D_JWK = {
+  kty: "EC",
+  crv: "P-256",
+  kid: "service-d-1",
+  x: "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+  y: "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+};
 const idp = ts === undefined ? undefined : await startTestIdp();
 
 describe("seed:dev CLI", () => {
@@ -39,7 +48,16 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
         enabled: true,
       },
       { clientId: "service-b", name: "Tjänst B", url: "http://localhost:3200", enabled: false },
+      { clientId: "service-c", name: "Tjänst C", url: "http://localhost:3300", enabled: true },
+      {
+        clientId: "service-d",
+        name: "Tjänst D",
+        url: "http://localhost:3301",
+        jwks: { keys: [SERVICE_D_JWK] },
+        enabled: true,
+      },
     ],
+    isolationTenant: { slug: "demo-isolation", name: "Isoleringstest", clientIds: ["service-c"] },
     entraClient: { clientId: "portvakt-dev", secret: "dev-only-entra-client-secret" },
     bankidClient: { clientId: "portvakt-dev", secret: "dev-only-bankid-client-secret" },
   });
@@ -49,7 +67,11 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
     const target = { repos, samlAdmin: ts!.portvakt.samlAdmin };
     const first = await seedDev(target, options());
     expect(first.tenant.slug).toBe(DEMO_TENANT_SLUG);
-    expect(Object.keys(first.generatedSecrets).sort()).toEqual(["service-a", "service-b"]);
+    expect(Object.keys(first.generatedSecrets).sort()).toEqual([
+      "service-a",
+      "service-b",
+      "service-c",
+    ]);
     const tenantId = first.tenant.id;
 
     expect(await repos.applications.findEnabledByClientId(tenantId, "service-a")).not.toBeNull();
@@ -59,7 +81,22 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
     expect(attached.map((entry) => [entry.application.clientId, entry.enabled]).sort()).toEqual([
       ["service-a", true],
       ["service-b", false],
+      ["service-c", true],
+      ["service-d", true],
     ]);
+    // service-d authenticates with private_key_jwt (no generated secret).
+    const serviceD = (await repos.applications.findByClientId("service-d"))!;
+    expect(serviceD.clientAuth.method).toBe("private_key_jwt");
+    // The Java demo (sdk-java) on :3300, enabled in the demo tenant and the isolation tenant.
+    const serviceC = (await repos.applications.findByClientId("service-c"))!;
+    expect(serviceC.redirectUris).toEqual(["http://localhost:3300/auth/callback"]);
+    expect(serviceC.postLogoutRedirectUris).toEqual(["http://localhost:3300/"]);
+    const isolation = (await repos.tenants.findBySlug("demo-isolation"))!;
+    expect(
+      await repos.applications.findEnabledByClientId(isolation.id, "service-c"),
+    ).not.toBeNull();
+    expect(await repos.applications.findEnabledByClientId(isolation.id, "service-a")).toBeNull();
+    expect(await repos.loginMethods.list(isolation.id)).toEqual([]);
     const serviceA = (await repos.applications.findByClientId("service-a"))!;
     expect(serviceA.redirectUris).toEqual(["http://localhost:3100/auth/callback"]);
     expect(serviceA.representationMode).toBe("optional");
@@ -91,7 +128,8 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
     expect((await repos.loginMethods.list(tenantId)).length).toBe(5);
 
     // A configured secret replaces the generated one; B is disabled again by the seed.
-    await repos.applications.enableForTenant(tenantId, attached[1]!.application.id);
+    const serviceB = attached.find((entry) => entry.application.clientId === "service-b")!;
+    await repos.applications.enableForTenant(tenantId, serviceB.application.id);
     const third = await seedDev(target, options("service-a-secret-from-env-0123456789ab"));
     expect(await repos.applications.getClientSecret(serviceA.id)).toBe(
       "service-a-secret-from-env-0123456789ab",

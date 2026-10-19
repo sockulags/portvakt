@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="sv" xmlns:th="http://www.thymeleaf.org">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title th:text="${appName}">Tjänst C</title>
+    <link rel="stylesheet" th:href="@{/css/tokens.css}" />
+    <link rel="stylesheet" th:href="@{/css/demo.css}" />
+  </head>
+  <body>
+    <main class="demo-page">
+      <div class="demo-column">
+        <div th:unless="${signedIn}" data-testid="signed-out-view" class="demo-stack">
+          <header class="demo-header">
+            <div>
+              <h1 class="demo-title" th:text="${appName}">Tjänst C</h1>
+              <p class="demo-text">Välkommen</p>
+            </div>
+          </header>
+          <section class="demo-card">
+            <p class="demo-text">
+              Du är inte inloggad. Logga in med din e-legitimation eller ditt arbetskonto.
+            </p>
+            <div class="demo-actions">
+              <a class="demo-button" data-testid="sign-in" th:href="@{${loginUrl}}">Logga in</a>
+            </div>
+          </section>
+        </div>
+
+        <div th:if="${signedIn}" data-testid="signed-in-view" class="demo-stack">
+          <header class="demo-header">
+            <div>
+              <h1 class="demo-title" th:text="${appName}">Tjänst C</h1>
+              <p class="demo-text">Du är inloggad via Portvakt.</p>
+            </div>
+            <form method="post" th:action="@{${logoutUrl}}">
+              <button
+                type="submit"
+                class="demo-button"
+                data-variant="secondary"
+                data-testid="sign-out"
+              >
+                Logga ut
+              </button>
+            </form>
+          </header>
+
+          <section class="demo-card">
+            <h2 class="demo-heading">Inloggning</h2>
+            <dl class="demo-details">
+              <div class="demo-detail">
+                <dt>Namn</dt>
+                <dd data-testid="user-name" th:text="${userName}">Namn</dd>
+              </div>
+              <div class="demo-detail">
+                <dt>Roller</dt>
+                <dd data-testid="user-roles">
+                  <span th:if="${#lists.isEmpty(roles)}">Inga roller</span>
+                  <span th:unless="${#lists.isEmpty(roles)}" class="demo-badges">
+                    <span th:each="role : ${roles}" class="demo-badge" th:text="${role}">roll</span>
+                  </span>
+                </dd>
+              </div>
+              <div class="demo-detail">
+                <dt>Säkerhetsnivå</dt>
+                <dd data-testid="user-acr">
+                  <span th:title="${acr}" th:text="${acrName}">Tillitsnivå 3</span>
+                </dd>
+              </div>
+              <div class="demo-detail">
+                <dt>Typ av inloggning</dt>
+                <dd data-testid="user-idp-kind" th:text="${idpKind}">Anställd</dd>
+              </div>
+              <div class="demo-detail">
+                <dt>Inloggad</dt>
+                <dd data-testid="user-auth-time" th:text="${authTime}">2026-01-01 08:00:00</dd>
+              </div>
+              <div class="demo-detail">
+                <dt>Sessionen gäller till</dt>
+                <dd data-testid="session-expires" th:text="${sessionExpires}">
+                  2026-01-01 16:00:00
+                </dd>
+              </div>
+              <div class="demo-detail">
+                <dt>Företräder</dt>
+                <dd data-testid="representation" th:text="${representation}">Dig själv</dd>
+              </div>
+            </dl>
+            <div class="demo-actions">
+              <a
+                class="demo-button"
+                data-variant="outline"
+                data-testid="switch-representation"
+                th:href="@{${selectRepresentationUrl}}"
+                >Byt företrädd</a
+              >
+              <a
+                class="demo-button"
+                data-variant="outline"
+                data-testid="step-up"
+                th:href="@{${stepUpUrl}}"
+                >Kräv högre säkerhetsnivå</a
+              >
+              <form method="get" th:action="@{/call-api}">
+                <button type="submit" class="demo-button" data-testid="call-api">Anropa API</button>
+              </form>
+            </div>
+          </section>
+
+          <section th:if="${apiStatus != null}" class="demo-card">
+            <h2 class="demo-heading">Svar från API:t</h2>
+            <p class="demo-text" data-testid="api-status" th:text="|HTTP ${apiStatus}|">HTTP 200</p>
+            <pre class="demo-pre" data-testid="api-result" th:text="${apiResult}">{}</pre>
+          </section>
+
+          <div th:if="${apiFailed}" data-testid="api-error" class="demo-alert" role="alert">
+            <strong>Något gick fel</strong>
+            <p>API-anropet misslyckades.</p>
+          </div>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

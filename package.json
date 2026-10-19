@@ -22,6 +22,7 @@
     "test": "vitest run --maxWorkers=6",
     "test:watch": "vitest",
     "test:e2e": "npm run test --workspace e2e",
+    "test:java": "node scripts/test-java.js",
     "build": "npm run build --workspaces --if-present",
     "db:up": "docker compose -f deploy/docker-compose.dev.yml up -d --wait",
     "db:down": "docker compose -f deploy/docker-compose.dev.yml down",
