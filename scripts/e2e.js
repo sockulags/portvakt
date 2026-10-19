@@ -110,9 +110,23 @@ function environment() {
     ALLOW_PRIVATE_UPSTREAM_HOSTS: "localhost,127.0.0.1",
     MIGRATE_ON_START: "false",
     SHUTDOWN_DRAIN_DELAY: "0s",
-    // Every access token is refreshed at its next use (the SDKs refresh tokens valid for less
-    // than 60 s), so "the next refresh" (scenario 6) is the next API call, without waiting.
-    ACCESS_TOKEN_TTL: "60s",
+    // Short access tokens: the SDKs refresh a token once half its lifetime has passed (or less
+    // than their default minimum is left), so "the next refresh" (scenarios 6 and 9) comes after
+    // waiting E2E_ACCESS_TOKEN_DUE seconds (e2e/src/env.ts), not after minutes.
+    ACCESS_TOKEN_TTL: "10s",
+    // A manual rotation in the portal publishes the new key and activates it this much later
+    // (scenario 9 waits for it). Production refuses less than the SDKs' JWKS caching.
+    KEY_MANUAL_PUBLISH_AHEAD: "15s",
+    // Every browser of the suite signs in from 127.0.0.1, in parallel: the per-IP limits are
+    // raised (they stay on, so their code runs on every request).
+    RATE_LIMIT_AUTHORIZE_IP: "10000/1m",
+    RATE_LIMIT_AUTHORIZE_CLIENT: "10000/1m",
+    RATE_LIMIT_INTERACTION_IP: "10000/1m",
+    RATE_LIMIT_FEDERATION_IP: "10000/1m",
+    RATE_LIMIT_TOKEN_IP: "10000/1m",
+    RATE_LIMIT_TOKEN_CLIENT: "10000/1m",
+    RATE_LIMIT_ADMIN_API: "10000/1m",
+    ADMIN_RATE_LIMIT_LOGIN: "10000/1m",
     ADMIN_PUBLIC_URL: ADMIN_URL,
     ADMIN_CLIENT_SECRET: SECRETS.admin,
   };

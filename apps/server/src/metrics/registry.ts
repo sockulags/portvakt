@@ -1,62 +1,10 @@
 /**
- * In-process metrics: named counters with label sets, readable as a snapshot. M8 exposes them
- * in the Prometheus text format; until then they are read by tests and operations code. Label
- * values must never carry personal data (reason codes, ids of configuration only).
+ * The server's metrics: the shared registry of `@portvakt/http-kit` (Prometheus text format),
+ * served at `/metrics` (`metrics/endpoint.ts`). Label values never carry personal data or
+ * tenant-controlled free text: reason codes, route templates, status codes, grant types and
+ * configuration ids (login method ids, tenant slugs) only.
  */
-
-export type Labels = Readonly<Record<string, string>>;
-
-const NAME = /^[a-z_][a-z0-9_]*$/;
-
-const keyOf = (labels: Labels): string =>
-  JSON.stringify(Object.entries(labels).sort(([a], [b]) => a.localeCompare(b)));
-
-export class Counter {
-  readonly name: string;
-  readonly help: string;
-  readonly #values = new Map<string, { readonly labels: Labels; value: number }>();
-
-  constructor(name: string, help: string) {
-    this.name = name;
-    this.help = help;
-  }
-
-  inc(labels: Labels = {}, by = 1): void {
-    if (!(by > 0)) throw new RangeError("counters only increase");
-    const key = keyOf(labels);
-    const entry = this.#values.get(key);
-    if (entry === undefined) this.#values.set(key, { labels: { ...labels }, value: by });
-    else entry.value += by;
-  }
-
-  /** The value for exactly these labels (0 when never incremented). */
-  get(labels: Labels = {}): number {
-    return this.#values.get(keyOf(labels))?.value ?? 0;
-  }
-
-  samples(): { readonly labels: Labels; readonly value: number }[] {
-    return [...this.#values.values()].map(({ labels, value }) => ({ labels, value }));
-  }
-}
-
-export class MetricRegistry {
-  readonly #counters = new Map<string, Counter>();
-
-  /** The counter `name`, created on first use. */
-  counter(name: string, help: string): Counter {
-    if (!NAME.test(name)) throw new Error(`invalid metric name ${name}`);
-    let counter = this.#counters.get(name);
-    if (counter === undefined) {
-      counter = new Counter(name, help);
-      this.#counters.set(name, counter);
-    }
-    return counter;
-  }
-
-  counters(): Counter[] {
-    return [...this.#counters.values()];
-  }
-}
+export { Counter, Gauge, Histogram, MetricRegistry, type Labels } from "@portvakt/http-kit";
 
 /** Metric names used across the server. */
 export const METRICS = {
@@ -66,4 +14,14 @@ export const METRICS = {
   samlMetadataRefresh: "portvakt_saml_metadata_refresh_total",
   /** SAML single logout messages (`direction`, `outcome`). */
   samlLogout: "portvakt_saml_logout_total",
+  /** Finished logins (`outcome` success or failure, `reason`, `protocol` oidc, saml or none). */
+  logins: "portvakt_logins_total",
+  /** Token endpoint successes (`grant_type`, `tenant` slug). */
+  tokensIssued: "portvakt_tokens_issued_total",
+  /** Requests refused by a rate limit (`limit`). */
+  rateLimited: "portvakt_rate_limited_total",
+  /** Requests to upstream IdPs and configured URLs (`login_method`, `purpose`, `outcome`). */
+  upstreamDuration: "portvakt_upstream_request_duration_seconds",
+  /** Failed upstream requests (`login_method`, `purpose`, `reason`). */
+  upstreamFailures: "portvakt_upstream_request_failures_total",
 } as const;

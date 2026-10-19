@@ -8,6 +8,7 @@ import { SYSTEM_TENANT_SLUG, type Tenant } from "../../domain/tenant.js";
 import { SamlLoginMethodAdmin } from "../../federation/saml/admin.js";
 import type { SamlFederation } from "../../federation/saml/service.js";
 import type { SigningKeyCache } from "../../keys/key-cache.js";
+import type { RequestLimits } from "../../http/rate-limits.js";
 import type { KeyRotationService } from "../../keys/rotation.js";
 import type { Logger } from "../../logging/logger.js";
 import type { OutboundGuard } from "../../net/outbound.js";
@@ -39,6 +40,8 @@ export interface AdminDeps {
   /** Checks administrator-configured URLs (upstream issuers) before they are saved. */
   readonly outbound: OutboundGuard;
   readonly logger: Logger;
+  /** Rate limits (RATE_LIMIT_ADMIN_API); none in some tests. */
+  readonly limits?: RequestLimits;
 }
 
 /** A unit of work: repositories over one transaction, and the audit events it commits with. */
@@ -58,10 +61,13 @@ export async function inTransaction<T>(deps: AdminDeps, fn: (tx: Tx) => Promise<
   const written: AuditEvent[] = [];
   const result = await deps.db.transaction(async (db) => {
     const repos = createRepositories(db, deps.keys, deps.repositoryOptions);
+    // Its events commit with the transaction and reach the sink after it, like `record`.
     const samlAdmin = new SamlLoginMethodAdmin({
       repos,
       saml: deps.saml,
       production: deps.config.isProduction,
+      auditLog: deps.auditLog,
+      onWritten: (event) => written.push(event),
     });
     return fn({
       db,

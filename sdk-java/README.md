@@ -125,7 +125,9 @@ XHR with `401 {"error": "step_up_required", "acr", "stepUpUrl"}`.
   public paths and static files are not (TypeScript parity). The servlet session timeout is set
   just above the idle timeout.
 - `PortvaktAccessTokens.getAccessToken` refreshes through the starter's
-  `OAuth2AuthorizedClientManager` when the token has less than the clock skew plus 30 s left.
+  `OAuth2AuthorizedClientManager` when the token has less than the clock skew plus 30 s left,
+  but at most half the token's lifetime (short-lived tokens are not refreshed on every request;
+  an explicit minimum validity is used as given).
   The check, the refresh and the write of the rotated tokens run inside the token store's
   exclusive update (the JDBC store: one short transaction with `SELECT ... FOR UPDATE` and a lock
   timeout of the HTTP timeout plus 5 s), so a session refreshes once even for concurrent
@@ -251,7 +253,7 @@ values outside the ranking only match themselves.
 | `portvakt.http-timeout`                                          | `10s`                     | Every request to Portvakt.                                                                                                                                                                         |
 | `portvakt.discovery-cache`                                       | `1h`                      | Discovery is refetched after this (stale metadata is kept on failure).                                                                                                                             |
 | `portvakt.failure-cache`                                         | `5s`                      | With nothing cached, a failed discovery or JWKS fetch is retried after this.                                                                                                                       |
-| `portvakt.jwks.cache-max-age`                                    | `10m`                     | Keys are refetched after this.                                                                                                                                                                     |
+| `portvakt.jwks.cache-max-age`                                    | `5m`                      | Keys are refetched after this. Keep it below Portvakt's KEY_MANUAL_PUBLISH_AHEAD minus 90 s.                                                                                                       |
 | `portvakt.jwks.cooldown`                                         | `30s`                     | At most one JWKS fetch per this for access tokens; an unknown `kid` within it is refused. ID tokens from the token endpoint always refetch an unknown `kid` (a key rotation never ends a session). |
 | `portvakt.jwks.stale-max-age`                                    | `1d`                      | While refetches fail, keys stay in use until cache-max-age plus this; then 503.                                                                                                                    |
 | `portvakt.acr-ranking`                                           | loa2, loa3, loa4          | Must match Portvakt's `ACR_RANKING`.                                                                                                                                                               |

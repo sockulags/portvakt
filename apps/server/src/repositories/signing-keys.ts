@@ -36,6 +36,7 @@ interface SigningKeyRow {
   activated_at: Date | null;
   retiring_at: Date | null;
   retired_at: Date | null;
+  activate_at: Date | null;
 }
 
 interface SigningKeyMaterialRow extends SigningKeyRow {
@@ -51,7 +52,8 @@ const forcedTransitionSchema = z.object({
   reason: z.string().trim().min(1).max(500),
 });
 
-const COLUMNS = "kid, alg, state, public_jwk, created_at, activated_at, retiring_at, retired_at";
+const COLUMNS =
+  "kid, alg, state, public_jwk, created_at, activated_at, retiring_at, retired_at, activate_at";
 
 /** Ordering for the provider's key store: the active key first, then next, then retiring. */
 const STATE_ORDER = "array_position(ARRAY['active', 'next', 'retiring']::text[], state)";
@@ -69,6 +71,7 @@ function toSigningKey(row: SigningKeyRow): SigningKey {
     activatedAt: row.activated_at,
     retiringAt: row.retiring_at,
     retiredAt: row.retired_at,
+    activateAt: row.activate_at,
   };
 }
 
@@ -164,10 +167,42 @@ export class SigningKeyRepository {
   }
 
   /**
+   * Schedules the activation of the `next` key `kid` (manual rotation): at the earliest
+   * `publishAheadSeconds` after it was published (created), never in the past, and never later
+   * than a schedule it already has. Returns the key with its `activateAt`.
+   */
+  async scheduleActivation(kid: string, publishAheadSeconds: number): Promise<SigningKey> {
+    if (!Number.isInteger(publishAheadSeconds) || publishAheadSeconds < 0) {
+      throw new ValidationError(["publishAheadSeconds: must be a non-negative integer"]);
+    }
+    return this.#db.transaction(async (tx) => {
+      const rows = await tx.query<SigningKeyRow>(
+        `UPDATE signing_keys
+            SET activate_at = least(
+                  coalesce(activate_at, 'infinity'::timestamptz),
+                  greatest(now(), created_at + make_interval(secs => $2)))
+          WHERE kid = $1 AND state = 'next'
+          RETURNING ${COLUMNS}`,
+        [kid, publishAheadSeconds],
+      );
+      const [row] = rows;
+      if (row === undefined) {
+        const existing = await this.findByKid(kid);
+        if (existing === null) throw new NotFoundError("Signing key");
+        throw new InvalidStateTransitionError("Signing key", existing.state, "next");
+      }
+      await emitChange(tx, { type: "signing_keys" });
+      return toSigningKey(row);
+    });
+  }
+
+  /**
    * Promotes a `next` key to `active` and demotes the current active key (if any) to `retiring`,
    * atomically. Allowed once the key has been published as `next` for
-   * `policy.publishAheadSeconds` (KEY_PUBLISH_AHEAD), so every verifier has had time to fetch it;
-   * otherwise {@link TransitionNotDueError}. The forced path skips the wait and is audited.
+   * `policy.publishAheadSeconds` (KEY_PUBLISH_AHEAD), or, for a key with a scheduled activation
+   * (manual rotation), once its `activate_at` has come, so every verifier has had time to fetch
+   * it; otherwise {@link TransitionNotDueError}. `publishAheadSeconds: 0` (no active key at all)
+   * and the forced path skip the wait; the forced path is audited.
    * Concurrent callers are serialised by row locks; the loser gets
    * {@link InvalidStateTransitionError}.
    */
@@ -175,7 +210,9 @@ export class SigningKeyRepository {
     const minAge = this.#minAgeSeconds(policy, "publishAheadSeconds");
     return this.#db.transaction(async (tx) => {
       const locked = await tx.query<{ kid: string; state: SigningKeyState; due: boolean }>(
-        `SELECT kid, state, created_at <= now() - make_interval(secs => $2) AS due
+        `SELECT kid, state,
+                CASE WHEN activate_at IS NOT NULL AND $2 > 0 THEN activate_at <= now()
+                     ELSE created_at <= now() - make_interval(secs => $2) END AS due
            FROM signing_keys WHERE state IN ('next', 'active') OR kid = $1
           ORDER BY kid FOR UPDATE`,
         [kid, minAge],
@@ -192,7 +229,7 @@ export class SigningKeyRepository {
       );
       const activatedRow = requireRow(
         await tx.query<SigningKeyRow>(
-          `UPDATE signing_keys SET state = 'active', activated_at = now()
+          `UPDATE signing_keys SET state = 'active', activated_at = now(), activate_at = NULL
             WHERE kid = $1 RETURNING ${COLUMNS}`,
           [kid],
         ),
@@ -270,7 +307,8 @@ export class SigningKeyRepository {
     const row = requireRow(
       await tx.query<SigningKeyRow>(
         `UPDATE signing_keys
-            SET state = 'retired', retired_at = now(), private_jwk_encrypted = NULL
+            SET state = 'retired', retired_at = now(), private_jwk_encrypted = NULL,
+                activate_at = NULL
           WHERE kid = $1 RETURNING ${COLUMNS}`,
         [kid],
       ),

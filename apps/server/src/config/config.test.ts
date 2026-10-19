@@ -2,8 +2,11 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseEnv } from "node:util";
 import { describe, expect, it } from "vitest";
+import { testLoginUiDir } from "../testing/test-server.js";
 import { parseDurationSeconds } from "./duration.js";
+import { report } from "./report.js";
 import {
+  checkConfig,
   ConfigError,
   DEFAULT_ACR_RANKING,
   DEV_COOKIE_KEYS,
@@ -28,6 +31,7 @@ const productionEnv = {
   MIGRATION_DATABASE_URL: "postgres://portvakt_owner:an0ther-Pa55@db.internal:5432/portvakt",
   MASTER_KEY: strongKey(),
   COOKIE_KEYS: `${randomBytes(32).toString("base64url")},${randomBytes(32).toString("base64url")}`,
+  METRICS_TOKEN: randomBytes(32).toString("base64url"),
 };
 
 function issuesOf(env: NodeJS.ProcessEnv): readonly string[] {
@@ -93,6 +97,7 @@ describe("loadConfig", () => {
       intervalSeconds: 90 * 86_400,
       publishAheadSeconds: 2 * 86_400,
       retireAfterSeconds: 2 * 86_400,
+      manualPublishAheadSeconds: 600,
     });
     expect(config.bootstrap).toEqual({ idp: undefined, adminSubject: undefined });
   });
@@ -365,5 +370,203 @@ describe("DATABASE_POOL_MAX", () => {
   it("needs room for a transaction and a statement beside it", () => {
     expect(issuesOf({ ...devEnv, DATABASE_POOL_MAX: "1" }).join("\n")).toMatch(/DATABASE_POOL_MAX/);
     expect(loadConfig({ ...devEnv, DATABASE_POOL_MAX: "2" }).database.poolMax).toBe(2);
+  });
+});
+
+describe("M8 hardening settings", () => {
+  it("defaults rate limits, HTTP and database limits and metrics", () => {
+    const config = loadConfig(devEnv);
+    expect(config.rateLimits).toEqual({
+      authorizeIp: { capacity: 120, periodSeconds: 60 },
+      authorizeClient: { capacity: 3000, periodSeconds: 60 },
+      interactionIp: { capacity: 60, periodSeconds: 60 },
+      federationIp: { capacity: 120, periodSeconds: 60 },
+      tokenIp: { capacity: 600, periodSeconds: 60 },
+      tokenClient: { capacity: 1200, periodSeconds: 60 },
+      adminApi: { capacity: 600, periodSeconds: 60 },
+    });
+    expect(config.http).toEqual({
+      requestTimeoutSeconds: 30,
+      headersTimeoutSeconds: 20,
+      keepAliveTimeoutSeconds: 65,
+      maxUrlLength: 8192,
+      maxHeaderBytes: 16_384,
+    });
+    expect(config.database).toMatchObject({
+      statementTimeoutSeconds: 15,
+      idleInTransactionTimeoutSeconds: 60,
+      connectionTimeoutSeconds: 5,
+    });
+    expect(config.metrics).toEqual({
+      enabled: true,
+      port: undefined,
+      host: "0.0.0.0",
+      token: undefined,
+    });
+    expect(config.warnings).toEqual([]);
+  });
+
+  it("parses rate limits, turns them off, and refuses malformed ones", () => {
+    const config = loadConfig({
+      ...devEnv,
+      RATE_LIMIT_TOKEN_IP: "10/30s",
+      RATE_LIMIT_ADMIN_API: "off",
+    });
+    expect(config.rateLimits.tokenIp).toEqual({ capacity: 10, periodSeconds: 30 });
+    expect(config.rateLimits.adminApi).toBeNull();
+    expect(issuesOf({ ...devEnv, RATE_LIMIT_INTERACTION_IP: "lots" }).join("\n")).toMatch(
+      /^RATE_LIMIT_INTERACTION_IP: must be <count>\/<period>/,
+    );
+  });
+
+  it("refuses inconsistent HTTP timeouts and a metrics port equal to PORT", () => {
+    expect(
+      issuesOf({ ...devEnv, HTTP_HEADERS_TIMEOUT: "60s", HTTP_REQUEST_TIMEOUT: "30s" }),
+    ).toContain("HTTP_HEADERS_TIMEOUT: must not exceed HTTP_REQUEST_TIMEOUT");
+    expect(issuesOf({ ...devEnv, PORT: "3000", METRICS_PORT: "3000" })).toContain(
+      "METRICS_PORT: must differ from PORT",
+    );
+  });
+
+  it.each([
+    [
+      "unprotected metrics on the main port",
+      { METRICS_TOKEN: undefined },
+      "METRICS_TOKEN: required in production",
+    ],
+    ["a short metrics token", { METRICS_TOKEN: "short" }, "METRICS_TOKEN: at least 32"],
+    [
+      "a cookie key that is the master key",
+      { MASTER_KEY: randomBytes(32).toString("base64") },
+      "COOKIE_KEYS: reuses the value of MASTER_KEY",
+    ],
+    [
+      "the metrics token reused as the admin client secret",
+      { ADMIN_CLIENT_SECRET: "the-same-secret-twice-0123456789abcdefgh" },
+      "METRICS_TOKEN: reuses the value of ADMIN_CLIENT_SECRET",
+    ],
+    [
+      "one database password for both roles",
+      {
+        DATABASE_URL: "postgres://portvakt_app:shared-Pa55w0rd@db.internal/portvakt",
+        MIGRATION_DATABASE_URL: "postgres://portvakt_owner:shared-Pa55w0rd@db.internal/portvakt",
+      },
+      "MIGRATION_DATABASE_URL: reuses the value of DATABASE_URL",
+    ],
+    [
+      "a repeated cookie key",
+      {
+        COOKIE_KEYS:
+          "one-cookie-key-0123456789abcdef0123456,one-cookie-key-0123456789abcdef0123456",
+      },
+      "COOKIE_KEYS: the same value appears twice",
+    ],
+    [
+      "a mock IdP bootstrap issuer",
+      {
+        BOOTSTRAP_IDP_ISSUER: "https://localhost:4500/entra",
+        BOOTSTRAP_IDP_CLIENT_ID: "portvakt",
+        BOOTSTRAP_ADMIN_SUBJECT: "x",
+        ADMIN_PUBLIC_URL: "https://admin.example.org",
+        ADMIN_CLIENT_SECRET: "a-production-admin-client-secret-0123456789",
+      },
+      "BOOTSTRAP_IDP_ISSUER: must not point at a local or .test host",
+    ],
+    [
+      "a short manual publish-ahead",
+      { KEY_MANUAL_PUBLISH_AHEAD: "1m" },
+      "KEY_MANUAL_PUBLISH_AHEAD: at least 390s in production",
+    ],
+  ])("refuses production with %s", (_label, overrides, message) => {
+    const override = overrides as Readonly<Record<string, string | undefined>>;
+    const env: NodeJS.ProcessEnv = {
+      ...productionEnv,
+      ...(override.MASTER_KEY === undefined
+        ? {}
+        : { COOKIE_KEYS: `${override.MASTER_KEY},${randomBytes(32).toString("base64url")}` }),
+      ...(override.ADMIN_CLIENT_SECRET === "the-same-secret-twice-0123456789abcdefgh"
+        ? { METRICS_TOKEN: override.ADMIN_CLIENT_SECRET }
+        : {}),
+      ...override,
+    };
+    const issues = issuesOf(env);
+    expect(issues.some((issue) => issue.startsWith(message))).toBe(true);
+    // Names only, never values.
+    for (const value of Object.values(override)) {
+      if (typeof value === "string" && value.length > 8) {
+        expect(issues.join("\n")).not.toContain(value);
+      }
+    }
+  });
+
+  it("accepts production metrics on a port of their own (with a warning without a token)", () => {
+    const config = loadConfig({ ...productionEnv, METRICS_TOKEN: undefined, METRICS_PORT: "9464" });
+    expect(config.metrics).toMatchObject({ enabled: true, port: 9464, token: undefined });
+    expect(config.warnings.join("\n")).toMatch(/^METRICS_TOKEN: not set/m);
+    expect(() =>
+      loadConfig({ ...productionEnv, METRICS_TOKEN: undefined, METRICS_ENABLED: "false" }),
+    ).not.toThrow();
+  });
+
+  it("warns about trusting every proxy hop, verbose logs and rate limits turned off", () => {
+    const config = loadConfig({
+      ...productionEnv,
+      TRUST_PROXY: "true",
+      LOG_LEVEL: "debug",
+      RATE_LIMIT_TOKEN_IP: "off",
+    });
+    expect(config.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^TRUST_PROXY: true trusts every X-Forwarded-For hop/),
+        expect.stringMatching(/^LOG_LEVEL: debug and trace are verbose/),
+        expect.stringMatching(/^RATE_LIMIT_TOKEN_IP: off/),
+      ]),
+    );
+    expect(loadConfig({ ...devEnv, TRUST_PROXY: "true" }).warnings).toEqual([]);
+  });
+
+  it("reports every problem and warning without throwing (config:check)", () => {
+    expect(checkConfig(productionEnv)).toEqual({
+      ok: true,
+      nodeEnv: "production",
+      issues: [],
+      warnings: [],
+    });
+    const report = checkConfig({
+      ...productionEnv,
+      PUBLIC_URL: "http://login.example.org",
+      MASTER_KEY: DEV_MASTER_KEYS[0],
+      TRUST_PROXY: "true",
+    });
+    expect(report.ok).toBe(false);
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        "PUBLIC_URL: must use https in production",
+        "MASTER_KEY: the development key from .env.example is not allowed in production",
+      ]),
+    );
+    expect(report.warnings.join("\n")).toMatch(/TRUST_PROXY/);
+    expect(checkConfig({}).issues).toContain("DATABASE_URL: required");
+  });
+});
+
+describe("config:check report", () => {
+  it("lists problems and warnings by name, including the missing login UI build", () => {
+    const ok = report({ ...productionEnv, LOGIN_UI_DIR: testLoginUiDir() });
+    expect(ok.ok).toBe(true);
+    expect(ok.text).toContain("No problems");
+    const bad = report({
+      ...productionEnv,
+      LOGIN_UI_DIR: "/nonexistent/login-ui",
+      TRUST_PROXY: "true",
+      ADMIN_CLIENT_SECRET: productionEnv.METRICS_TOKEN,
+    });
+    expect(bad.ok).toBe(false);
+    expect(bad.text).toMatch(/^ {2}- LOGIN_UI_DIR: the login UI build/m);
+    expect(bad.text).toMatch(/^ {2}- METRICS_TOKEN: reuses the value of ADMIN_CLIENT_SECRET/m);
+    expect(bad.text).toMatch(/1 warning\(s\):\n {2}- TRUST_PROXY/);
+    // Never a value.
+    expect(bad.text).not.toContain(productionEnv.METRICS_TOKEN);
+    expect(bad.text).not.toContain(productionEnv.MASTER_KEY);
   });
 });

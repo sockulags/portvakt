@@ -36,8 +36,8 @@ jobs:
       TEST_MIGRATION_DATABASE_URL: postgres://portvakt:portvakt@localhost:5433/portvakt_test
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -46,7 +46,13 @@ jobs:
           docker exec -i ${{ job.services.postgres.id }}
           psql -v ON_ERROR_STOP=1 -U portvakt -d portvakt_test
           < deploy/postgres-init/02-create-app-role.sql
-      - run: npm ci
+      # Install scripts stay off: nothing in the tree needs one (esbuild's postinstall only
+      # verifies its platform binary, which the optional @esbuild/* package provides).
+      - run: npm ci --ignore-scripts
+      - name: Dependency audit (production and development dependencies)
+        run: npm audit --audit-level=low
+      - name: Licenses of the production dependencies
+        run: npm run license:check
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
@@ -73,18 +79,18 @@ jobs:
       PORTVAKT_M2_DIR: ${{ github.workspace }}/.m2-cache
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
       - name: Cache Maven dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .m2-cache
           key: maven-${{ hashFiles('sdk-java/**/pom.xml', 'examples/demo-service-java/pom.xml') }}
           restore-keys: maven-
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run test:java
 
   e2e:
@@ -100,18 +106,18 @@ jobs:
       PORTVAKT_M2_DIR: ${{ github.workspace }}/.m2-cache
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
       - name: Cache Maven dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .m2-cache
           key: maven-${{ hashFiles('sdk-java/**/pom.xml', 'examples/demo-service-java/pom.xml') }}
           restore-keys: maven-
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
       - name: Install Chromium for Playwright
         run: npx playwright install --with-deps chromium
@@ -120,7 +126,7 @@ jobs:
         run: npm run test:e2e -- --no-build
       - name: Upload the stack logs and the Playwright report
         if: failure()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: e2e-artifacts
           path: e2e/.artifacts

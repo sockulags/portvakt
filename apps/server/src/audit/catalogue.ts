@@ -338,9 +338,12 @@ export const AUDIT_EVENTS = {
         emergency: z.boolean(),
         retiringKid: kid.nullable(),
         retiredKids: z.array(kid).max(10),
+        /** Without emergency: when the published key becomes active (ISO 8601). */
+        activatesAt: z.iso.datetime().optional(),
       })
       .strict(),
-    "Manual signing key rotation (subject: the new active key).",
+    "Manual signing key rotation (subject: the new key; active at once in an emergency, " +
+      "otherwise published and activated at `activatesAt`).",
   ),
   "audit.pruned": event(
     "success",
@@ -666,13 +669,17 @@ export const AUDIT_EVENTS = {
       .object({
         actorTenantId,
         emergency: z.boolean(),
-        activatedKid: kid,
+        /** The key that signs now; null while the new key waits for its activation. */
+        activatedKid: kid.nullable(),
+        /** The published key and when it becomes active (rotation without emergency). */
+        scheduledKid: kid.optional(),
+        activatesAt: z.iso.datetime().optional(),
         retiringKid: kid.nullable(),
         retiredKids: z.array(kid).max(10),
       })
       .strict(),
     "An administrator rotated the signing keys (also `key.rotate`, with the reason; subject: " +
-      "the new active key).",
+      "the new key).",
   ),
 } as const;
 

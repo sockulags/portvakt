@@ -1,5 +1,8 @@
 import express, { Router, type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
+import { ROUTE_TEMPLATE } from "../../app.js";
+import { ADMIN_API_BASE } from "../constants.js";
+import { clientIp, type RequestLimits } from "../../http/rate-limits.js";
 import type { Logger } from "../../logging/logger.js";
 import { SYSTEM_TENANT_SLUG } from "../../domain/tenant.js";
 import type { AdminAuthenticator, Caller } from "./auth.js";
@@ -121,6 +124,8 @@ export interface MountOptions {
   readonly routes: readonly AdminRoute[];
   readonly authenticator: AdminAuthenticator;
   readonly logger: Logger;
+  /** RATE_LIMIT_ADMIN_API per caller (failed authentications: per client IP). */
+  readonly limits?: RequestLimits | undefined;
 }
 
 /** The Express router of the admin API (mounted below the API base). */
@@ -130,10 +135,27 @@ export function mountRoutes(options: MountOptions): Router {
   const log = options.logger.child({ component: "admin-api" });
 
   for (const spec of options.routes) {
+    const template = `${ADMIN_API_BASE}${spec.path}`;
     const handler = (req: Request, res: Response, next: NextFunction): void => {
       res.set("Cache-Control", "no-store");
+      (res.locals as Record<string, unknown>)[ROUTE_TEMPLATE] = template;
+      /** Takes a token of the admin API limit for `key`; refused: 429 with Retry-After. */
+      const limit = (key: string): void => {
+        const outcome = options.limits?.check([["adminApi", key]]);
+        if (outcome === undefined || outcome.allowed) return;
+        res.set("Retry-After", String(outcome.retryAfterSeconds));
+        throw new ApiError("rate_limited");
+      };
       void (async () => {
-        const caller = await options.authenticator.authenticate(req.get("authorization"));
+        let caller: Caller;
+        try {
+          caller = await options.authenticator.authenticate(req.get("authorization"));
+        } catch (error) {
+          // Failed authentications count against the client IP (token guessing, broken clients).
+          limit(`ip:${clientIp(req)}`);
+          throw error;
+        }
+        limit(`caller:${caller.tenant.id}:${caller.personId}`);
         // Only platform administrators administer the system tenant: anyone else signed in
         // there sees nothing but who they are.
         if (!caller.platform && caller.tenant.slug === SYSTEM_TENANT_SLUG && spec.path !== "/me") {

@@ -88,7 +88,7 @@ public class PortvaktProperties {
   /** The JWKS cache. */
   public static class Jwks {
     /** Keys are refetched after this. */
-    @NotNull private Duration cacheMaxAge = Duration.ofMinutes(10);
+    @NotNull private Duration cacheMaxAge = Duration.ofMinutes(5);
 
     /** At most one JWKS fetch per this; an unknown kid within it is refused without a fetch. */
     @NotNull private Duration cooldown = Duration.ofSeconds(30);

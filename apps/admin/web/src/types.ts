@@ -327,6 +327,8 @@ export interface SigningKey {
   readonly activatedAt: string | null;
   readonly retiringAt: string | null;
   readonly retiredAt: string | null;
+  /** A next key of a manual rotation: when it becomes active. */
+  readonly activateAt: string | null;
 }
 
 export interface SigningKeys {
@@ -335,9 +337,19 @@ export interface SigningKeys {
     readonly intervalSeconds: number;
     readonly publishAheadSeconds: number;
     readonly retireAfterSeconds: number;
+    readonly manualPublishAheadSeconds: number;
   };
   readonly nextScheduledRotationAt: string | null;
   readonly etag: string;
+}
+
+/** The answer of `POST /signing-keys/rotate`. */
+export interface KeyRotation {
+  readonly status: "activated" | "scheduled";
+  readonly activatedKid: string | null;
+  readonly nextKid: string | null;
+  readonly activatesAt: string | null;
+  readonly keys: SigningKeys;
 }
 
 export interface AuditEvent {

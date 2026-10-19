@@ -11,7 +11,7 @@ import {
   type OidcDraft,
   type SamlDraft,
 } from "./forms";
-import { format, MESSAGES, pickLocale } from "./i18n";
+import { format, formatTime, MESSAGES, pickLocale, plural } from "./i18n";
 import { auditQuery } from "./pages/Audit";
 import { looksLikePin } from "./pages/Persons";
 import { hrefOf, parseLocation } from "./router";
@@ -54,6 +54,29 @@ describe("i18n", () => {
   it("formats placeholders", () => {
     expect(format("{count} varningar", { count: 3 })).toBe("3 varningar");
     expect(format("{a} {b}", { a: "x" })).toBe("x {b}");
+  });
+
+  it("uses the singular for one and the plural otherwise, in both languages", () => {
+    const { sv, en } = MESSAGES;
+    expect(plural(sv.methods.warningsCount, 1)).toBe("1 varning");
+    expect(plural(sv.methods.warningsCount, 2)).toBe("2 varningar");
+    expect(plural(sv.methods.warningsCount, 0)).toBe("0 varningar");
+    expect(plural(en.methods.warningsCount, 1)).toBe("1 warning");
+    expect(plural(en.methods.warningsCount, 3)).toBe("3 warnings");
+    expect(plural(sv.overview.failed24h, 1)).toBe("1 misslyckad senaste dygnet");
+    expect(plural(sv.applications.usage.roleRules, 1)).toBe("regel");
+    expect(plural(sv.applications.usage.roleRules, 4)).toBe("regler");
+    expect(plural(sv.persons.deleteImpact.identities, 1)).toBe("identitet");
+    expect(plural(en.persons.deleteImpact.identities, 2)).toBe("identities");
+  });
+
+  it("formats the activation time of a published key as HH:MM", () => {
+    const at = new Date(2026, 9, 19, 9, 5).toISOString();
+    expect(formatTime(at, "sv")).toBe("09:05");
+    expect(formatTime(at, "en")).toBe("09:05");
+    expect(format(MESSAGES.sv.keys.scheduled, { time: "09:05" })).toBe(
+      "Ny nyckel publicerad, aktiveras 09:05",
+    );
   });
 });
 

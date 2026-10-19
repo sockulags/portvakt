@@ -1,0 +1,150 @@
+# Threat model
+
+Portvakt is an identity broker: what it asserts (who signed in, at which level of assurance, on
+whose behalf) is what the organisation's services authorise on. This document lists what is
+worth protecting, where trust changes hands, the threats per boundary (STRIDE: spoofing,
+tampering, repudiation, information disclosure, denial of service, elevation of privilege), the
+mitigations that exist in the code, and the risks that remain. It describes v1 as built through
+M8; operational guidance (deployment, backup, rotation runbooks) belongs to the M9 docs.
+
+## Assets
+
+| Asset                                   | Where                                                        |
+| --------------------------------------- | ------------------------------------------------------------ |
+| Signing keys (ES256, shared by tenants) | `signing_keys`, private part a SecretBox envelope            |
+| `MASTER_KEY` (and previous keys)        | Environment of each replica; derives the blind-index key too |
+| Client secrets, upstream client keys    | `applications`, `login_methods` (envelopes), SAML SP keys    |
+| Personal identity numbers, names, email | `identities`, `persons` (pin encrypted, blind-indexed)       |
+| Sessions, grants, codes, refresh tokens | `oidc_payloads` (oidc-provider adapter), session records     |
+| Representation grants (ombud)           | `representation_grants`, `parties`                           |
+| Role and attribute assignments          | `role_assignments`, `role_rules`, `attribute_assignments`    |
+| The audit trail                         | `audit_events` (append-only)                                 |
+| Admin portal sessions                   | `portvakt_admin_sessions` (sealed), cookie `pv_admin`        |
+| Availability of sign-in                 | Every application depends on it for new sessions and refresh |
+
+## Trust boundaries
+
+```
+ Browser ──(1)── Portvakt ──(3)── Upstream IdPs (OIDC, SAML)
+    │               │  │
+    │              (4) (2)── Applications (SDK BFFs, APIs)
+    │               │
+   (5) Admin portal BFF ──(6)── Admin API (in Portvakt)
+                    │
+ Postgres ──(4)─────┘        Operators ──(7)── configuration, secrets, metrics
+```
+
+1. **Browser to Portvakt**: authorization requests, the login UI and its interaction API, the
+   upstream callbacks (OIDC redirect, SAML ACS and SLO, both cross-site), logout.
+2. **Applications to Portvakt**: discovery, JWKS, token, introspection and revocation endpoints;
+   access tokens presented to applications' APIs.
+3. **Portvakt to upstream IdPs**: discovery, JWKS, token and userinfo requests, SAML metadata;
+   responses that arrive through the browser (codes, SAML Responses, LogoutRequests).
+4. **Portvakt to Postgres**: the runtime role (DML only) and the owner role (migrations, audit
+   retention).
+5. **Browser to the admin portal**: the BFF's sign-in, its session cookie and the API proxy.
+6. **Admin BFF to the admin API**: bearer access tokens of `portvakt-admin`.
+7. **Operators**: environment configuration, secrets, deployment, the metrics endpoint.
+
+## Threats and mitigations
+
+### 1. Browser to Portvakt
+
+| STRIDE                 | Threat                                                                  | Mitigation                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Spoofing               | Forged login completion, a login finished in another browser            | The interaction is bound to its cookie (scoped to `/t/{slug}/interaction/{uid}`); upstream state and the completion reference are single use and consumed atomically ([`repositories/federation-states.ts`](../apps/server/src/repositories/federation-states.ts)); PKCE and nonce upstream ([`federation/service.ts`](../apps/server/src/federation/service.ts)). |
+| Spoofing               | Cross-site request forgery of the interaction POSTs                     | HMAC CSRF token per interaction, same-origin `Origin`/`Sec-Fetch-Site`, JSON only ([`login/csrf.ts`](../apps/server/src/login/csrf.ts)).                                                                                                                                                                                                                           |
+| Spoofing               | Host header or `X-Forwarded-*` steering issuer URLs and cookie security | Host, forwarded host and protocol are pinned to `PUBLIC_URL` before the provider sees a request ([`oidc/routes.ts`](../apps/server/src/oidc/routes.ts) `pinRequestOrigin`); TRUST_PROXY only decides the client IP.                                                                                                                                                |
+| Tampering              | Replayed codes or refresh tokens                                        | Atomic single use in the adapter; a replay revokes the grant ([`oidc/adapter.ts`](../apps/server/src/oidc/adapter.ts)).                                                                                                                                                                                                                                            |
+| Tampering              | SAML Response forgery, signature wrapping, replay                       | Allowlisted algorithms, exactly one signature over the element itself, ID uniqueness, bounded parsing, InResponseTo and RelayState correlation, assertion ID replay cache ([`federation/saml/xml.ts`](../apps/server/src/federation/saml/xml.ts), [`federation/saml/service.ts`](../apps/server/src/federation/saml/service.ts)).                                  |
+| Repudiation            | A person or attacker denies a login, representation or step-up          | `login.success`/`login.failure`, `representation.*`, `step_up.*` audit events, failures on their own statement ([`audit/catalogue.ts`](../apps/server/src/audit/catalogue.ts)); request and trace ids on every log line.                                                                                                                                           |
+| Information disclosure | Clickjacking of the login UI, script injection                          | CSP without `unsafe-inline`/`unsafe-eval`, `frame-ancestors 'none'`, X-Frame-Options DENY ([`login/ui-shell.ts`](../apps/server/src/login/ui-shell.ts)); the bootstrap block is escaped JSON; provider pages get `PROVIDER_CSP`, oidc-provider hashes its form_post script ([`oidc/routes.ts`](../apps/server/src/oidc/routes.ts)).                                |
+| Information disclosure | Personal data in pages, logs or caches                                  | The representation chooser never receives a full personal identity number; logs censor credential and personal keys at any depth ([`logging/logger.ts`](../apps/server/src/logging/logger.ts)); interaction pages and token responses are `no-store`; Referrer-Policy `no-referrer`.                                                                               |
+| Denial of service      | Floods of authorization requests, method choices, callbacks             | Per-IP (and per-client) token buckets with 429 and Retry-After ([`http/rate-limits.ts`](../apps/server/src/http/rate-limits.ts)); body limits per route, URL and header bounds, server timeouts ([`app.ts`](../apps/server/src/app.ts), [`server.ts`](../apps/server/src/server.ts)); bounded XML parsing.                                                         |
+| Elevation of privilege | A person signs in as someone else at step-up, or keeps another's rights | `step_up_person_mismatch` refuses another person; representation is re-checked at every refresh and a changed or ended right revokes the grant ([`oidc/login-context.ts`](../apps/server/src/oidc/login-context.ts), [`representation/registry.ts`](../apps/server/src/representation/registry.ts)).                                                               |
+
+### 2. Applications to Portvakt
+
+| STRIDE                 | Threat                                                     | Mitigation                                                                                                                                                                                                                                                      |
+| ---------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Spoofing               | A client of tenant X used at tenant Y                      | Clients are looked up per tenant from enabled attachments only ([`oidc/adapter.ts`](../apps/server/src/oidc/adapter.ts)); `client_assertion` jti once.                                                                                                          |
+| Spoofing               | A token for app A accepted by app B                        | Access tokens are JWTs with `aud` = one client id; both SDKs pin `iss`, `typ` and `aud` ([`packages/sdk-node/src/access-token.ts`](../packages/sdk-node/src/access-token.ts)).                                                                                  |
+| Tampering              | Forged tokens                                              | ES256 signatures; keys published ahead of use and retired only after the longest token and session ([`keys/rotation.ts`](../apps/server/src/keys/rotation.ts)).                                                                                                 |
+| Information disclosure | Token contents beyond need                                 | Access tokens carry no name, email or pin; introspection answers the owning client only ([`docs/claims.md`](claims.md)).                                                                                                                                        |
+| Denial of service      | Token endpoint floods, brute-forcing client secrets        | Per-IP then per-client_id limits on token, introspection, revocation and PAR ([`oidc/routes.ts`](../apps/server/src/oidc/routes.ts)); client ids from HTTP Basic, the form body or the assertion ([`http/client-id.ts`](../apps/server/src/http/client-id.ts)). |
+| Elevation of privilege | A refresh after the session, grant or representation ended | Refresh tokens bound to the broker session, rotated on every use; `findAccount` re-validates the grant login ([`oidc/provider.ts`](../apps/server/src/oidc/provider.ts)).                                                                                       |
+
+### 3. Portvakt to upstream IdPs
+
+| STRIDE                 | Threat                                                           | Mitigation                                                                                                                                                                                                                                                                       |
+| ---------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Spoofing               | A malicious or compromised upstream asserts arbitrary people     | Per tenant only; upstream ID tokens fully validated (asymmetric algorithms only, signature against the upstream JWKS); multi-tenant issuers need `allowedUpstreamTenants`; acr only from a mapped claim ([`federation/upstream.ts`](../apps/server/src/federation/upstream.ts)). |
+| Tampering              | Metadata substitution                                            | SAML metadata signature-checked against a configured certificate (production requires one or an audited opt-out); fails closed when stale ([`federation/saml/metadata.ts`](../apps/server/src/federation/saml/metadata.ts)).                                                     |
+| Information disclosure | SSRF through configured URLs (cloud metadata, internal services) | `OutboundGuard`: connect-time address checks, manual redirects, size caps, https in production, ALLOW_PRIVATE_UPSTREAM_HOSTS refused in production ([`net/outbound.ts`](../apps/server/src/net/outbound.ts)).                                                                    |
+| Denial of service      | A slow or failing upstream ties up Portvakt                      | Request timeouts, failure cache, metadata served from the cache; latency and failures per login method in `portvakt_upstream_request_*`.                                                                                                                                         |
+
+### 4. Portvakt to Postgres
+
+| STRIDE                 | Threat                                               | Mitigation                                                                                                                                                                                                                                                       |
+| ---------------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tampering              | Audit history rewritten by the application           | The runtime role has SELECT and INSERT on `audit_events` only, a trigger refuses UPDATE/DELETE/TRUNCATE, start-up refuses a privileged runtime role ([`db/runtime-role.ts`](../apps/server/src/db/runtime-role.ts)).                                             |
+| Information disclosure | A database dump reveals secrets and identity numbers | Secrets, private keys and personal identity numbers are SecretBox envelopes bound to their row; lookups use the blind index ([`crypto/envelope.ts`](../apps/server/src/crypto/envelope.ts)).                                                                     |
+| Denial of service      | Runaway queries or stuck transactions hold locks     | `statement_timeout`, `idle_in_transaction_session_timeout`, pool connection timeout on the runtime connections ([`db/database.ts`](../apps/server/src/db/database.ts)); jobs under advisory locks ([`jobs/exclusive.ts`](../apps/server/src/jobs/exclusive.ts)). |
+| Elevation of privilege | SQL injection                                        | Parameterised SQL everywhere; ids validated before SQL; identifiers in DDL from constants only.                                                                                                                                                                  |
+
+### 5. Browser to the admin portal
+
+| STRIDE                 | Threat                                     | Mitigation                                                                                                                                                                              |
+| ---------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Spoofing               | Session theft, cookie reuse across tenants | Sealed sessions in Postgres, signed cookie scoped to `/t/{slug}`, per-tenant store namespace ([`apps/admin/src/tenants.ts`](../apps/admin/src/tenants.ts)); the SPA never sees a token. |
+| Tampering              | CSRF on mutations                          | Session CSRF token, same-origin checks, JSON only ([`apps/admin/src/proxy.ts`](../apps/admin/src/proxy.ts)).                                                                            |
+| Information disclosure | Framing, script injection                  | `ADMIN_PAGE_CSP` (no inline script or style), frame-ancestors none, COOP, HSTS over https ([`apps/admin/src/app.ts`](../apps/admin/src/app.ts)).                                        |
+| Denial of service      | Sign-in floods                             | ADMIN_RATE_LIMIT_LOGIN per client IP; the admin API's own per-caller limit behind it.                                                                                                   |
+
+### 6. Admin BFF to the admin API
+
+| STRIDE                 | Threat                                                         | Mitigation                                                                                                                                                                                                                                 |
+| ---------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Spoofing               | A token of tenant X used for tenant Y, service tokens          | `iss` must equal `{PUBLIC_URL}/t/{tid}`, `aud` `portvakt-admin`, person tokens only, roles intersected with live assignments ([`admin/api/auth.ts`](../apps/server/src/admin/api/auth.ts)).                                                |
+| Elevation of privilege | A tenant administrator reaching another tenant or the platform | 404 for other tenants before the body is read, platform-only operations, `self_lockout` guards ([`admin/api/registry.ts`](../apps/server/src/admin/api/registry.ts), [`repositories/guard.ts`](../apps/server/src/repositories/guard.ts)). |
+| Repudiation            | An administrator denies a change                               | Every mutation writes an `admin.*` event in its transaction, with the actor and the changes (secrets only as "changed").                                                                                                                   |
+| Denial of service      | One administrator (or a stolen token) hammering the API        | RATE_LIMIT_ADMIN_API per caller, failed authentications per client IP, `rate_limited` problem with Retry-After.                                                                                                                            |
+
+### 7. Operators
+
+| STRIDE                 | Threat                                                 | Mitigation                                                                                                                                                                                                                                                                                                                         |
+| ---------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Spoofing, tampering    | Development defaults or test modes reaching production | `loadConfig` refuses dev keys and secrets, http URLs, local hosts, one database role, private upstream hosts, short or reused secrets, unprotected metrics, a short manual publish-ahead; NODE_ENV=test only on loopback hosts; `npm run config:check` lists everything ([`config/index.ts`](../apps/server/src/config/index.ts)). |
+| Information disclosure | Metrics leaking personal data or being public          | Labels are templates, codes and configuration ids only; production needs METRICS_TOKEN or a separate METRICS_PORT ([`metrics/collectors.ts`](../apps/server/src/metrics/collectors.ts)).                                                                                                                                           |
+| Tampering              | Compromised dependencies                               | `npm audit` and the production license check in CI, Maven Enforcer and license plugin, GitHub Actions pinned by commit SHA, Dependabot for npm, Maven, Actions and Docker, `npm ci --ignore-scripts`.                                                                                                                              |
+
+## Residual risks
+
+- **Rate limits are per replica and in memory.** With N replicas a client gets up to N times
+  each limit, buckets restart with a replica, and the per-client buckets of the authorization and
+  token endpoints can be drained by anyone who sends that client id (a forged `client_id` or an
+  unverified `client_assertion` only charges a bucket; the per-IP limit is checked first). Put
+  an ingress or WAF limit in front (per IP, and per path for `/t/*/token` and `/t/*/auth`). A
+  shared Postgres-backed limiter is out of scope for v1.
+- **TRUST_PROXY must match the deployment.** `true`, or too many hops, lets clients choose their
+  IP and escape per-IP limits (`config:check` warns about `true`).
+- **Signing keys are shared by every tenant.** A token's tenant is proven by its `iss` only, so
+  every verifier must pin the issuer (both SDKs and the admin API do). A key compromise affects
+  every tenant; per-tenant keys are a recorded follow-up.
+- **MASTER_KEY protects everything at rest.** Whoever has it and a database dump has every secret
+  and personal identity number. It lives in each replica's environment; keep it in a secret
+  manager, rotate with `MASTER_KEY_PREVIOUS` and `rewrap-secrets`. Sealed SAML session data is not
+  re-wrapped (keep the old key for SESSION_TTL).
+- **The mock IdP is never part of production.** It refuses NODE_ENV=production, and production
+  refuses private upstream hosts and local bootstrap issuers, but nothing stops an operator from
+  deploying it elsewhere and configuring it as a login method over https: it signs anyone in.
+- **Upstream IdPs are trusted for what they assert.** A compromised upstream of a tenant can sign
+  in any person of that tenant at that method's assurance level; tenants choose their IdPs.
+- **Protocol behaviour inside oidc-provider** (form_post, logout confirmation, error pages) is the
+  library's, not Portvakt's code; upgrades are reviewed together with its typings (CLAUDE.md).
+- **Database owner role.** The owner can drop the audit trigger; the append-only guarantee is
+  against the runtime role and accidents, not against the owner.
+- **Metrics on a separate port without a token** rely on network policy; keep METRICS_PORT off
+  the ingress.
+- **Admin portal sessions** outlive a removed role until the next API call (each call re-checks
+  roles live; the session itself ends at its idle timeout or the broker session's end).

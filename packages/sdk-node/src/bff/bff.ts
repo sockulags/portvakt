@@ -107,9 +107,26 @@ export interface SessionInfo {
 export interface GetAccessTokenOptions {
   /**
    * The token must stay valid at least this long, or it is refreshed first. Default: the clock
-   * skew plus 30 seconds.
+   * skew plus 30 seconds, but at most half the token's lifetime (so a short-lived token is not
+   * refreshed on every request). An explicit value is used as given.
    */
   readonly minValiditySeconds?: number;
+}
+
+/**
+ * The default remaining validity below which a session's access token is refreshed: the
+ * configured minimum (clock skew plus 30 s), but never more than half the token's lifetime.
+ * Without the cap, a token living no longer than the minimum (a short ACCESS_TOKEN_TTL) would be
+ * refreshed on every request. Sessions stored before the issue time was recorded keep the
+ * minimum.
+ */
+export function refreshThreshold(
+  data: Pick<SessionData, "accessTokenExpiresAt" | "accessTokenIssuedAt">,
+  minValiditySeconds: number,
+): number {
+  if (data.accessTokenIssuedAt === undefined) return minValiditySeconds;
+  const lifetime = data.accessTokenExpiresAt - data.accessTokenIssuedAt;
+  return Math.max(0, Math.min(minValiditySeconds, Math.floor(lifetime / 2)));
 }
 
 /** The BFF helpers, on the Express router that serves the BFF routes. */
@@ -572,6 +589,7 @@ class BffEngine {
       idToken: tokens.id_token,
       accessToken: tokens.access_token,
       accessTokenExpiresAt: now + (tokens.expiresIn() ?? 60),
+      accessTokenIssuedAt: now,
       ...(tokens.refresh_token === undefined ? {} : { refreshToken: tokens.refresh_token }),
       csrfToken: randomId(),
     };
@@ -788,9 +806,12 @@ class BffEngine {
   }
 
   async #getAccessToken(req: Request, options: GetAccessTokenOptions): Promise<string> {
-    const minValidity = options.minValiditySeconds ?? this.#config.clockSkewSeconds + 30;
+    // An explicit minimum is the caller's requirement and is honoured as given; the default is
+    // capped at half the token's lifetime (refreshThreshold).
+    const explicit = options.minValiditySeconds;
+    const fallback = this.#config.clockSkewSeconds + 30;
     const fresh = (data: SessionData): boolean =>
-      data.accessTokenExpiresAt - epochNow() > minValidity;
+      data.accessTokenExpiresAt - epochNow() > (explicit ?? refreshThreshold(data, fallback));
     // Using the session's token is activity: it moves the idle timeout like requireLogin does.
     const loaded = await this.#load(req, undefined, true);
     if (loaded === null) throw new LoginRequiredError("no_session");
@@ -903,6 +924,7 @@ class BffEngine {
       endsAt,
       accessToken: response.access_token,
       accessTokenExpiresAt: now + (response.expiresIn() ?? 60),
+      accessTokenIssuedAt: now,
       ...(response.refresh_token === undefined ? {} : { refreshToken: response.refresh_token }),
     };
     if (endsAt <= now) {

@@ -37,7 +37,7 @@ class ConfigTest {
     assertThat(config.httpTimeout()).isEqualTo(Duration.ofSeconds(10));
     assertThat(config.discoveryCacheTtl()).isEqualTo(Duration.ofHours(1));
     assertThat(config.failureCacheTtl()).isEqualTo(Duration.ofSeconds(5));
-    assertThat(config.jwksCacheMaxAge()).isEqualTo(Duration.ofMinutes(10));
+    assertThat(config.jwksCacheMaxAge()).isEqualTo(Duration.ofMinutes(5));
     assertThat(config.jwksCooldown()).isEqualTo(Duration.ofSeconds(30));
     assertThat(config.jwksStaleMaxAge()).isEqualTo(Duration.ofDays(1));
     assertThat(config.acrRanking()).isEqualTo(AcrRanking.DEFAULT);

@@ -43,6 +43,14 @@ administrators. Key rotation is audited as a platform event (`admin.signing_key.
 tenant), written in the same transaction as the rotation, and its `If-Match` is checked under the
 rotation's exclusive lock: of concurrent rotations with the same tag exactly one succeeds.
 
+`POST /signing-keys/rotate` publishes ahead unless `emergency` is set: the new key is in JWKS at
+once and becomes active `policy.manualPublishAheadSeconds` later (KEY_MANUAL_PUBLISH_AHEAD,
+default 10 minutes; the rotation job activates it then). The answer is `status: "scheduled"` with
+`nextKid` and `activatesAt`; the key set lists the key as `next` with its `activateAt`. A
+`next` key that has already been published that long (from the scheduled rotation) is activated
+at once (`status: "activated"`). With `emergency: true` (key compromise) a new key signs at once
+and the previous one is retired immediately (`status: "activated"`, `retiredKids`).
+
 The role `platform-admin` of `portvakt-admin` can only be given in the `system` tenant, by a
 platform administrator: in assignments, pending assignments and rules anywhere else it is refused
 with a field error on `role`.
@@ -68,7 +76,9 @@ is locked for the check and the write, so two concurrent updates cannot both pas
 
 ## Errors
 
-Errors are RFC 9457 problem details (`application/problem+json`):
+Errors are RFC 9457 problem details (`application/problem+json`), with the request's id and
+W3C trace id (`X-Request-Id`, `traceparent`: an incoming `traceparent` is continued) for log
+correlation:
 
 ```json
 {
@@ -76,7 +86,9 @@ Errors are RFC 9457 problem details (`application/problem+json`):
   "title": "The request is invalid",
   "status": 400,
   "code": "validation_failed",
-  "errors": [{ "field": "slug", "message": "unknown or immutable field" }]
+  "errors": [{ "field": "slug", "message": "unknown or immutable field" }],
+  "requestId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
 }
 ```
 
@@ -85,8 +97,10 @@ Errors are RFC 9457 problem details (`application/problem+json`):
 that people have signed in with: disable it instead), `last_identity` (a person's only identity:
 delete the person instead), `precondition_failed`,
 `precondition_required`, `validation_failed` (with `errors`), `invalid_json`,
-`unsupported_media_type`, `payload_too_large`, `unavailable`, `internal_error`. Messages never
-echo request values or internals.
+`unsupported_media_type`, `payload_too_large`, `rate_limited` (`429` with `Retry-After`:
+RATE_LIMIT_ADMIN_API per administrator, failed authentications per client IP), `unavailable`,
+`internal_error`. Messages never echo request values or internals. Responses of operations are
+`Cache-Control: no-store`.
 
 ## Secrets and personal data
 

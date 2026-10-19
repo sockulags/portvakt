@@ -85,6 +85,8 @@ export interface SamlRoutesOptions {
   readonly federation: FederationService;
   readonly shell: LoginUiShell;
   readonly tenantOf: (res: Response) => TenantProvider;
+  /** Rate limit of the ACS and SLO endpoints (per IP; answers with the login UI's page). */
+  readonly limit?: (req: Request, res: Response, next: NextFunction) => void;
 }
 
 /** String-valued fields of a query or form body (repeated or nested values are dropped). */
@@ -111,7 +113,12 @@ export function samlRoutes(options: SamlRoutesOptions): Router {
   const { federation, shell, tenantOf } = options;
   const saml = federation.saml;
   const router = Router();
+  const limit = options.limit ?? ((_req: Request, _res: Response, next: NextFunction) => next());
+  // A Response is at most 512 KB of XML (federation/saml/xml.ts): about 700 KB base64 encoded,
+  // more once form-encoded.
   const form = express.urlencoded({ extended: false, limit: "1mb", parameterLimit: 10 });
+  // Logout messages are at most 64 KB of XML.
+  const logoutForm = express.urlencoded({ extended: false, limit: "128kb", parameterLimit: 10 });
   type Handler = (req: Request, res: Response) => Promise<void>;
   const run =
     (fn: Handler) =>
@@ -205,6 +212,7 @@ export function samlRoutes(options: SamlRoutesOptions): Router {
 
   router.post(
     "/saml/:loginMethodId/acs",
+    limit,
     form,
     run(async (req, res) => {
       res.redirect(303, await saml.acs(tenantOf(res), methodId(req), req.body));
@@ -213,6 +221,7 @@ export function samlRoutes(options: SamlRoutesOptions): Router {
 
   router.get(
     "/saml/:loginMethodId/slo",
+    limit,
     run(async (req, res) => {
       const query = req.originalUrl.includes("?")
         ? req.originalUrl.slice(req.originalUrl.indexOf("?") + 1)
@@ -231,7 +240,8 @@ export function samlRoutes(options: SamlRoutesOptions): Router {
 
   router.post(
     "/saml/:loginMethodId/slo",
-    form,
+    limit,
+    logoutForm,
     run(async (req, res) => {
       sendSlo(
         req,

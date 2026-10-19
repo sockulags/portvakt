@@ -134,7 +134,7 @@ public final class PortvaktConfig {
     private Duration httpTimeout = Duration.ofSeconds(10);
     private Duration discoveryCacheTtl = Duration.ofHours(1);
     private Duration failureCacheTtl = Duration.ofSeconds(5);
-    private Duration jwksCacheMaxAge = Duration.ofMinutes(10);
+    private Duration jwksCacheMaxAge = Duration.ofMinutes(5);
     private Duration jwksCooldown = Duration.ofSeconds(30);
     private Duration jwksStaleMaxAge = Duration.ofDays(1);
     private AcrRanking acrRanking = AcrRanking.DEFAULT;

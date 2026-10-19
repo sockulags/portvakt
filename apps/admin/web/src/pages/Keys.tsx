@@ -9,8 +9,8 @@ import {
 import { DataTable, PageHeader } from "@portvakt/design-system/patterns";
 import { useState } from "react";
 import { ApiError } from "../api";
-import { format, formatDate, useI18n } from "../i18n";
-import type { SigningKeys } from "../types";
+import { format, formatDate, formatTime, useI18n } from "../i18n";
+import type { KeyRotation, SigningKeys } from "../types";
 import { ConfirmDialog, ErrorState, useAdmin, useResource } from "../ui";
 
 const STATE_COLOR = {
@@ -30,7 +30,8 @@ export function KeysPage() {
   const [reasonError, setReasonError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
-  const [done, setDone] = useState(false);
+  /** The last rotation's outcome: activated now, or published and activated later. */
+  const [done, setDone] = useState<KeyRotation["status"] | undefined>();
 
   const rotate = async () => {
     if (reason.trim() === "") {
@@ -41,13 +42,13 @@ export function KeysPage() {
     setError(undefined);
     setReasonError(undefined);
     try {
-      const result = await api.send<{ keys: SigningKeys }>("POST", "/signing-keys/rotate", {
+      const result = await api.send<KeyRotation>("POST", "/signing-keys/rotate", {
         body: { reason: reason.trim(), emergency },
         etag: keys.data?.etag,
       });
       keys.set(result.keys);
       setOpen(false);
-      setDone(true);
+      setDone(result.status);
     } catch (failure) {
       setError(failure);
       if (failure instanceof ApiError) setReasonError(failure.fieldErrors().reason);
@@ -56,6 +57,9 @@ export function KeysPage() {
       setBusy(false);
     }
   };
+
+  // A manual rotation's published key, waiting for its activation time.
+  const pending = keys.data?.keys.find((key) => key.state === "next" && key.activateAt !== null);
 
   return (
     <>
@@ -72,7 +76,7 @@ export function KeysPage() {
                 setEmergency(false);
                 setReasonError(undefined);
                 setError(undefined);
-                setDone(false);
+                setDone(undefined);
                 setOpen(true);
               }}
             >
@@ -81,10 +85,20 @@ export function KeysPage() {
           )
         }
       />
-      {done && (
+      {done === "activated" && (
         <div className="pv-notice" data-testid="keys-rotated">
           <Alert tone="success" title={t.keys.rotated}>
             {formatDate(new Date().toISOString(), locale, true)}
+          </Alert>
+        </div>
+      )}
+      {pending?.activateAt != null && (
+        <div className="pv-notice" data-testid="keys-scheduled" data-kid={pending.kid}>
+          <Alert
+            tone="info"
+            title={format(t.keys.scheduled, { time: formatTime(pending.activateAt, locale) })}
+          >
+            {formatDate(pending.activateAt, locale, true)}
           </Alert>
         </div>
       )}
@@ -135,6 +149,12 @@ export function KeysPage() {
                 key: "retiring",
                 header: t.keys.retiring,
                 cell: (key) => formatDate(key.retiringAt, locale, true),
+              },
+              {
+                key: "activates",
+                header: t.keys.activatesAt,
+                cell: (key) =>
+                  key.activateAt === null ? "–" : formatDate(key.activateAt, locale, true),
               },
             ]}
           />

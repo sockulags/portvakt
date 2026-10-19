@@ -12,7 +12,7 @@ import type { Tenant } from "../domain/tenant.js";
 import type { Logger } from "../logging/logger.js";
 import type { LoginErrorCode } from "../login/ui-shell.js";
 import { METRICS, type Counter, type MetricRegistry } from "../metrics/registry.js";
-import type { OutboundGuard } from "../net/outbound.js";
+import { withOutboundContext, type OutboundGuard } from "../net/outbound.js";
 import type { AcrRanking } from "../oidc/acr.js";
 import {
   loadInteraction,
@@ -86,6 +86,7 @@ export class FederationService {
   readonly #options: FederationServiceOptions;
   readonly #log: Logger;
   readonly #rejected: Counter;
+  readonly #logins: Counter;
   /** SAML login methods (Swedish eID Framework). */
   readonly saml: SamlFederation;
 
@@ -95,6 +96,10 @@ export class FederationService {
     this.#rejected = options.metrics.counter(
       METRICS.federationCallbackRejected,
       "Upstream callbacks refused before an interaction was known, by reason",
+    );
+    this.#logins = options.metrics.counter(
+      METRICS.logins,
+      "Finished logins by outcome, reason (failures) and upstream protocol",
     );
     this.saml = new SamlFederation({
       config: options.config,
@@ -108,9 +113,11 @@ export class FederationService {
       flow: {
         errorUrl: (tenant, code, uid) => this.#errorUrl(tenant, code, uid),
         refuse: (tenant, reason) => this.#refuse(tenant, reason),
-        fail: (tenant, code, context, uid) => this.#fail(tenant, code, context, uid),
+        fail: (tenant, code, context, uid) =>
+          this.#fail(tenant, code, { ...context, protocol: "saml" }, uid),
         complete: (result) => this.#completeUpstream(result),
-        recordFailure: (code, context) => this.#auditFailure(code, context),
+        recordFailure: (code, context) =>
+          this.#auditFailure(code, { ...context, protocol: "saml" }),
       },
     });
   }
@@ -264,13 +271,15 @@ export class FederationService {
 
     let exchange: Awaited<ReturnType<UpstreamClients["exchangeCode"]>>;
     try {
-      exchange = await this.#options.upstream.exchangeCode(method, currentUrl, {
-        pkceCodeVerifier: pending.codeVerifier,
-        expectedState: state,
-        expectedNonce: pending.nonce,
-        // With max_age sent upstream, the ID token must carry a recent enough auth_time.
-        ...(pending.maxAge === undefined ? {} : { maxAge: pending.maxAge }),
-      });
+      exchange = await withOutboundContext({ loginMethodId, purpose: "oidc_token" }, () =>
+        this.#options.upstream.exchangeCode(method, currentUrl, {
+          pkceCodeVerifier: pending.codeVerifier,
+          expectedState: state,
+          expectedNonce: pending.nonce,
+          // With max_age sent upstream, the ID token must carry a recent enough auth_time.
+          ...(pending.maxAge === undefined ? {} : { maxAge: pending.maxAge }),
+        }),
+      );
     } catch (error) {
       if (error instanceof UpstreamTenantRefusedError) return fail("account_not_allowed");
       if (error instanceof UpstreamMisconfiguredError) {
@@ -318,10 +327,9 @@ export class FederationService {
     let claims: Record<string, unknown> = { ...idClaims };
     if (method.useUserinfo) {
       try {
-        const userinfo = await client.fetchUserInfo(
-          exchange.config,
-          tokens.access_token,
-          idClaims.sub,
+        const userinfo = await withOutboundContext(
+          { loginMethodId, purpose: "oidc_userinfo" },
+          () => client.fetchUserInfo(exchange.config, tokens.access_token, idClaims.sub),
         );
         // Userinfo only fills in: the ID token's (signed, validated) claims take precedence.
         claims = { ...userinfo, ...idClaims };
@@ -399,6 +407,14 @@ export class FederationService {
         ...(details.clientId === undefined ? {} : { clientId: details.clientId }),
         ...(stepUp ? { stepUp: true } : {}),
       },
+    });
+    const method = await this.#options.repos.loginMethods
+      .findById(tenant.id, loginMethodId)
+      .catch(() => null);
+    this.#logins.inc({
+      outcome: "success",
+      reason: stepUp ? "step_up" : "login",
+      protocol: method?.protocol ?? "unknown",
     });
     return returnTo;
   }
@@ -523,7 +539,10 @@ export class FederationService {
 
   async #setupFor(method: OidcLoginMethod, failure: FailureContext) {
     try {
-      return await this.#options.upstream.setupFor(method);
+      return await withOutboundContext(
+        { loginMethodId: method.id, purpose: "oidc_discovery" },
+        () => this.#options.upstream.setupFor(method),
+      );
     } catch (error) {
       if (error instanceof UpstreamMisconfiguredError) {
         this.#log.error({ loginMethodId: method.id, err: error }, "login method misconfigured");
@@ -546,6 +565,11 @@ export class FederationService {
 
   /** `login.failure`, on its own (never inside a transaction); a failed write is only logged. */
   async #auditFailure(code: LoginErrorCode, context: FailureContext): Promise<void> {
+    this.#logins.inc({
+      outcome: "failure",
+      reason: code,
+      protocol: context.protocol ?? (context.loginMethodId === undefined ? "none" : "oidc"),
+    });
     this.#log.info(
       {
         reason: code,

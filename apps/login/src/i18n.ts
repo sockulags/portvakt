@@ -167,6 +167,10 @@ const sv: Messages = {
       title: "En annan person legitimerade sig",
       body: "Tjänsten kräver att samma person som redan är inloggad legitimerar sig igen. Du är fortfarande inloggad som tidigare.",
     },
+    rate_limited: {
+      title: "För många försök",
+      body: "Vänta en stund och försök sedan igen.",
+    },
     request_failed: { title: "Något gick fel", body: "Försök igen senare." },
   },
   logout: {
@@ -286,6 +290,10 @@ const en: Messages = {
     step_up_person_mismatch: {
       title: "Another person signed in",
       body: "The service requires the person who is already signed in to identify again. You are still signed in as before.",
+    },
+    rate_limited: {
+      title: "Too many attempts",
+      body: "Please wait a moment and try again.",
     },
     request_failed: { title: "Something went wrong", body: "Please try again later." },
   },

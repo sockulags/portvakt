@@ -2,6 +2,7 @@ import { deflateRawSync } from "node:zlib";
 import * as client from "openid-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createKeyRing } from "../../crypto/keyring.js";
+import type { AuditEvent } from "../../domain/audit.js";
 import type { Tenant } from "../../domain/tenant.js";
 import { ValidationError } from "../../repositories/errors.js";
 import { createRepositories } from "../../repositories/index.js";
@@ -23,7 +24,16 @@ import { SamlLoginMethodAdmin } from "./admin.js";
 import { parseRedirectBinding, RedirectBindingError } from "./redirect.js";
 import { verifyWithAlgorithm } from "./algorithms.js";
 
-const ts = await startTestServer();
+/** What the audit sink received (SAML admin events go through AuditLog too). */
+const forwarded: AuditEvent[] = [];
+const ts = await startTestServer({
+  auditSink: {
+    forward: (events) => {
+      forwarded.push(...events);
+      return Promise.resolve();
+    },
+  },
+});
 const idp = ts === undefined ? undefined : await startTestIdp();
 
 const POST_LOGOUT = "https://app.example.test/signed-out";
@@ -285,6 +295,7 @@ describe.skipIf(ts === undefined)("SAML hardening", () => {
         repos,
         saml: ts!.portvakt.federation.saml,
         production: true,
+        auditLog: ts!.portvakt.auditLog,
       });
       const tenant = await createTenant(repos, "hard-prod");
       const bankid = mock!.saml("bankid");
@@ -329,6 +340,14 @@ describe.skipIf(ts === undefined)("SAML hardening", () => {
         saml: { metadataSigningCertificate: null, allowUnsignedMetadata: true },
       });
       expect(await audits(w.tenant, "login_method.saml_unsigned_metadata_allowed")).toHaveLength(1);
+      // ... and reaches the audit sink like every other event.
+      expect(
+        forwarded.filter(
+          (event) =>
+            event.action === "login_method.saml_unsigned_metadata_allowed" &&
+            event.subject?.id === method.id,
+        ),
+      ).toHaveLength(1);
       expect(await ts!.portvakt.samlAdmin.warningsFor(method)).toEqual(
         expect.arrayContaining([
           "saml.allowUnsignedMetadata: the IdP metadata is not signature-checked",
@@ -807,7 +826,8 @@ describe.skipIf(ts === undefined)("SAML hardening", () => {
         { redirect: "manual" },
       );
       expect(performance.now() - started).toBeLessThan(1000);
-      expect(post.status).toBe(400);
+      // The form body limit of /slo (128 KB) refuses the POST before anything is decoded.
+      expect(post.status).toBe(413);
       expect(get.status).toBe(400);
     });
 

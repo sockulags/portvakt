@@ -16,7 +16,10 @@ import org.springframework.security.oauth2.core.endpoint.OAuth2AccessTokenRespon
 import se.portvakt.sdk.PortvaktUnavailableException;
 
 /**
- * Refreshes the session's access token when it has less than {@code minValidity} left. Portvakt
+ * Refreshes the session's access token when it has less than {@code minValidity} left, but at
+ * most half of the token's lifetime by default (a token living no longer than {@code minValidity},
+ * a short access token TTL, would otherwise be refreshed on every request); an explicit {@link
+ * #MIN_VALIDITY_ATTRIBUTE} is used as given. Portvakt
  * rotates refresh tokens on every use. A network error, timeout or 5xx answer becomes {@link
  * PortvaktUnavailableException}; a refusal ({@code invalid_grant}: revoked, replayed, broker
  * session ended) a {@link ClientAuthorizationException}. The token response (with the new ID
@@ -54,7 +57,9 @@ public class PortvaktRefreshTokenProvider implements OAuth2AuthorizedClientProvi
     OAuth2AuthorizedClient authorized = context.getAuthorizedClient();
     if (authorized == null) return null;
     Duration validity =
-        context.getAttribute(MIN_VALIDITY_ATTRIBUTE) instanceof Duration requested ? requested : minValidity;
+        context.getAttribute(MIN_VALIDITY_ATTRIBUTE) instanceof Duration requested
+            ? requested
+            : threshold(authorized.getAccessToken(), minValidity);
     if (!expiring(authorized.getAccessToken(), validity)) return null;
     String registrationId = authorized.getClientRegistration().getRegistrationId();
     if (authorized.getRefreshToken() == null) {
@@ -84,6 +89,18 @@ public class PortvaktRefreshTokenProvider implements OAuth2AuthorizedClientProvi
         context.getPrincipal().getName(),
         response.getAccessToken(),
         response.getRefreshToken() != null ? response.getRefreshToken() : authorized.getRefreshToken());
+  }
+
+  /**
+   * The default refresh threshold of {@code token}: {@code minValidity}, at most half its lifetime
+   * (issued to expiry).
+   */
+  static Duration threshold(OAuth2AccessToken token, Duration minValidity) {
+    Instant issuedAt = token.getIssuedAt();
+    Instant expiresAt = token.getExpiresAt();
+    if (issuedAt == null || expiresAt == null || !expiresAt.isAfter(issuedAt)) return minValidity;
+    Duration half = Duration.between(issuedAt, expiresAt).dividedBy(2);
+    return half.compareTo(minValidity) < 0 ? half : minValidity;
   }
 
   private boolean expiring(OAuth2AccessToken token, Duration validity) {

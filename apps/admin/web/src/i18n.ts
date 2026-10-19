@@ -105,7 +105,10 @@ const sv = {
     description: "Inloggningar, sessioner och det som behöver åtgärdas.",
     logins24h: "Inloggningar senaste dygnet",
     logins7d: "Inloggningar senaste 7 dagarna",
-    failed24h: "{count} misslyckade senaste dygnet",
+    failed24h: {
+      one: "{count} misslyckad senaste dygnet",
+      other: "{count} misslyckade senaste dygnet",
+    },
     sessions: "Aktiva sessioner",
     // Soft hyphen: the compound breaks cleanly in a narrow stat card.
     methods: "Inloggnings\u00admetoder",
@@ -163,12 +166,18 @@ const sv = {
       "Applikationen kopplas bort från organisationen. Följande tas bort samtidigt och kan inte återställas:",
     detachTypeLabel: "Skriv klient-id {clientId} för att bekräfta",
     usage: {
-      roleAssignments: "rolltilldelningar",
-      pendingRoleAssignments: "väntande rolltilldelningar",
-      roleRules: "regler",
-      attributeAssignments: "attribut",
-      pendingAttributeAssignments: "väntande attribut",
-      grantLimits: "ombudsrätter begränsade till applikationen",
+      roleAssignments: { one: "rolltilldelning", other: "rolltilldelningar" },
+      pendingRoleAssignments: {
+        one: "väntande rolltilldelning",
+        other: "väntande rolltilldelningar",
+      },
+      roleRules: { one: "regel", other: "regler" },
+      attributeAssignments: { one: "attribut", other: "attribut" },
+      pendingAttributeAssignments: { one: "väntande attribut", other: "väntande attribut" },
+      grantLimits: {
+        one: "ombudsrätt begränsad till applikationen",
+        other: "ombudsrätter begränsade till applikationen",
+      },
     },
     usageNone: "Inga tilldelningar, regler eller ombudsrätter berörs.",
     removalTitle: "Ta bort roller eller attributnycklar?",
@@ -223,7 +232,7 @@ const sv = {
     kinds: { employee: "Medarbetare", citizen: "Privatperson" },
     empty: "Inga inloggningsmetoder",
     emptyBody: "Lägg till en identitetsleverantör så att personer kan logga in.",
-    warningsCount: "{count} varningar",
+    warningsCount: { one: "{count} varning", other: "{count} varningar" },
     sections: {
       connection: "Anslutning",
       connectionHint: "Var identitetsleverantören finns och hur Portvakt autentiserar sig.",
@@ -358,6 +367,12 @@ const sv = {
     roleAssignments: "Roller",
     attributes: "Attribut",
     grants: "Ombudsrätter",
+    deleteImpact: {
+      identities: { one: "identitet", other: "identiteter" },
+      roleAssignments: { one: "rolltilldelning", other: "rolltilldelningar" },
+      attributes: { one: "attribut", other: "attribut" },
+      grants: { one: "ombudsrätt", other: "ombudsrätter" },
+    },
     clearProtected: "Ta bort skyddad identitet",
     clearProtectedTitle: "Ta bort markeringen skyddad identitet?",
     clearProtectedBody:
@@ -406,12 +421,15 @@ const sv = {
     rotate: "Rotera nu",
     rotateTitle: "Rotera signeringsnyckeln?",
     rotateBody:
-      "En ny nyckel börjar signera direkt. Den gamla publiceras fortfarande så att utfärdade token fortsätter fungera.",
+      "En ny nyckel publiceras direkt och börjar signera efter en stund, när alla tjänster har hämtat den. Den gamla publiceras fortfarande så att utfärdade token fortsätter fungera.",
     reason: "Anledning",
     reasonHint: "Skriv inga personuppgifter. Anledningen sparas i granskningsloggen.",
     emergency: "Nödrotation (nyckeln är röjd)",
-    emergencyHint: "Den gamla nyckeln pensioneras direkt: alla token den signerat slutar fungera.",
+    emergencyHint:
+      "Den nya nyckeln börjar signera direkt och den gamla pensioneras: alla token den signerat slutar fungera.",
     rotated: "Nycklarna är roterade.",
+    scheduled: "Ny nyckel publicerad, aktiveras {time}",
+    activatesAt: "Aktiveras",
     nextRotation: "Nästa schemalagda rotation: {date}",
   },
   audit: {
@@ -535,7 +553,7 @@ const en: Messages = {
     description: "Sign-ins, sessions and what needs attention.",
     logins24h: "Sign-ins in the last day",
     logins7d: "Sign-ins in the last 7 days",
-    failed24h: "{count} failed in the last day",
+    failed24h: { one: "{count} failed in the last day", other: "{count} failed in the last day" },
     sessions: "Active sessions",
     methods: "Login methods",
     methodsHint: "{enabled} of {total} enabled",
@@ -591,12 +609,15 @@ const en: Messages = {
       "The application is detached from the organisation. The following is removed with it and cannot be restored:",
     detachTypeLabel: "Type the client ID {clientId} to confirm",
     usage: {
-      roleAssignments: "role assignments",
-      pendingRoleAssignments: "pending role assignments",
-      roleRules: "rules",
-      attributeAssignments: "attributes",
-      pendingAttributeAssignments: "pending attributes",
-      grantLimits: "representation rights limited to the application",
+      roleAssignments: { one: "role assignment", other: "role assignments" },
+      pendingRoleAssignments: { one: "pending role assignment", other: "pending role assignments" },
+      roleRules: { one: "rule", other: "rules" },
+      attributeAssignments: { one: "attribute", other: "attributes" },
+      pendingAttributeAssignments: { one: "pending attribute", other: "pending attributes" },
+      grantLimits: {
+        one: "representation right limited to the application",
+        other: "representation rights limited to the application",
+      },
     },
     usageNone: "No assignments, rules or representation rights are affected.",
     removalTitle: "Remove roles or attribute keys?",
@@ -650,7 +671,7 @@ const en: Messages = {
     kinds: { employee: "Employee", citizen: "Citizen" },
     empty: "No login methods",
     emptyBody: "Add an identity provider so that people can sign in.",
-    warningsCount: "{count} warnings",
+    warningsCount: { one: "{count} warning", other: "{count} warnings" },
     sections: {
       connection: "Connection",
       connectionHint: "Where the identity provider is and how Portvakt authenticates to it.",
@@ -785,6 +806,12 @@ const en: Messages = {
     roleAssignments: "Roles",
     attributes: "Attributes",
     grants: "Representation rights",
+    deleteImpact: {
+      identities: { one: "identity", other: "identities" },
+      roleAssignments: { one: "role assignment", other: "role assignments" },
+      attributes: { one: "attribute", other: "attributes" },
+      grants: { one: "representation right", other: "representation rights" },
+    },
     clearProtected: "Clear protected identity",
     clearProtectedTitle: "Clear the protected identity flag?",
     clearProtectedBody:
@@ -828,12 +855,15 @@ const en: Messages = {
     rotate: "Rotate now",
     rotateTitle: "Rotate the signing key?",
     rotateBody:
-      "A new key starts signing at once. The old one stays published so that issued tokens keep working.",
+      "A new key is published at once and starts signing a little later, once every service has fetched it. The old one stays published so that issued tokens keep working.",
     reason: "Reason",
     reasonHint: "Write no personal data. The reason is kept in the audit log.",
     emergency: "Emergency rotation (the key is compromised)",
-    emergencyHint: "The old key is retired at once: every token it signed stops working.",
+    emergencyHint:
+      "The new key starts signing at once and the old key is retired: every token it signed stops working.",
     rotated: "The keys are rotated.",
+    scheduled: "New key published, activates at {time}",
+    activatesAt: "Activates",
     nextRotation: "Next scheduled rotation: {date}",
   },
   audit: {
@@ -859,6 +889,21 @@ const en: Messages = {
 };
 
 export const MESSAGES: Readonly<Record<Locale, Messages>> = { sv, en };
+
+/** A message with a singular and a plural form (`{count}` is filled in). */
+export interface Plural {
+  readonly one: string;
+  readonly other: string;
+}
+
+/** The form of `forms` for `count`, with `{count}` and any other placeholders filled. */
+export function plural(
+  forms: Plural,
+  count: number,
+  values: Readonly<Record<string, string | number>> = {},
+): string {
+  return format(count === 1 ? forms.one : forms.other, { count, ...values });
+}
 
 /** Fills `{name}` placeholders. */
 export function format(
@@ -897,6 +942,17 @@ export function storeLocale(locale: Locale): void {
 }
 
 /** Dates and times in the chosen language. */
+/** The time of day of an ISO instant (HH:MM, 24 hours). */
+export function formatTime(iso: string, locale: Locale): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "–";
+  return new Intl.DateTimeFormat(locale === "sv" ? "sv-SE" : "en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(date);
+}
+
 export function formatDate(
   iso: string | null | undefined,
   locale: Locale,

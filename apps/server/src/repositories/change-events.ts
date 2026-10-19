@@ -26,8 +26,16 @@ export const changeEventSchema = z.discriminatedUnion("type", [
 ]);
 export type ChangeEvent = z.infer<typeof changeEventSchema>;
 
+/**
+ * Notifies {@link CHANGE_CHANNEL}, or the channel the connection names in
+ * `portvakt.change_channel` (the test database gives every schema its own, so parallel test files
+ * never see each other's events; `createPortvakt` listens on the same one).
+ */
 export async function emitChange(db: Db, event: ChangeEvent): Promise<void> {
-  await db.query("SELECT pg_notify($1, $2)", [CHANGE_CHANNEL, JSON.stringify(event)]);
+  await db.query(
+    "SELECT pg_notify(coalesce(nullif(current_setting('portvakt.change_channel', true), ''), $1), $2)",
+    [CHANGE_CHANNEL, JSON.stringify(event)],
+  );
 }
 
 /** Parses a notification payload; `null` for anything that is not a valid event. */

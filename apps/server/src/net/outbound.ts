@@ -1,6 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import { BlockList, isIP, type LookupFunction } from "node:net";
 import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from "undici";
+import { METRICS, type Counter, type Histogram, type MetricRegistry } from "../metrics/registry.js";
 
 /**
  * Every outbound request Portvakt makes to a URL an administrator or an application configured
@@ -83,7 +85,30 @@ export interface OutboundOptions {
   /** Hostnames (or literal IPs) allowed to resolve to special-use addresses (dev and tests). */
   readonly allowPrivateHosts: readonly string[];
   readonly timeoutSeconds: number;
+  /**
+   * Request latency and failures by login method and purpose
+   * (`portvakt_upstream_request_duration_seconds`, `portvakt_upstream_request_failures_total`).
+   */
+  readonly metrics?: MetricRegistry;
 }
+
+/** What an outbound request is for: the metrics labels (configuration ids and fixed names). */
+export interface OutboundContext {
+  /** The login method the request belongs to (upstream OIDC, SAML metadata). */
+  readonly loginMethodId?: string | undefined;
+  /** `oidc_discovery`, `oidc_token`, `oidc_userinfo`, `oidc_jwks`, `saml_metadata`, ... */
+  readonly purpose: string;
+}
+
+const outboundContext = new AsyncLocalStorage<OutboundContext>();
+
+/** Runs `fn` with its outbound requests labelled by `context` in the metrics. */
+export const withOutboundContext = <T>(
+  context: OutboundContext,
+  fn: () => Promise<T>,
+): Promise<T> => outboundContext.run(context, fn);
+
+const statusClass = (status: number): string => `${Math.floor(status / 100)}xx`;
 
 export interface OutboundRequestInit extends RequestInit {
   /** Cap of the response body (default 5 MB). */
@@ -94,8 +119,18 @@ export class OutboundGuard {
   readonly #options: OutboundOptions;
   readonly #allowed: ReadonlySet<string>;
   readonly #dispatcher: Agent;
+  readonly #duration: Histogram | undefined;
+  readonly #failures: Counter | undefined;
 
   constructor(options: OutboundOptions) {
+    this.#duration = options.metrics?.histogram(
+      METRICS.upstreamDuration,
+      "Outbound requests to upstream IdPs and configured URLs, by login method, purpose and outcome",
+    );
+    this.#failures = options.metrics?.counter(
+      METRICS.upstreamFailures,
+      "Failed outbound requests (refused, network errors, timeouts, 5xx) by login method and reason",
+    );
     if (options.production && options.allowPrivateHosts.length > 0) {
       throw new Error("ALLOW_PRIVATE_UPSTREAM_HOSTS is refused in production");
     }
@@ -147,6 +182,25 @@ export class OutboundGuard {
    * caller gets the 3xx), a timeout unless the caller passes a signal, and a capped body.
    */
   async fetch(input: string | URL, init: OutboundRequestInit = {}): Promise<Response> {
+    const context = outboundContext.getStore();
+    const labels = {
+      login_method: context?.loginMethodId ?? "none",
+      purpose: context?.purpose ?? "other",
+    };
+    const stop = this.#duration?.startTimer();
+    try {
+      const response = await this.#fetch(input, init);
+      stop?.({ ...labels, outcome: statusClass(response.status) });
+      if (response.status >= 500) this.#failures?.inc({ ...labels, reason: "server_error" });
+      return response;
+    } catch (error) {
+      stop?.({ ...labels, outcome: "error" });
+      this.#failures?.inc({ ...labels, reason: failureReason(error) });
+      throw error;
+    }
+  }
+
+  async #fetch(input: string | URL, init: OutboundRequestInit): Promise<Response> {
     const { maxBytes = DEFAULT_MAX_BYTES, redirect, ...rest } = init;
     let url = new URL(input);
     let request: RequestInit = rest;
@@ -190,6 +244,15 @@ export class OutboundGuard {
       return capped(response, maxBytes);
     }
   }
+}
+
+/** A fixed reason for the failures metric (never a message or URL). */
+function failureReason(error: unknown): string {
+  if (error instanceof OutboundRefusedError) return error.reason;
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    return "timeout";
+  }
+  return "network";
 }
 
 async function capped(response: Response, maxBytes: number): Promise<Response> {

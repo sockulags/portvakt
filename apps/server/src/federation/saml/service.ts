@@ -8,7 +8,11 @@ import type { Tenant } from "../../domain/tenant.js";
 import type { Logger } from "../../logging/logger.js";
 import type { LoginErrorCode } from "../../login/ui-shell.js";
 import { METRICS, type Counter, type MetricRegistry } from "../../metrics/registry.js";
-import { OutboundRefusedError, type OutboundGuard } from "../../net/outbound.js";
+import {
+  OutboundRefusedError,
+  withOutboundContext,
+  type OutboundGuard,
+} from "../../net/outbound.js";
 import { parseAcrValues, type AcrRanking } from "../../oidc/acr.js";
 import type { InteractionDetails } from "../../oidc/interactions.js";
 import {
@@ -825,7 +829,9 @@ export class SamlFederation {
       entityId: source.idpEntityId,
     };
     try {
-      const metadata = await this.loadMetadata(source);
+      const metadata = await withOutboundContext({ loginMethodId, purpose: "saml_metadata" }, () =>
+        this.loadMetadata(source),
+      );
       await repos.saml.storeMetadata(tenantId, loginMethodId, metadata, expected);
       this.#metadataRefresh.inc({ outcome: "success" });
       return { ok: true, metadata };

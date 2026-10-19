@@ -9,7 +9,7 @@ import {
 } from "@portvakt/design-system/components";
 import { useState } from "react";
 import { ApiError } from "../api";
-import { useI18n } from "../i18n";
+import { plural, useI18n } from "../i18n";
 import type {
   Application,
   ApplicationUsage,
@@ -66,7 +66,11 @@ export function usageLines(
   t: ReturnType<typeof useI18n>["t"],
 ): readonly { readonly key: string; readonly label: string; readonly count: number }[] {
   return (Object.keys(t.applications.usage) as (keyof ApplicationUsage)[])
-    .map((key) => ({ key, label: t.applications.usage[key], count: usage[key] }))
+    .map((key) => ({
+      key,
+      label: plural(t.applications.usage[key], usage[key]),
+      count: usage[key],
+    }))
     .filter((line) => line.count > 0);
 }
 

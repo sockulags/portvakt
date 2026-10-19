@@ -23,6 +23,8 @@ export interface FailureContext {
   readonly upstreamError?: string | undefined;
   /** Why Portvakt refused the upstream answer (fixed reason code, never user data). */
   readonly detail?: string | undefined;
+  /** The upstream protocol, for the login metrics (SAML failures name it). */
+  readonly protocol?: "oidc" | "saml" | undefined;
 }
 
 /** What an upstream login established, ready for JIT provisioning and the completion hop. */

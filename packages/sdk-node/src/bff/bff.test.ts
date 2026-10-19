@@ -9,7 +9,7 @@ import { silentLogger } from "../logger.js";
 import { MemoryStore } from "../stores/memory.js";
 import { MiniBrowser } from "../testing/browser.js";
 import { startFakeOp, type FakeOp } from "../testing/fake-op.js";
-import type { BffOptions, PortvaktBff } from "./bff.js";
+import { refreshThreshold, type BffOptions, type PortvaktBff } from "./bff.js";
 
 const LOA3 = "http://id.elegnamnden.se/loa/1.0/loa3";
 const LOA4 = "http://id.elegnamnden.se/loa/1.0/loa4";
@@ -457,8 +457,9 @@ describe("BFF access tokens and refresh", () => {
       await browser.request(`${h.base}/token?min=3600`);
       op.accessTokenTtl = 300;
       const mid = op.counters.refresh;
+      // The 20 s token is not valid for another 100 s; the refreshed 300 s token is.
       const shared = await Promise.all(
-        Array.from({ length: 8 }, () => browser.request(`${h.base}/token`)),
+        Array.from({ length: 8 }, () => browser.request(`${h.base}/token?min=100`)),
       );
       expect(op.counters.refresh - mid).toBe(1);
       const values = new Set(
@@ -470,6 +471,51 @@ describe("BFF access tokens and refresh", () => {
     } finally {
       await h.close();
     }
+  });
+
+  it("refreshes a short-lived token at half its lifetime, not on every request", async () => {
+    // The default threshold (clock skew 30 s + 30 s = 60 s) exceeds a 20 s token's lifetime.
+    op.accessTokenTtl = 20;
+    const h = await harness();
+    vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+    try {
+      const browser = new MiniBrowser();
+      await login(h, browser);
+      const before = op.counters.refresh;
+      const token = async () =>
+        ((await (await browser.request(`${h.base}/token`)).json()) as { token: string }).token;
+      const first = await token();
+      expect(await token()).toBe(first);
+      expect(await token()).toBe(first);
+      expect(op.counters.refresh - before).toBe(0);
+      // Past half its lifetime the token is refreshed once, and the new one is used again.
+      vi.setSystemTime(Date.now() + 11_000);
+      const second = await token();
+      expect(second).not.toBe(first);
+      expect(await token()).toBe(second);
+      expect(op.counters.refresh - before).toBe(1);
+      // Concurrent requests for a due token share one refresh.
+      vi.setSystemTime(Date.now() + 11_000);
+      const concurrent = await Promise.all(Array.from({ length: 6 }, () => token()));
+      expect(new Set(concurrent).size).toBe(1);
+      expect(op.counters.refresh - before).toBe(2);
+    } finally {
+      vi.useRealTimers();
+      op.accessTokenTtl = 300;
+      await h.close();
+    }
+  });
+
+  it("caps the default refresh threshold at half the token's lifetime", () => {
+    expect(refreshThreshold({ accessTokenIssuedAt: 1000, accessTokenExpiresAt: 1300 }, 60)).toBe(
+      60,
+    );
+    expect(refreshThreshold({ accessTokenIssuedAt: 1000, accessTokenExpiresAt: 1060 }, 60)).toBe(
+      30,
+    );
+    expect(refreshThreshold({ accessTokenIssuedAt: 1000, accessTokenExpiresAt: 1010 }, 60)).toBe(5);
+    // Sessions stored before the issue time was recorded keep the configured minimum.
+    expect(refreshThreshold({ accessTokenExpiresAt: 1010 }, 60)).toBe(60);
   });
 
   it("keeps the session when the refresh returns an ID token signed with a key that was just activated", async () => {

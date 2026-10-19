@@ -1,4 +1,8 @@
-import { createServer } from "node:http";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type RequestListener } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { JSON_CSP, PERMISSIONS_POLICY } from "@portvakt/http-kit";
 import type { AddressInfo } from "node:net";
 import { MemoryStore, silentLogger } from "@portvakt/sdk-node";
 import {
@@ -12,8 +16,8 @@ import {
   type AdminWorld,
 } from "@portvakt/server/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createAdminApp } from "./app.js";
-import { loadAdminConfig } from "./config.js";
+import { ADMIN_PAGE_CSP, createAdminApp } from "./app.js";
+import { AdminConfigError, loadAdminConfig } from "./config.js";
 import { apiTarget } from "./proxy.js";
 import { TenantClients } from "./tenants.js";
 
@@ -232,6 +236,160 @@ describe.skipIf(ts === undefined)("admin BFF", () => {
       const response = await fetch(`${base}${path}`, { redirect: "manual" });
       expect(response.status, path).toBe(404);
     }
+  });
+
+  /** Runs `handler` on an ephemeral port for `fn`. */
+  async function serving(
+    handler: RequestListener,
+    fn: (origin: string) => Promise<void>,
+  ): Promise<void> {
+    const other = createServer(handler);
+    await new Promise<void>((resolve) => other.listen(0, "127.0.0.1", resolve));
+    try {
+      await fn(`http://127.0.0.1:${(other.address() as AddressInfo).port}`);
+    } finally {
+      other.closeAllConnections();
+      await new Promise<void>((resolve) => other.close(() => resolve()));
+    }
+  }
+
+  it("sends the baseline security headers, and the SPA its page CSP", async () => {
+    const health = await fetch(`${base}/healthz`);
+    expect(health.headers.get("content-security-policy")).toBe(JSON_CSP);
+    expect(health.headers.get("x-frame-options")).toBe("DENY");
+    expect(health.headers.get("cross-origin-opener-policy")).toBe("same-origin");
+    expect(health.headers.get("permissions-policy")).toBe(PERMISSIONS_POLICY);
+    expect(health.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(health.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(ADMIN_PAGE_CSP).not.toMatch(/unsafe-(inline|eval)/);
+
+    const web = mkdtempSync(join(tmpdir(), "portvakt-admin-web-"));
+    writeFileSync(join(web, "index.html"), "<!doctype html><title>Admin</title>");
+    try {
+      const config = loadAdminConfig({
+        NODE_ENV: "development",
+        ADMIN_PUBLIC_URL: base,
+        PORTVAKT_PUBLIC_URL: ts!.baseUrl,
+        ADMIN_CLIENT_SECRET: world.secret,
+        ADMIN_WEB_DIR: web,
+      });
+      await serving(createAdminApp(config, { logger: silentLogger }), async (origin) => {
+        const page = await fetch(`${origin}/t/${x.tenant.slug}/`);
+        expect(page.status).toBe(200);
+        expect(page.headers.get("content-security-policy")).toBe(ADMIN_PAGE_CSP);
+        expect(page.headers.get("cache-control")).toBe("no-store");
+      });
+    } finally {
+      rmSync(web, { recursive: true, force: true });
+    }
+  });
+
+  it("limits sign-in starts per client IP with a page and Retry-After", async () => {
+    const config = loadAdminConfig({
+      NODE_ENV: "development",
+      ADMIN_PUBLIC_URL: base,
+      PORTVAKT_PUBLIC_URL: ts!.baseUrl,
+      ADMIN_CLIENT_SECRET: world.secret,
+      ADMIN_WEB_DIR: "does-not-exist",
+      ADMIN_RATE_LIMIT_LOGIN: "2/1m",
+      ADMIN_TRUST_PROXY: "1",
+    });
+    await serving(createAdminApp(config, { logger: silentLogger }), async (origin) => {
+      const login = (ip: string) =>
+        fetch(`${origin}/t/${x.tenant.slug}/auth/login`, {
+          headers: { "x-forwarded-for": ip },
+          redirect: "manual",
+        });
+      expect((await login("203.0.113.7")).status).toBe(302);
+      expect((await login("203.0.113.7")).status).toBe(302);
+      const refused = await login("203.0.113.7");
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get("retry-after")).not.toBeNull();
+      expect(await refused.text()).toContain("För många inloggningsförsök");
+      // Another client IP (as TRUST_PROXY resolves it) is not affected.
+      expect((await login("203.0.113.8")).status).toBe(302);
+      const metrics = await (await fetch(`${origin}/metrics`)).text();
+      expect(metrics).toContain('portvakt_admin_rate_limited_total{limit="login"} 1');
+      expect(metrics).toContain(
+        'portvakt_admin_http_requests_total{method="GET",route="/t/{slug}/auth/login",status="429"} 1',
+      );
+      expect(metrics).not.toContain(x.tenant.slug);
+    });
+  });
+
+  it("continues the trace into the admin API and names it in problem responses", async () => {
+    const browser = new TestBrowser();
+    await signIn(browser, x, adminX);
+    const traceId = "5bf92f3577b34da6a3ce929d0e0e4736";
+    const other = await browser.request(`${base}/t/${x.tenant.slug}/api/tenants/${y.tenant.id}`, {
+      headers: { traceparent: `00-${traceId}-00f067aa0ba902b7-01`, "x-request-id": "portal-req-1" },
+    });
+    expect(other.status).toBe(404);
+    expect(other.headers.get("x-request-id")).toBe("portal-req-1");
+    // The admin API's problem: the same trace and request id (forwarded by the proxy).
+    expect(await other.json()).toMatchObject({
+      code: "not_found",
+      traceId,
+      requestId: "portal-req-1",
+    });
+    // The portal's own problems carry them too.
+    const unauthenticated = await fetch(`${base}/t/${x.tenant.slug}/api/me`, {
+      headers: { traceparent: `00-${traceId}-00f067aa0ba902b7-01` },
+    });
+    expect(await unauthenticated.json()).toMatchObject({ code: "login_required", traceId });
+  });
+
+  it("protects /metrics with ADMIN_METRICS_TOKEN and validates production secrets", async () => {
+    const config = loadAdminConfig({
+      NODE_ENV: "development",
+      ADMIN_PUBLIC_URL: base,
+      PORTVAKT_PUBLIC_URL: ts!.baseUrl,
+      ADMIN_CLIENT_SECRET: world.secret,
+      ADMIN_WEB_DIR: "does-not-exist",
+      ADMIN_METRICS_TOKEN: "admin-metrics-token-0123456789abcdef",
+    });
+    await serving(createAdminApp(config, { logger: silentLogger }), async (origin) => {
+      expect((await fetch(`${origin}/metrics`)).status).toBe(401);
+      const scrape = await fetch(`${origin}/metrics`, {
+        headers: { authorization: "Bearer admin-metrics-token-0123456789abcdef" },
+      });
+      expect(scrape.status).toBe(200);
+    });
+
+    const production = {
+      NODE_ENV: "production",
+      ADMIN_PUBLIC_URL: "https://admin.example.org",
+      PORTVAKT_PUBLIC_URL: "https://login.example.org",
+      ADMIN_CLIENT_SECRET: "a-production-admin-client-secret-0123456789",
+      ADMIN_COOKIE_SECRET: "a-production-cookie-secret-0123456789abcdef",
+      ADMIN_SESSION_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString("base64"),
+      ADMIN_DATABASE_URL: "postgres://admin:pw@db.example.org/portvakt",
+      ADMIN_METRICS_TOKEN: "a-production-metrics-token-0123456789abcdef",
+    };
+    expect(() => loadAdminConfig(production)).not.toThrow();
+    const issuesOf = (env: Record<string, string | undefined>): readonly string[] => {
+      try {
+        loadAdminConfig(env);
+        return [];
+      } catch (error) {
+        if (error instanceof AdminConfigError) return error.issues;
+        throw error;
+      }
+    };
+    expect(issuesOf({ ...production, ADMIN_METRICS_TOKEN: undefined })).toContain(
+      "ADMIN_METRICS_TOKEN: required in production (or ADMIN_METRICS_ENABLED=false)",
+    );
+    expect(
+      issuesOf({ ...production, ADMIN_METRICS_TOKEN: undefined, ADMIN_METRICS_ENABLED: "false" }),
+    ).toEqual([]);
+    const reused = issuesOf({
+      ...production,
+      ADMIN_COOKIE_SECRET: production.ADMIN_CLIENT_SECRET,
+    });
+    expect(reused).toContain(
+      "ADMIN_COOKIE_SECRET: reuses the value of ADMIN_CLIENT_SECRET; every secret must be generated separately",
+    );
+    expect(reused.join("\n")).not.toContain(production.ADMIN_CLIENT_SECRET);
   });
 
   it("sends HSTS only when the portal is served over https", async () => {

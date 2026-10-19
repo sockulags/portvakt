@@ -71,6 +71,26 @@ describe("login view", () => {
     expect(screen.getByTestId("redirecting")).toBeDefined();
   });
 
+  it("asks to wait when the interaction API is rate limited, keeping the methods", async () => {
+    const limited = vi.fn((): Promise<ActionResult> =>
+      Promise.resolve({ ok: false, error: "rate_limited" }),
+    );
+    const user = userEvent.setup();
+    render(<App bootstrap={loginBootstrap()} api={fakeApi({ login: limited })} />);
+    await user.click(await screen.findByTestId("method-bankid"));
+    const alert = await screen.findByTestId("login-error");
+    expect(alert.getAttribute("data-error")).toBe("rate_limited");
+    expect(alert.textContent).toContain("För många försök");
+    expect(screen.getByTestId("method-bankid")).toBeDefined();
+  });
+
+  it("shows the rate limit page of an authorization request", () => {
+    render(
+      <App bootstrap={{ view: "error", code: "rate_limited", locale: noHints }} api={fakeApi()} />,
+    );
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("För många försök");
+  });
+
   it("shows a failed upstream login with the methods as the retry", async () => {
     render(<App bootstrap={loginBootstrap({ error: "upstream_denied" })} api={fakeApi()} />);
     const alert = await screen.findByTestId("login-error");

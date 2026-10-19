@@ -67,19 +67,17 @@ export function adminApiRouter(deps: AdminDeps): Router {
         repos: deps.repos,
       }),
       logger: deps.logger,
+      limits: deps.limits,
     }),
   );
   api.use((_req, res) => {
     sendProblem(res, new ApiError("not_found"));
   });
+  // The baseline security headers (app.ts) cover the API: nothing loads, nothing frames it.
   outer.use(
     ADMIN_API_BASE,
     (_req, res, next) => {
-      res.set({
-        "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
-        "Referrer-Policy": "no-referrer",
-      });
+      res.set("Cache-Control", "no-store");
       next();
     },
     api,

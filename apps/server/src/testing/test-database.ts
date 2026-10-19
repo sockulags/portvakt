@@ -39,6 +39,8 @@ export interface TestDatabase {
   readonly migrationUrl: string;
   readonly runtimeRole: string;
   readonly schema: string;
+  /** The schema's change notification channel (`portvakt.change_channel` of both pools). */
+  readonly changeChannel: string;
   /** Runtime role pool on the test schema: what the repositories use. */
   readonly pool: Pool;
   readonly db: Db;
@@ -138,17 +140,24 @@ export async function setupTestDatabase(): Promise<TestDatabase | undefined> {
     throw error;
   }
 
+  // Change notifications per schema: parallel test files never invalidate each other's caches.
+  const changeChannel = `portvakt_changes_${schema}`;
   const ownerPool = createPool({
     url: migrationUrl,
     searchPath: schema,
     poolMax: 3,
     applicationName: "portvakt-test-owner",
+    changeChannel,
   });
   const pool = createPool({
     url,
     searchPath: schema,
     poolMax: 5,
     applicationName: "portvakt-test",
+    changeChannel,
+    // As in production (DATABASE_STATEMENT_TIMEOUT, DATABASE_IDLE_IN_TRANSACTION_TIMEOUT).
+    statementTimeoutSeconds: 30,
+    idleInTransactionTimeoutSeconds: 60,
   });
   afterAll(async () => {
     await pool.end();
@@ -165,6 +174,7 @@ export async function setupTestDatabase(): Promise<TestDatabase | undefined> {
     migrationUrl,
     runtimeRole,
     schema,
+    changeChannel,
     pool,
     db,
     ownerPool,

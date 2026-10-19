@@ -49,7 +49,11 @@ describe("health probes", () => {
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: "not_found" });
     expect(res.headers["x-powered-by"]).toBeUndefined();
-    expect(res.headers["x-request-id"]).toMatch(/^[0-9a-f-]{36}$/);
+    // Without X-Request-Id or traceparent the request id is the new trace id.
+    expect(res.headers["x-request-id"]).toMatch(/^[0-9a-f]{32}$/);
+    expect(res.headers.traceparent).toBe(
+      `00-${res.headers["x-request-id"]}-${res.headers.traceparent?.split("-")[2]}-01`,
+    );
   });
 });
 

@@ -1,5 +1,6 @@
 import type { z } from "zod";
-import { auditEvent } from "../../audit/catalogue.js";
+import type { AuditLog } from "../../audit/audit-log.js";
+import type { AuditEvent } from "../../domain/audit.js";
 import { certificateInfo, generateSelfSignedKeyPair } from "../../crypto/x509.js";
 import {
   createSamlLoginMethodInputSchema,
@@ -39,6 +40,13 @@ export interface SamlLoginMethodAdminOptions {
   readonly saml: SamlFederation;
   /** Production refuses metadata URLs over plain http. */
   readonly production: boolean;
+  /** Writes the catalogue events (through `repos.audit`) and hands them to the audit sink. */
+  readonly auditLog: AuditLog;
+  /**
+   * Inside a transaction (admin API): receives each written event, which the caller forwards to
+   * the sink after the commit. Without it, events are forwarded at once (pool repositories).
+   */
+  readonly onWritten?: (event: AuditEvent) => void;
 }
 
 /**
@@ -197,15 +205,16 @@ export class SamlLoginMethodAdmin {
   /** Audits the decision to use unsigned metadata (on every save that makes or keeps it). */
   async #auditUnsigned(method: SamlLoginMethod, actor: AdminActor): Promise<void> {
     if (!method.saml.allowUnsignedMetadata) return;
-    await this.#options.repos.audit.append(
-      auditEvent({
-        tenantId: method.tenantId,
-        actor,
-        subject: { type: "login_method", id: method.id },
-        action: "login_method.saml_unsigned_metadata_allowed",
-        details: { loginMethodId: method.id },
-      }),
-    );
+    const { auditLog, onWritten, repos } = this.#options;
+    const stored = await auditLog.recordIn(repos.audit, {
+      tenantId: method.tenantId,
+      actor,
+      subject: { type: "login_method", id: method.id },
+      action: "login_method.saml_unsigned_metadata_allowed",
+      details: { loginMethodId: method.id },
+    });
+    if (onWritten === undefined) auditLog.forward([stored]);
+    else onWritten(stored);
   }
 
   /**

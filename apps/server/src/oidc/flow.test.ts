@@ -334,14 +334,12 @@ describe.skipIf(ts === undefined)("clients and tenants", () => {
     const config = await discoverWithSecret(ts!, world.tenant.slug, later);
     expect(await oauthError(client.clientCredentialsGrant(config))).toBe("invalid_client");
 
-    // Parallel test files share the NOTIFY channel, so another file's event may already have
-    // dropped the provider; when it is still cached, the enable must drop it.
+    // Change notifications are per test schema, so only this file's changes drop the provider.
     const cached = portvakt.registry.peek(world.tenant.slug);
+    expect(cached).toBeDefined();
     await repos.applications.enableForTenant(world.tenant.id, later.application.id);
     // The change notification drops the cached provider on every replica.
-    if (cached !== undefined) {
-      await expect.poll(() => portvakt.registry.peek(world.tenant.slug)).not.toBe(cached);
-    }
+    await expect.poll(() => portvakt.registry.peek(world.tenant.slug)).not.toBe(cached);
     const tokens = await client.clientCredentialsGrant(config);
     expect(tokens.token_type).toBe("bearer");
 

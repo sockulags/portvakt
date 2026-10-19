@@ -40,6 +40,7 @@ async function migrateOnStart(config: Config, logger: Logger): Promise<void> {
 async function main(): Promise<void> {
   const config = loadConfigOrExit();
   const logger = createLogger({ level: config.logLevel });
+  for (const warning of config.warnings) logger.warn({ warning }, "configuration warning");
 
   process.on("unhandledRejection", (reason) => {
     logger.fatal({ err: reason }, "unhandled promise rejection");
@@ -55,6 +56,9 @@ async function main(): Promise<void> {
   const pool = createPool({
     url: config.database.url,
     poolMax: config.database.poolMax,
+    statementTimeoutSeconds: config.database.statementTimeoutSeconds,
+    idleInTransactionTimeoutSeconds: config.database.idleInTransactionTimeoutSeconds,
+    connectionTimeoutMillis: config.database.connectionTimeoutSeconds * 1000,
     onIdleError: (error) => logger.warn({ err: error }, "idle database connection failed"),
   });
   if (config.isProduction) {
@@ -65,6 +69,9 @@ async function main(): Promise<void> {
   const portvakt = createPortvakt({ config, pool, logger });
   await portvakt.start();
   await portvakt.listen(config.port);
+  if (config.metrics.enabled && config.metrics.port !== undefined) {
+    await portvakt.listenMetrics(config.metrics.port, config.metrics.host);
+  }
 
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {

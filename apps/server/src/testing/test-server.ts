@@ -5,7 +5,8 @@ import { join } from "node:path";
 import type { DestinationStream } from "pino";
 import type { AddressInfo } from "node:net";
 import { afterAll } from "vitest";
-import { loadConfig, type Config } from "../config/index.js";
+import type { AuditSink } from "../audit/audit-log.js";
+import { loadConfig, RATE_LIMIT_ENV, type Config } from "../config/index.js";
 import { createLogger } from "../logging/logger.js";
 import { createPortvakt, type Portvakt } from "../server.js";
 import { setupTestDatabase, testMasterKeys, type TestDatabase } from "./test-database.js";
@@ -63,6 +64,8 @@ export interface TestServerOptions {
   readonly env?: Readonly<Record<string, string>>;
   /** Captures the server's log output (level from TEST_LOG_LEVEL, else trace when given). */
   readonly logDestination?: DestinationStream;
+  /** Receives the committed audit events. */
+  readonly auditSink?: AuditSink;
 }
 
 export async function startTestServer(
@@ -88,6 +91,8 @@ export async function startTestServer(
     // The mock IdP and the test server itself are on loopback.
     ALLOW_PRIVATE_UPSTREAM_HOSTS: "127.0.0.1,localhost",
     LOGIN_UI_DIR: testLoginUiDir(),
+    // Every test file signs in from 127.0.0.1 many times a minute; rate limit tests turn them on.
+    ...Object.fromEntries(Object.keys(RATE_LIMIT_ENV).map((name) => [name, "off"])),
     LOG_LEVEL:
       process.env.TEST_LOG_LEVEL ?? (options.logDestination === undefined ? "silent" : "trace"),
     ...options.env,
@@ -101,6 +106,7 @@ export async function startTestServer(
     pool: db.pool,
     logger,
     keys: db.keys,
+    ...(options.auditSink === undefined ? {} : { auditSink: options.auditSink }),
   });
   portvakt.serve(server);
   // Registered after the database cleanup hook, so it runs before it (hooks run as a stack).

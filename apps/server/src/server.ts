@@ -1,5 +1,6 @@
 import { createServer, type RequestListener, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { metricsHandler, outsideRequest } from "@portvakt/http-kit";
 import express, { Router, type Express } from "express";
 import type { Pool } from "pg";
 import { adminApiRouter } from "./admin/api/index.js";
@@ -19,9 +20,11 @@ import { KeyRotationService, type ScheduledRotationResult } from "./keys/rotatio
 import type { Logger } from "./logging/logger.js";
 import { loginRoutes } from "./login/routes.js";
 import { samlAssetRoutes } from "./login/saml-routes.js";
+import { RequestLimits } from "./http/rate-limits.js";
+import { registerCollectors } from "./metrics/collectors.js";
 import { MetricRegistry } from "./metrics/registry.js";
 import { OutboundGuard } from "./net/outbound.js";
-import { LOGIN_UI_BASE, LoginUiShell } from "./login/ui-shell.js";
+import { LOGIN_UI_BASE, LOGIN_UI_HEADERS, LoginUiShell, localeHints } from "./login/ui-shell.js";
 import { AcrRanking } from "./oidc/acr.js";
 import { ChangeListener } from "./oidc/change-listener.js";
 import { createInteractionService, type InteractionService } from "./oidc/interactions.js";
@@ -29,6 +32,7 @@ import { createProviderPages } from "./oidc/pages.js";
 import { buildTenantProvider } from "./oidc/provider.js";
 import { ProviderRegistry } from "./oidc/registry.js";
 import { tenantOf, tenantRoutes } from "./oidc/routes.js";
+import { CHANGE_CHANNEL } from "./repositories/change-events.js";
 import { SessionPolicyService } from "./oidc/session-policy.js";
 import type { ChangeEvent } from "./repositories/change-events.js";
 import { FederationStateRepository } from "./repositories/federation-states.js";
@@ -73,8 +77,10 @@ export interface Portvakt {
   readonly federation: FederationService;
   /** Admin-facing SAML login method operations (the admin API, M6, calls these). */
   readonly samlAdmin: SamlLoginMethodAdmin;
-  /** In-process counters (M8 exposes them to Prometheus). */
+  /** The metrics registry served at `/metrics` (Prometheus text format). */
   readonly metrics: MetricRegistry;
+  /** The rate limits of this replica (RATE_LIMIT_*). */
+  readonly limits: RequestLimits;
   /** First-start bootstrap (also run by `start()`); does nothing once a tenant exists. */
   readonly bootstrap: () => Promise<BootstrapResult>;
   readonly readiness: () => Promise<ReadinessReport>;
@@ -94,6 +100,11 @@ export interface Portvakt {
    */
   serve(server: Server, handler?: RequestListener): void;
   listen(port: number, host?: string): Promise<Server>;
+  /**
+   * Serves `/metrics` alone on a port of its own (METRICS_PORT), closed by shutdown; behind
+   * METRICS_TOKEN when set.
+   */
+  listenMetrics(port: number, host?: string): Promise<Server>;
   /**
    * Graceful shutdown: readiness turns 503, requests are still served for
    * `shutdownDrainDelaySeconds` (so load balancers stop routing here first), then responses ask
@@ -132,8 +143,15 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     logger,
   });
   const pages = createProviderPages(shell);
-  const metrics = new MetricRegistry();
+  const metrics = new MetricRegistry({ prefix: "portvakt" });
+  const limits = new RequestLimits(config.rateLimits, metrics);
   const keyCache = new SigningKeyCache(repos.signingKeys);
+  const stopCollectors = registerCollectors(metrics, {
+    pool,
+    repos,
+    saml: new SamlRepository(db, keys.secrets),
+    keyCache,
+  });
   const servers = new Set<Server>();
   /** Shutdown began: readiness reports 503. */
   let draining = false;
@@ -158,6 +176,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
         pages,
         upstreamLogout: (logout) => federation.saml.startLogout(logout),
         outbound,
+        metrics,
       }),
   });
 
@@ -171,7 +190,10 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     keys,
     policy: config.keyRotation,
     logger,
-    onChange: reloadKeys,
+    onChange: async () => {
+      await reloadKeys();
+      await scheduleActivation();
+    },
     auditLog,
   });
   const interactions = createInteractionService(repos, auditLog);
@@ -179,6 +201,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     production: config.isProduction,
     allowPrivateHosts: config.federation.allowPrivateUpstreamHosts,
     timeoutSeconds: config.federation.upstreamTimeoutSeconds,
+    metrics,
   });
   const upstream = new UpstreamClients({
     outbound,
@@ -206,6 +229,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     repos,
     saml: federation.saml,
     production: config.isProduction,
+    auditLog,
   });
   const repositoryOptions = {
     maxSessionSeconds: config.tokens.sessionSeconds,
@@ -224,6 +248,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     auditLog,
     outbound,
     logger,
+    limits,
   });
   const bootstrap = (): Promise<BootstrapResult> =>
     runBootstrap({ config, db, keys, repositoryOptions, auditLog, outbound, logger });
@@ -240,18 +265,54 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
         return;
       case "signing_keys":
         await reloadKeys();
+        await scheduleActivation();
         return;
     }
   };
-  const listener = new ChangeListener({
-    url: options.listenUrl ?? config.database.url,
-    logger,
-    onEvent,
-    onResync: async () => {
-      await reloadKeys();
-      registry.invalidateAll();
-    },
-  });
+  /** Created at start, on the channel the pool's connections notify on (tests: per schema). */
+  let listener: ChangeListener | undefined;
+  const createListener = (channel: string): ChangeListener =>
+    new ChangeListener({
+      url: options.listenUrl ?? config.database.url,
+      logger,
+      onEvent,
+      channel,
+      onResync: async () => {
+        await reloadKeys();
+        await scheduleActivation();
+        registry.invalidateAll();
+      },
+    });
+
+  /**
+   * A manual rotation schedules the next key's activation (KEY_MANUAL_PUBLISH_AHEAD): every
+   * replica runs the rotation job at that time (the advisory lock lets one of them do it), so
+   * activation does not wait for KEY_ROTATION_CHECK_INTERVAL. Re-armed whenever the keys change.
+   */
+  let activationTimer: NodeJS.Timeout | undefined;
+  const scheduleActivation = async (): Promise<void> => {
+    if (draining) return;
+    const at = await rotation.scheduledActivation();
+    if (activationTimer !== undefined) clearTimeout(activationTimer);
+    activationTimer = undefined;
+    if (at === null) return;
+    // At most a day ahead (setTimeout's range); the periodic check covers anything later.
+    // Overdue (another replica holds the lock, or the clocks differ): try again in a second.
+    const delay = Math.min(Math.max(1000, at.getTime() - Date.now() + 250), 86_400_000);
+    // Armed while handling the rotation request: the job's log lines are not that request's.
+    activationTimer = outsideRequest(() =>
+      setTimeout(() => {
+        activationTimer = undefined;
+        jobs
+          .rotateKeys()
+          .then(() => scheduleActivation())
+          .catch((error: unknown) => {
+            logger.error({ err: error }, "scheduled key activation failed");
+          });
+      }, delay),
+    );
+    activationTimer.unref();
+  };
 
   const jobs = {
     reload: async (): Promise<void> => {
@@ -289,11 +350,13 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     },
     rotateKeys: () => rotation.runScheduled(),
     refreshSamlMetadata: async (): Promise<number | null> => {
-      // The lock only elects one replica; the refreshes run on the pool, outside its transaction.
+      // The lock only elects one replica; the refreshes run on the pool, outside its transaction,
+      // which therefore stays idle for as long as the refreshes take (each request is bounded by
+      // UPSTREAM_TIMEOUT): DATABASE_IDLE_IN_TRANSACTION_TIMEOUT must not end it.
       const result = await runExclusive(
         db,
         JOB_LOCKS.samlMetadataRefresh,
-        { wait: false },
+        { wait: false, idleInTransactionTimeoutSeconds: 0 },
         async () => federation.saml.refreshDue(),
       );
       return result.ran ? result.value : null;
@@ -350,11 +413,19 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     );
   }
 
+  const scrape = metricsHandler(metrics, { token: config.metrics.token });
   const app = createApp({
     logger,
     trustProxy: config.trustProxy,
     readiness,
     isDraining: () => closing,
+    hsts: config.publicUrl.startsWith("https://"),
+    maxUrlLength: config.http.maxUrlLength,
+    metrics,
+    // On the main port only without a port of its own; production requires METRICS_TOKEN then.
+    ...(config.metrics.enabled && config.metrics.port === undefined
+      ? { metricsEndpoint: scrape }
+      : {}),
     routes: [
       adminApi,
       loginUiAssets(shell.dir, config.isProduction),
@@ -365,6 +436,16 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
         logger,
         testRoutes,
         publicUrl: config.publicUrl,
+        limits,
+        rateLimitedPage: (req, res) => {
+          res.set(LOGIN_UI_HEADERS).send(
+            shell.render({
+              view: "error",
+              code: "rate_limited",
+              locale: localeHints(req.query.ui_locales, req.get("accept-language")),
+            }),
+          );
+        },
         loginRoutes: loginRoutes({
           config,
           repos,
@@ -375,12 +456,14 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
           shell,
           logger,
           tenantOf,
+          limits,
         }),
       }),
     ],
   });
 
   const serve = (server: Server, handler: RequestListener = app): void => {
+    applyServerLimits(server, config.http);
     server.on("request", handler);
     servers.add(server);
     server.once("close", () => servers.delete(server));
@@ -398,6 +481,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     federation,
     samlAdmin,
     metrics,
+    limits,
     bootstrap,
     readiness,
     jobs,
@@ -408,13 +492,15 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
       await rotation.ensureActiveKey();
       await reloadKeys();
       await bootstrap();
+      listener = createListener(await changeChannel(db));
       await listener.start();
+      await scheduleActivation();
       for (const task of tasks) task.start();
       started = true;
     },
     serve,
     async listen(port, host) {
-      const server = createServer();
+      const server = createServer({ maxHeaderSize: config.http.maxHeaderBytes });
       serve(server);
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
@@ -425,6 +511,28 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
       });
       const address = server.address() as AddressInfo;
       logger.info({ port: address.port }, "listening");
+      return server;
+    },
+    async listenMetrics(port, host) {
+      const server = createServer((req, res) => {
+        if ((req.url ?? "").split("?", 1)[0] === "/metrics") scrape(req, res);
+        else {
+          res.statusCode = 404;
+          res.end();
+        }
+      });
+      server.requestTimeout = 10_000;
+      server.headersTimeout = 10_000;
+      servers.add(server);
+      server.once("close", () => servers.delete(server));
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(port, host, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      logger.info({ port: (server.address() as AddressInfo).port }, "metrics listening");
       return server;
     },
     async shutdown() {
@@ -442,7 +550,9 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
         [...servers].map((server) => closeServer(server, config.shutdownTimeoutSeconds * 1000)),
       );
       await Promise.all(tasks.map((task) => task.stop()));
-      await listener.stop();
+      if (activationTimer !== undefined) clearTimeout(activationTimer);
+      await listener?.stop();
+      stopCollectors();
       logger.info("shut down");
     },
   };
@@ -471,6 +581,30 @@ function loginUiAssets(dir: string, production: boolean): Router {
     }),
   );
   return router;
+}
+
+/**
+ * Timeouts of every server Portvakt serves on (HTTP_REQUEST_TIMEOUT, HTTP_HEADERS_TIMEOUT,
+ * HTTP_KEEP_ALIVE_TIMEOUT): slow clients cannot hold connections open, and idle keep-alive
+ * connections outlive the load balancer's (so it never reuses one Node just closed).
+ */
+function applyServerLimits(server: Server, limits: Config["http"]): void {
+  server.requestTimeout = limits.requestTimeoutSeconds * 1000;
+  server.headersTimeout = limits.headersTimeoutSeconds * 1000;
+  server.keepAliveTimeout = limits.keepAliveTimeoutSeconds * 1000;
+}
+
+/**
+ * The channel change notifications go to: CHANGE_CHANNEL, unless the pool's connections name
+ * another one (`portvakt.change_channel`, set per schema by the test database so parallel test
+ * files never see each other's events).
+ */
+async function changeChannel(db: ReturnType<typeof createDb>): Promise<string> {
+  const [row] = await db.query<{ channel: string }>(
+    "SELECT coalesce(nullif(current_setting('portvakt.change_channel', true), ''), $1) AS channel",
+    [CHANGE_CHANNEL],
+  );
+  return row?.channel ?? CHANGE_CHANNEL;
 }
 
 async function pingDatabase(pool: Pool): Promise<boolean> {

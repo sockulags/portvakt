@@ -18,6 +18,11 @@ export interface RotationPolicy {
   readonly publishAheadSeconds: number;
   /** How long a `retiring` key stays published (KEY_RETIRE_AFTER). */
   readonly retireAfterSeconds: number;
+  /**
+   * Manual rotation without `emergency`: how long the new key is published before it signs
+   * (KEY_MANUAL_PUBLISH_AHEAD).
+   */
+  readonly manualPublishAheadSeconds: number;
 }
 
 const SYSTEM_ACTOR = { type: "system", id: "key-rotation" } as const;
@@ -34,22 +39,32 @@ export const rotateNowInputSchema = z
     /** Short reason for the audit log. No personal data. */
     reason: z.string().trim().min(1).max(500),
     /**
-     * Key compromise: the previous active key is retired immediately instead of retiring after
-     * KEY_RETIRE_AFTER, so tokens it signed stop verifying at once.
+     * Key compromise: a new key signs at once and the previous active key is retired immediately
+     * instead of retiring after KEY_RETIRE_AFTER, so tokens it signed stop verifying at once.
+     * Otherwise the new key is published now and signs after KEY_MANUAL_PUBLISH_AHEAD.
      */
     emergency: z.boolean(),
   })
   .strict();
 export type RotateNowInput = z.input<typeof rotateNowInputSchema>;
 
-export interface RotationResult {
-  /** The key that now signs. */
-  readonly activatedKid: string;
-  /** The previous active key, now `retiring` (published, no longer signing), if any. */
-  readonly retiringKid: string | null;
-  /** Keys retired by this call (the previous active key in an emergency). */
-  readonly retiredKids: readonly string[];
-}
+export type RotationResult =
+  | {
+      /** A new key signs from now on (an emergency, or a published key that was already due). */
+      readonly status: "activated";
+      /** The key that now signs. */
+      readonly activatedKid: string;
+      /** The previous active key, now `retiring` (published, no longer signing), if any. */
+      readonly retiringKid: string | null;
+      /** Keys retired by this call (the previous active key in an emergency). */
+      readonly retiredKids: readonly string[];
+    }
+  | {
+      /** The new key is published (JWKS) and becomes active at `activatesAt` (rotation job). */
+      readonly status: "scheduled";
+      readonly nextKid: string;
+      readonly activatesAt: Date;
+    };
 
 /** Extensions of a manual rotation that run inside its lock and transaction (admin API). */
 export interface RotateNowHooks {
@@ -93,8 +108,13 @@ export class KeyRotationService {
   readonly #written = new WeakMap<Repositories, AuditEvent[]>();
 
   constructor(options: KeyRotationServiceOptions) {
-    const { publishAheadSeconds, retireAfterSeconds, intervalSeconds } = options.policy;
-    if (publishAheadSeconds >= intervalSeconds || retireAfterSeconds >= intervalSeconds) {
+    const { publishAheadSeconds, retireAfterSeconds, intervalSeconds, manualPublishAheadSeconds } =
+      options.policy;
+    if (
+      publishAheadSeconds >= intervalSeconds ||
+      retireAfterSeconds >= intervalSeconds ||
+      manualPublishAheadSeconds >= intervalSeconds
+    ) {
       throw new TypeError("publish-ahead and retire-after must be shorter than the interval");
     }
     this.#options = options;
@@ -180,11 +200,13 @@ export class KeyRotationService {
   }
 
   /**
-   * Manual rotation (admin API, M6): a new key signs from now on. The pending `next` key is used
-   * when there is one (it is already published), otherwise a new key is created. The previous
-   * active key becomes `retiring`, so tokens it signed stay verifiable; verifiers pick up the new
-   * kid by refetching JWKS on an unknown kid. With `emergency` (key compromise) the previous key is
-   * retired at once instead. Every forced transition is audited with the actor and reason.
+   * Manual rotation (admin API). Without `emergency` it publishes ahead: the pending `next` key
+   * (or a new one) gets an activation time KEY_MANUAL_PUBLISH_AHEAD after it was published, and
+   * the rotation job activates it then (`scheduled`), so every verifier has fetched the new key
+   * before anything is signed with it. A `next` key published at least that long ago is
+   * activated at once (`activated`). With `emergency` (key compromise) a new key signs at once
+   * (forced, no wait) and the previous active key is retired immediately: tokens it signed stop
+   * verifying. Every rotation is audited with the actor and reason (`key.rotate`).
    */
   async rotateNow(input: RotateNowInput, hooks: RotateNowHooks = {}): Promise<RotationResult> {
     const parsed = rotateNowInputSchema.safeParse(input);
@@ -193,45 +215,104 @@ export class KeyRotationService {
     }
     const { actor, reason, emergency } = parsed.data;
     const forced = { force: true, actor, reason } as const;
+    const { manualPublishAheadSeconds } = this.#options.policy;
     const result = await this.#exclusive(true, async (repos): Promise<RotationResult> => {
       await hooks.check?.(repos);
       const next = (await repos.signingKeys.list(["next"]))[0] ?? (await this.#createNext(repos));
-      const activation = await repos.signingKeys.activate(next.kid, forced);
-      const retiredKids: string[] = [];
-      if (emergency && activation.retiring !== null) {
-        await repos.signingKeys.retire(activation.retiring.kid, forced);
-        retiredKids.push(activation.retiring.kid);
+      let rotated: RotationResult;
+      if (emergency) {
+        const activation = await repos.signingKeys.activate(next.kid, forced);
+        const retiredKids: string[] = [];
+        if (activation.retiring !== null) {
+          await repos.signingKeys.retire(activation.retiring.kid, forced);
+          retiredKids.push(activation.retiring.kid);
+        }
+        await this.#appendRotate(repos, actor, next.kid, {
+          reason,
+          emergency,
+          retiringKid: activation.retiring?.kid ?? null,
+          retiredKids,
+        });
+        rotated = {
+          status: "activated",
+          activatedKid: activation.activated.kid,
+          retiringKid: null,
+          retiredKids,
+        };
+      } else {
+        const scheduled = await repos.signingKeys.scheduleActivation(
+          next.kid,
+          manualPublishAheadSeconds,
+        );
+        const activatesAt = scheduled.activateAt ?? new Date();
+        await this.#appendRotate(repos, actor, next.kid, {
+          reason,
+          emergency,
+          retiringKid: null,
+          retiredKids: [],
+          activatesAt: activatesAt.toISOString(),
+        });
+        // A next key published long enough ago (by the scheduled rotation) is due already.
+        rotated = (await this.#activateIfDue(repos, next.kid, false))
+          ? {
+              status: "activated",
+              activatedKid: next.kid,
+              retiringKid: (await repos.signingKeys.list(["retiring"]))[0]?.kid ?? null,
+              retiredKids: [],
+            }
+          : { status: "scheduled", nextKid: next.kid, activatesAt };
       }
-      await this.#append(
-        repos,
-        auditEvent({
-          tenantId: null,
-          actor,
-          subject: { type: "signing_key", id: next.kid },
-          action: "key.rotate",
-          details: {
-            reason,
-            emergency,
-            retiringKid: activation.retiring?.kid ?? null,
-            retiredKids,
-          },
-        }),
-      );
-      const rotated: RotationResult = {
-        activatedKid: activation.activated.kid,
-        retiringKid: emergency ? null : (activation.retiring?.kid ?? null),
-        retiredKids,
-      };
       for (const event of hooks.audit?.(rotated) ?? []) await this.#append(repos, event);
       return rotated;
     });
     if (result === undefined) throw new Error("Key rotation lock was not acquired");
-    this.#options.logger.warn(
-      { activatedKid: result.activatedKid, retiredKids: result.retiredKids, emergency },
-      "signing key rotated manually",
-    );
+    if (result.status === "activated") {
+      this.#options.logger.warn(
+        { activatedKid: result.activatedKid, retiredKids: result.retiredKids, emergency },
+        "signing key rotated manually",
+      );
+    } else {
+      this.#options.logger.warn(
+        { nextKid: result.nextKid, activatesAt: result.activatesAt.toISOString() },
+        "signing key rotation scheduled: the new key is published",
+      );
+    }
     await this.#options.onChange?.();
     return result;
+  }
+
+  /**
+   * When the pending `next` key of a manual rotation becomes active; `null` when none is
+   * scheduled. Replicas run the rotation job at that time (besides its interval).
+   */
+  async scheduledActivation(): Promise<Date | null> {
+    const repos = createRepositories(this.#options.db, this.#options.keys);
+    const [next] = await repos.signingKeys.list(["next"]);
+    return next?.activateAt ?? null;
+  }
+
+  async #appendRotate(
+    repos: Repositories,
+    actor: z.output<typeof rotateNowInputSchema>["actor"],
+    kid: string,
+    details: {
+      readonly reason: string;
+      readonly emergency: boolean;
+      readonly retiringKid: string | null;
+      readonly retiredKids: string[];
+      readonly activatesAt?: string;
+    },
+  ): Promise<void> {
+    await this.#append(
+      repos,
+      auditEvent({
+        tenantId: null,
+        actor,
+        subject: { type: "signing_key", id: kid },
+        action: "key.rotate",
+        details,
+      }),
+    );
   }
 
   async #activateIfDue(repos: Repositories, kid: string, noActive: boolean): Promise<boolean> {

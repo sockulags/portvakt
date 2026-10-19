@@ -1,5 +1,5 @@
 import { expect, organisationNumber, tenantAdmin, test } from "../../src/fixtures";
-import { JAVA, METHODS, RUN_DIGITS, RUN_ID } from "../../src/env";
+import { ACCESS_TOKEN_DUE_MS, JAVA, METHODS, RUN_DIGITS, RUN_ID } from "../../src/env";
 import { DemoPage, type DemoName } from "../../src/pages/demo";
 import { LoginUi } from "../../src/pages/login-ui";
 import { MockIdp } from "../../src/pages/mock-idp";
@@ -8,8 +8,9 @@ import { MockIdp } from "../../src/pages/mock-idp";
  * Scenario 6: an agent with a representation grant (mock BankID persona Sven, by personal
  * identity number) chooses an organisation; the demo shows that it acts for the organisation and
  * who the agent is. The tenant administrator revokes the grant in the portal; the next token
- * refresh (the next API call: e2e access tokens are always due for one) fails and the demo's
- * session ends. Each variant has its own organisation and grant, made through the admin API.
+ * refresh fails and the demo's session ends. The SDKs refresh a token once half its lifetime
+ * has passed, so the test waits for that (ACCESS_TOKEN_DUE_MS) before the call that must
+ * refresh. Each variant has its own organisation and grant, made through the admin API.
  */
 const SVEN_PIN = "191212121212";
 
@@ -70,7 +71,9 @@ for (const { demo: which, title, digits } of cases) {
       await admin.context.close();
     }
 
-    // The next refresh is refused (invalid_grant): the demo's session has ended.
+    // The next refresh (once the access token is due) is refused (invalid_grant): the demo's
+    // session has ended.
+    await page.waitForTimeout(ACCESS_TOKEN_DUE_MS);
     expect(await demo.callApi()).toBe("session_ended");
     await demo.goto();
     await expect(demo.signedOut).toBeVisible();

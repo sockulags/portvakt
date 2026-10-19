@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { parseRateLimit, type RateLimit } from "@portvakt/http-kit";
 import { z } from "zod";
 
 /** Development-only defaults (.env.example); refused with NODE_ENV=production. */
@@ -31,6 +32,16 @@ export interface AdminConfig {
   readonly idleTimeoutSeconds: number;
   /** The built SPA (`npm run build -w apps/admin`). */
   readonly webDir: string;
+  /** Proxy hops trusted for X-Forwarded-For (ADMIN_TRUST_PROXY): the client IP of rate limits. */
+  readonly trustProxy: boolean | number;
+  /**
+   * Per client IP, per replica: the sign-in routes of every tenant's BFF (`/t/{slug}/auth/login`,
+   * `step-up`, `select-representation`, `callback`). `null` when off (ADMIN_RATE_LIMIT_LOGIN).
+   */
+  readonly loginRateLimit: RateLimit | null;
+  /** `/metrics` (ADMIN_METRICS_ENABLED, default true), behind ADMIN_METRICS_TOKEN when set. */
+  readonly metrics: { readonly enabled: boolean; readonly token: string | undefined };
+  readonly logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
 }
 
 export class AdminConfigError extends Error {
@@ -84,6 +95,38 @@ const envSchema = z.object({
   ),
   ADMIN_IDLE_TIMEOUT_SECONDS: z.preprocess(empty, z.coerce.number().int().min(60).default(1800)),
   ADMIN_WEB_DIR: z.preprocess(empty, z.string().optional()),
+  ADMIN_TRUST_PROXY: z.preprocess(
+    empty,
+    z
+      .string()
+      .trim()
+      .toLowerCase()
+      .default("false")
+      .refine(
+        (value) => /^(true|false|[0-9]{1,2})$/.test(value),
+        "must be false, true or a number of proxy hops",
+      )
+      .transform((value) =>
+        value === "true" ? true : value === "false" || value === "0" ? false : Number(value),
+      ),
+  ),
+  ADMIN_RATE_LIMIT_LOGIN: z.preprocess(
+    empty,
+    z
+      .string()
+      .default("30/1m")
+      .refine(
+        (value) => parseRateLimit(value) !== undefined,
+        "must be <count>/<period> such as 30/1m, or off",
+      )
+      .transform((value) => parseRateLimit(value) ?? null),
+  ),
+  ADMIN_METRICS_ENABLED: z.preprocess(empty, z.enum(["true", "false"]).default("true")),
+  ADMIN_METRICS_TOKEN: z.preprocess(empty, z.string().optional()),
+  ADMIN_LOG_LEVEL: z.preprocess(
+    empty,
+    z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
+  ),
 });
 
 const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]"]);
@@ -139,6 +182,32 @@ export function loadAdminConfig(env: NodeJS.ProcessEnv = process.env): AdminConf
     if (data.ADMIN_COOKIE_SECURE === "false") {
       issues.push("ADMIN_COOKIE_SECURE: cookies must be Secure in production");
     }
+    if (data.ADMIN_METRICS_ENABLED === "true") {
+      if (data.ADMIN_METRICS_TOKEN === undefined) {
+        issues.push("ADMIN_METRICS_TOKEN: required in production (or ADMIN_METRICS_ENABLED=false)");
+      } else if (data.ADMIN_METRICS_TOKEN.length < 32) {
+        issues.push("ADMIN_METRICS_TOKEN: at least 32 characters in production");
+      }
+    }
+    // Every secret is generated on its own: one leaked value must not open another door.
+    const secrets: [string, string | undefined][] = [
+      ["ADMIN_CLIENT_SECRET", data.ADMIN_CLIENT_SECRET],
+      ...cookieSecrets.map((value): [string, string] => ["ADMIN_COOKIE_SECRET", value]),
+      ...keys.map((value): [string, string] => ["ADMIN_SESSION_ENCRYPTION_KEY", value]),
+      ["ADMIN_METRICS_TOKEN", data.ADMIN_METRICS_TOKEN],
+    ];
+    const seen = new Map<string, string>();
+    for (const [name, value] of secrets) {
+      if (value === undefined) continue;
+      const owner = seen.get(value);
+      if (owner !== undefined) {
+        issues.push(
+          owner === name
+            ? `${name}: the same value appears twice`
+            : `${name}: reuses the value of ${owner}; every secret must be generated separately`,
+        );
+      } else seen.set(value, name);
+    }
   }
   if (issues.length > 0) throw new AdminConfigError(issues);
   const url = new URL(publicUrl);
@@ -161,5 +230,12 @@ export function loadAdminConfig(env: NodeJS.ProcessEnv = process.env): AdminConf
     defaultTenant: data.ADMIN_DEFAULT_TENANT,
     idleTimeoutSeconds: data.ADMIN_IDLE_TIMEOUT_SECONDS,
     webDir: data.ADMIN_WEB_DIR ?? fileURLToPath(new URL("../dist/web", import.meta.url)),
+    trustProxy: data.ADMIN_TRUST_PROXY,
+    loginRateLimit: data.ADMIN_RATE_LIMIT_LOGIN,
+    metrics: {
+      enabled: data.ADMIN_METRICS_ENABLED === "true",
+      token: data.ADMIN_METRICS_TOKEN,
+    },
+    logLevel: data.ADMIN_LOG_LEVEL,
   };
 }

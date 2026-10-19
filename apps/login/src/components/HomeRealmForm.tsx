@@ -5,7 +5,7 @@ import { useI18n } from "../i18n";
 /** A plausible email address: something@domain.tld, no spaces. */
 export const isEmail = (value: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 
-export type HomeRealmOutcome = "redirecting" | "not_found" | "failed";
+export type HomeRealmOutcome = "redirecting" | "not_found" | "rate_limited" | "failed";
 
 interface HomeRealmFormProps {
   readonly initialEmail?: string | null;
@@ -38,7 +38,13 @@ export function HomeRealmForm({ initialEmail, onSubmit, disabled = false }: Home
     const outcome = await onSubmit(email.trim());
     if (outcome === "redirecting") return;
     setBusy(false);
-    setError(outcome === "not_found" ? t.hrd.notFound : t.errors.request_failed.body);
+    setError(
+      outcome === "not_found"
+        ? t.hrd.notFound
+        : outcome === "rate_limited"
+          ? t.errors.rate_limited.body
+          : t.errors.request_failed.body,
+    );
   };
 
   // The design system's Field renders hint and error inside the label, which would make them

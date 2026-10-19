@@ -23,6 +23,7 @@ export const LOGIN_ERROR_CODES = [
   "no_representation_available",
   "representation_not_allowed",
   "step_up_person_mismatch",
+  "rate_limited",
   "request_failed",
 ] as const;
 export type LoginErrorCode = (typeof LOGIN_ERROR_CODES)[number];

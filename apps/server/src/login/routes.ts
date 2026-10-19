@@ -27,6 +27,8 @@ import {
   type RepresentationRegistry,
 } from "../representation/registry.js";
 import type { Repositories } from "../repositories/index.js";
+import type { RateLimitName } from "../config/index.js";
+import { clientIp, tooManyRequests, type RequestLimits } from "../http/rate-limits.js";
 import { csrfGuard, csrfToken } from "./csrf.js";
 import { samlRoutes } from "./saml-routes.js";
 import {
@@ -49,6 +51,8 @@ export interface LoginRoutesOptions {
   readonly representation: RepresentationRegistry;
   /** The tenant provider `tenantRoutes` resolved for the request. */
   readonly tenantOf: (res: Response) => TenantProvider;
+  /** Rate limits (none: unlimited). */
+  readonly limits?: RequestLimits;
 }
 
 /** A login method as the login UI shows it (no configuration, no secrets). */
@@ -109,6 +113,7 @@ const STATUS_BY_ERROR: Partial<Record<LoginErrorCode, number>> = {
   no_representation_available: 403,
   step_up_person_mismatch: 403,
   upstream_unavailable: 502,
+  rate_limited: 429,
 };
 const statusOf = (code: LoginErrorCode): number => STATUS_BY_ERROR[code] ?? 400;
 
@@ -246,6 +251,40 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
   const noStore = (_req: Request, res: Response, next: NextFunction): void => {
     res.setHeader("Cache-Control", "no-store");
     next();
+  };
+
+  /**
+   * Per-IP limit of the interaction API (method choice and home realm lookup, representation,
+   * abort): 429 `{ error: "rate_limited" }` with Retry-After, which the login UI shows as a
+   * friendly page.
+   */
+  const limitApi = (name: RateLimitName) => {
+    return (req: Request, res: Response, next: NextFunction): void => {
+      const outcome = options.limits?.check([[name, clientIp(req)]]) ?? { allowed: true };
+      if (outcome.allowed) {
+        next();
+        return;
+      }
+      tooManyRequests(res, outcome.retryAfterSeconds).json({
+        error: "rate_limited",
+        retryAfterSeconds: outcome.retryAfterSeconds,
+      });
+    };
+  };
+  const limitInteraction = limitApi("interactionIp");
+  /** Per-IP limit of the upstream callbacks (browser navigations): the login UI's error page. */
+  const limitFederation = (req: Request, res: Response, next: NextFunction): void => {
+    const outcome = options.limits?.check([["federationIp", clientIp(req)]]) ?? { allowed: true };
+    if (outcome.allowed) {
+      next();
+      return;
+    }
+    tooManyRequests(res, outcome.retryAfterSeconds);
+    sendPage(res, 429, {
+      view: "error",
+      code: "rate_limited",
+      locale: localeHints(undefined, req.get("accept-language")),
+    });
   };
   const json = express.json({ limit: "4kb", strict: true });
   const guard = csrfGuard({
@@ -424,6 +463,7 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
   router.post(
     "/interaction/:uid/login",
     noStore,
+    limitInteraction,
     guard,
     json,
     api(async (req, res) => {
@@ -486,6 +526,7 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
   router.post(
     "/interaction/:uid/representation",
     noStore,
+    limitInteraction,
     guard,
     json,
     api(async (req, res) => {
@@ -539,6 +580,7 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
   router.post(
     "/interaction/:uid/abort",
     noStore,
+    limitInteraction,
     guard,
     json,
     api(async (req, res) => {
@@ -583,6 +625,7 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
   router.get(
     "/federation/:loginMethodId/callback",
     noStore,
+    limitFederation,
     run(async (req, res) => {
       const tp = tenantOf(res);
       const currentUrl = new URL(req.originalUrl, config.publicUrl);
@@ -629,7 +672,7 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
     }),
   );
 
-  router.use(samlRoutes({ federation, shell, tenantOf }));
+  router.use(samlRoutes({ federation, shell, tenantOf, limit: limitFederation }));
 
   return router;
 }

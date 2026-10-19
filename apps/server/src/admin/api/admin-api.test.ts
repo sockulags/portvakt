@@ -686,7 +686,30 @@ describe.skipIf(ts === undefined)("admin API", () => {
       );
       expect(attempts.map((attempt) => attempt.status).sort()).toEqual([200, 412, 412]);
       const rotated = attempts.find((attempt) => attempt.status === 200)!;
-      expect(rotated.body.retiringKid).not.toBeNull();
+      // Published ahead: the new key is in the key set and becomes active later.
+      expect(rotated.body).toMatchObject({
+        status: "scheduled",
+        activatedKid: null,
+        retiringKid: null,
+        retiredKids: [],
+      });
+      const nextKid = rotated.body.nextKid as string;
+      const activatesAt = Date.parse(rotated.body.activatesAt as string);
+      expect(activatesAt - Date.now()).toBeGreaterThan(
+        (ts!.config.keyRotation.manualPublishAheadSeconds - 5) * 1000,
+      );
+      const listed = await call<{ keys: Json[]; etag: string }>(
+        tokens.platform,
+        "GET",
+        "/signing-keys",
+      );
+      expect(listed.body.keys).toContainEqual(
+        expect.objectContaining({
+          kid: nextKid,
+          state: "next",
+          activateAt: rotated.body.activatesAt,
+        }),
+      );
       const events = await ts!.db.repos.audit.query(
         { allTenants: true, tenantId: null },
         { actions: ["admin.signing_key.rotate", "key.rotate"] },
@@ -695,8 +718,12 @@ describe.skipIf(ts === undefined)("admin API", () => {
         "admin.signing_key.rotate",
         "key.rotate",
       ]);
-      // Tokens signed by the retiring key still work.
+      expect(
+        events.events.find((event) => event.action === "admin.signing_key.rotate")?.details,
+      ).toMatchObject({ emergency: false, activatedKid: null, scheduledKid: nextKid });
+      // The key that signed the callers' tokens still signs.
       expect((await call(tokens.adminX, "GET", "/me")).status).toBe(200);
+      // (Emergency rotation retires the key these tokens carry: keys/rotation.test.ts.)
     });
 
     it("pages audit events with a keyset cursor; system-wide only for the platform", async () => {

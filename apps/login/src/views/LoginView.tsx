@@ -101,6 +101,7 @@ export function LoginView({ api, error, navigate }: LoginViewProps) {
   const chooseEmail = async (email: string): Promise<HomeRealmOutcome> => {
     const outcome = await choose({ email });
     if (outcome === "redirecting") return "redirecting";
+    if (outcome === "rate_limited") return "rate_limited";
     return outcome === "no_home_realm" ? "not_found" : "failed";
   };
   const cancel = (): void => {
@@ -165,6 +166,7 @@ function actionErrorCode(error: string): LoginErrorCode {
     case "upstream_unavailable":
     case "upstream_error":
     case "interaction_expired":
+    case "rate_limited":
       return error;
     case "interaction_not_found":
       return "interaction_expired";

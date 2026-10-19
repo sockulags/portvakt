@@ -1,7 +1,15 @@
 import { timingSafeEqual } from "node:crypto";
-import { LoginRequiredError, PortvaktUnavailableError, type PortvaktBff } from "@portvakt/sdk-node";
+import { currentRequest, newSpanId, traceparentOf } from "@portvakt/http-kit";
+import {
+  LoginRequiredError,
+  PortvaktUnavailableError,
+  silentLogger,
+  type PortvaktBff,
+  type PortvaktLogger,
+} from "@portvakt/sdk-node";
 import express, { type Request, type RequestHandler, type Response } from "express";
 import type { AdminConfig } from "./config.js";
+import { requestIds } from "./observability.js";
 import { TenantLookupError } from "./tenants.js";
 
 /** The admin API below Portvakt's origin. */
@@ -26,7 +34,15 @@ function fail(res: Response, status: number, code: string): void {
     .status(status)
     .set("Cache-Control", "no-store")
     .type("application/problem+json")
-    .send(JSON.stringify({ type: `urn:portvakt:problem:${code}`, title: code, status, code }));
+    .send(
+      JSON.stringify({
+        type: `urn:portvakt:problem:${code}`,
+        title: code,
+        status,
+        code,
+        ...requestIds(),
+      }),
+    );
 }
 
 /**
@@ -59,6 +75,7 @@ export function apiTarget(
 export function apiProxy(
   config: AdminConfig,
   bffOf: (req: Request) => Promise<PortvaktBff | undefined>,
+  logger: PortvaktLogger = silentLogger,
 ): RequestHandler {
   const portalOrigin = new URL(config.publicUrl).origin;
   return (req, res) => {
@@ -122,6 +139,12 @@ export function apiProxy(
         accept: "application/json",
       };
       if (body !== undefined) headers["content-type"] = "application/json";
+      // The admin API continues the portal's trace and request id (log correlation).
+      const context = currentRequest();
+      if (context !== undefined) {
+        headers.traceparent = traceparentOf(context, newSpanId());
+        headers["x-request-id"] = context.requestId;
+      }
       const ifMatch = req.get("if-match");
       if (ifMatch !== undefined && ifMatch.length <= 256) headers["if-match"] = ifMatch;
       const upstream = await fetch(target, {
@@ -165,7 +188,7 @@ export function apiProxy(
         fail(res, 503, "unavailable");
         return;
       }
-      console.error("admin proxy failed:", error instanceof Error ? error.name : "error");
+      logger.error({ error: error instanceof Error ? error.name : "error" }, "admin proxy failed");
       fail(res, 502, "bad_gateway");
     });
   };

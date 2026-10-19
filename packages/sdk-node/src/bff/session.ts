@@ -15,6 +15,8 @@ export const sessionDataSchema = z
     idToken: z.string().min(1),
     accessToken: z.string().min(1),
     accessTokenExpiresAt: z.number().int(),
+    /** When the access token was received (its lifetime is the refresh threshold's cap). */
+    accessTokenIssuedAt: z.number().int().optional(),
     refreshToken: z.string().min(1).optional(),
     csrfToken: z.string().min(32),
     /** Since when refreshes fail because Portvakt is unreachable (outage grace). */

@@ -423,6 +423,45 @@ export class SamlRepository {
   }
 
   /**
+   * Metadata freshness of every enabled SAML login method (all tenants, for metrics): when the
+   * cached metadata was last refreshed, its validUntil, and whether the last refresh failed.
+   */
+  async metadataStatus(limit = 1000): Promise<
+    {
+      readonly loginMethodId: string;
+      readonly tenantSlug: string;
+      readonly cachedAt: Date | null;
+      readonly validUntil: Date | null;
+      readonly failing: boolean;
+    }[]
+  > {
+    const rows = await this.#db.query<{
+      login_method_id: string;
+      slug: string;
+      metadata_cached_at: Date | null;
+      metadata_valid_until: Date | null;
+      metadata_error: string | null;
+    }>(
+      `SELECT s.login_method_id, t.slug, s.metadata_cached_at, s.metadata_valid_until,
+              s.metadata_error
+         FROM login_method_saml s
+         JOIN login_methods lm ON lm.tenant_id = s.tenant_id AND lm.id = s.login_method_id
+         JOIN tenants t ON t.id = s.tenant_id
+        WHERE lm.enabled
+        ORDER BY s.login_method_id
+        LIMIT $1`,
+      [limit],
+    );
+    return rows.map((row) => ({
+      loginMethodId: row.login_method_id,
+      tenantSlug: row.slug,
+      cachedAt: row.metadata_cached_at,
+      validUntil: row.metadata_valid_until,
+      failing: row.metadata_error !== null,
+    }));
+  }
+
+  /**
    * Records an assertion ID as used until `expiresAt`. Insert-once: false when the ID was already
    * seen and has not expired (a replay). Decided by the database, so parallel posts of one
    * assertion cannot both pass.

@@ -21,6 +21,7 @@ import { representationChoiceSchema, type RepresentationChoice } from "../domain
 import type { Tenant } from "../domain/tenant.js";
 import type { LoadedKeys } from "../keys/key-cache.js";
 import type { Logger } from "../logging/logger.js";
+import { METRICS, type MetricRegistry } from "../metrics/registry.js";
 import type { OutboundGuard } from "../net/outbound.js";
 import { revalidateChoice, type RepresentationRegistry } from "../representation/registry.js";
 import type { AuditRepository } from "../repositories/audit.js";
@@ -94,6 +95,8 @@ export interface ProviderDependencies {
   readonly upstreamLogout?: (input: UpstreamLogoutInput) => Promise<string | undefined>;
   /** Fetches of client `jwks_uri` documents go through the outbound guard (SSRF). */
   readonly outbound?: OutboundGuard;
+  /** Token endpoint successes are counted here (`portvakt_tokens_issued_total`). */
+  readonly metrics?: MetricRegistry;
 }
 
 /** What a tenant's provider is built from (loaded by the registry). */
@@ -837,6 +840,10 @@ export function buildTenantProvider(
     }
   });
 
+  const tokensIssued = deps.metrics?.counter(
+    METRICS.tokensIssued,
+    "Token endpoint successes by grant type and tenant",
+  );
   // Every token endpoint success: `token.issued` (grant type and client; never a token value),
   // written before the response is sent.
   provider.use(async (ctx, next) => {
@@ -853,6 +860,7 @@ export function buildTenantProvider(
     ) {
       return;
     }
+    tokensIssued?.inc({ grant_type: grantType, tenant: tenant.slug });
     const personId = oidc.account?.accountId;
     await auditLog.record({
       action: "token.issued",

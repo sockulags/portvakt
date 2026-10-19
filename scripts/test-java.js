@@ -91,6 +91,12 @@ function environment() {
     ALLOW_PRIVATE_UPSTREAM_HOSTS: "localhost,127.0.0.1",
     MIGRATE_ON_START: "false",
     SHUTDOWN_DRAIN_DELAY: "0s",
+    // The integration tests sign in from 127.0.0.1 many times a minute: raised per-IP limits.
+    RATE_LIMIT_AUTHORIZE_IP: "10000/1m",
+    RATE_LIMIT_INTERACTION_IP: "10000/1m",
+    RATE_LIMIT_FEDERATION_IP: "10000/1m",
+    RATE_LIMIT_TOKEN_IP: "10000/1m",
+    RATE_LIMIT_TOKEN_CLIENT: "10000/1m",
   };
 }
 

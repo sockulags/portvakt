@@ -15,7 +15,9 @@ import se.portvakt.sdk.PortvaktClient;
 
 /**
  * The demo's Content-Security-Policy: everything from the demo itself; logout posts a form here
- * and is redirected to Portvakt, so form-action allows the issuer's origin.
+ * and is redirected to Portvakt, so form-action allows the issuer's origin. Also no cross-origin
+ * window references (COOP) and no powerful browser features. Spring Security adds the rest
+ * (X-Frame-Options DENY, nosniff, no-cache for secured responses, HSTS over https).
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
@@ -52,6 +54,8 @@ class DemoSecurityHeaders extends OncePerRequestFilter {
       throws ServletException, IOException {
     response.setHeader("Content-Security-Policy", policy);
     response.setHeader("Referrer-Policy", "no-referrer");
+    response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    response.setHeader("Permissions-Policy", "camera=(), geolocation=(), microphone=(), payment=(), usb=()");
     chain.doFilter(request, response);
   }
 }

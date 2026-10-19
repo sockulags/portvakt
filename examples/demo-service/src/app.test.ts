@@ -85,6 +85,14 @@ describe("demo app", () => {
     expect(health.headers["content-security-policy"]).toContain(
       "form-action 'self' http://localhost:3000",
     );
+    expect(health.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+    expect(health.headers["content-security-policy"]).not.toMatch(/unsafe-(inline|eval)/);
+    expect(health.headers["x-frame-options"]).toBe("DENY");
+    expect(health.headers["x-content-type-options"]).toBe("nosniff");
+    expect(health.headers["cross-origin-opener-policy"]).toBe("same-origin");
+    expect(health.headers["permissions-policy"]).toContain("camera=()");
+    // Over http (local development) no HSTS.
+    expect(health.headers["strict-transport-security"]).toBeUndefined();
     const config = await request(app).get("/app/config");
     expect(config.body).toEqual({
       appName: "Tjänst A",

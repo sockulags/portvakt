@@ -153,6 +153,7 @@ function actionErrorCode(error: string): LoginErrorCode {
   switch (error) {
     case "representation_not_allowed":
     case "interaction_expired":
+    case "rate_limited":
       return error;
     case "interaction_not_found":
       return "interaction_expired";

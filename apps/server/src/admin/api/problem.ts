@@ -1,3 +1,4 @@
+import { currentRequest } from "@portvakt/http-kit";
 import type { Response } from "express";
 import { z } from "zod";
 import {
@@ -40,6 +41,7 @@ export const PROBLEM_CODES = {
   validation_failed: { status: 400, title: "The request is invalid" },
   invalid_json: { status: 400, title: "The request body is not valid JSON" },
   precondition_required: { status: 428, title: "If-Match is required" },
+  rate_limited: { status: 429, title: "Too many requests; retry after the Retry-After seconds" },
   unavailable: { status: 503, title: "Temporarily unavailable" },
   internal_error: { status: 500, title: "Internal error" },
 } as const satisfies Record<string, { status: number; title: string }>;
@@ -84,6 +86,9 @@ export const problemSchema = z
     code: z.enum(Object.keys(PROBLEM_CODES) as [ProblemCode, ...ProblemCode[]]),
     detail: z.string().optional(),
     errors: z.array(z.object({ field: z.string(), message: z.string() })).optional(),
+    /** The request's id (`X-Request-Id`) and W3C trace id, for support and log correlation. */
+    requestId: z.string().optional(),
+    traceId: z.string().optional(),
   })
   .meta({ id: "Problem" });
 export type Problem = z.infer<typeof problemSchema>;
@@ -111,7 +116,13 @@ export function sendProblem(res: Response, error: ApiError): void {
         : 'Bearer realm="portvakt-admin"',
     );
   }
-  res.send(JSON.stringify(problemOf(error)));
+  const context = currentRequest();
+  res.send(
+    JSON.stringify({
+      ...problemOf(error),
+      ...(context === undefined ? {} : { requestId: context.requestId, traceId: context.traceId }),
+    }),
+  );
 }
 
 /** Field errors of a zod failure (paths and zod's fixed messages, never input values). */

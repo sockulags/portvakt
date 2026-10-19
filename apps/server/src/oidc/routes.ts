@@ -1,4 +1,16 @@
 import express, { Router, type NextFunction, type Request, type Response } from "express";
+import {
+  basicClientId,
+  bodyClientId,
+  BodyTooLargeError,
+  readReplayableForm,
+} from "../http/client-id.js";
+import {
+  clientIp,
+  tooManyRequests,
+  type RateLimitCheck,
+  type RequestLimits,
+} from "../http/rate-limits.js";
 import type { Logger } from "../logging/logger.js";
 import {
   InteractionError,
@@ -24,7 +36,35 @@ export interface TenantRoutesOptions {
    * `/t/{slug}` once the tenant is resolved; it reads the tenant with {@link tenantOf}.
    */
   readonly loginRoutes?: Router;
+  /** Rate limits of the authorization and token endpoints (none: unlimited, tests). */
+  readonly limits?: RequestLimits;
+  /** The login UI page shown when an authorization request is rate limited (HTML, 429). */
+  readonly rateLimitedPage?: (req: Request, res: Response) => void;
 }
+
+/**
+ * The baseline CSP of responses oidc-provider renders itself: nothing loads but own scripts and
+ * styles, nothing frames them. Its auto-submitting `form_post` page (the session switch during a
+ * login, `response_mode=form_post`) adds the hash of its one inline script to `script-src`
+ * (`helpers/script_src_sha.js`), so no `'unsafe-inline'` is needed. Pages Portvakt renders for
+ * the provider (errors, logout) set the login UI's own CSP.
+ */
+export const PROVIDER_CSP = [
+  "default-src 'none'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "img-src 'self' data:",
+  "base-uri 'none'",
+  "frame-ancestors 'none'",
+].join("; ");
+
+/** Provider endpoints that authenticate a client: limited per IP, then per client_id. */
+const CLIENT_ENDPOINTS = new Set([
+  "/token",
+  "/token/introspection",
+  "/token/revocation",
+  "/request",
+]);
 
 /**
  * Pins what oidc-provider (Koa, with `proxy` on) derives from the request to `PUBLIC_URL`:
@@ -124,8 +164,85 @@ export function tenantRoutes(options: TenantRoutesOptions): Router {
     );
   }
 
+  const limits = options.limits;
+  /**
+   * Rate limits in front of the provider: authorization requests per IP and per client_id (from
+   * the query), the client-authenticating endpoints per IP and per client_id (HTTP Basic, or the
+   * form body's client_id or client_assertion). Refusals: OAuth error JSON
+   * (`temporarily_unavailable`) on the token endpoints, the login UI page on authorization.
+   */
+  const limitProvider = (req: Request, res: Response, next: NextFunction): void => {
+    if (limits === undefined) {
+      next();
+      return;
+    }
+    const slug = (req.params as { slug?: string }).slug ?? "";
+    const ip = clientIp(req);
+    const path = req.path.replace(/\/+$/, "");
+    if (path === "/auth" && (req.method === "GET" || req.method === "POST")) {
+      const clientId = typeof req.query.client_id === "string" ? req.query.client_id : undefined;
+      const checks: RateLimitCheck[] = [["authorizeIp", ip]];
+      if (clientId !== undefined && clientId.length <= 255) {
+        checks.push(["authorizeClient", `${slug}:${clientId}`]);
+      }
+      const outcome = limits.check(checks);
+      if (outcome.allowed) {
+        next();
+        return;
+      }
+      tooManyRequests(res, outcome.retryAfterSeconds);
+      if (options.rateLimitedPage === undefined) res.json({ error: "temporarily_unavailable" });
+      else options.rateLimitedPage(req, res);
+      return;
+    }
+    if (req.method !== "POST" || !CLIENT_ENDPOINTS.has(path)) {
+      next();
+      return;
+    }
+    const refuse = (retryAfterSeconds: number): void => {
+      tooManyRequests(res, retryAfterSeconds).json({
+        error: "temporarily_unavailable",
+        error_description: "Too many requests; retry later",
+      });
+    };
+    const byIp = limits.check([["tokenIp", ip]]);
+    if (!byIp.allowed) {
+      refuse(byIp.retryAfterSeconds);
+      return;
+    }
+    const fromHeader = basicClientId(req.get("authorization"));
+    const clientIdOf = async (): Promise<string | undefined> => {
+      if (fromHeader !== undefined) return fromHeader;
+      const form = await readReplayableForm(req);
+      return form === undefined ? undefined : bodyClientId(form);
+    };
+    clientIdOf().then(
+      (clientId) => {
+        if (clientId !== undefined) {
+          const byClient = limits.check([["tokenClient", `${slug}:${clientId}`]]);
+          if (!byClient.allowed) {
+            refuse(byClient.retryAfterSeconds);
+            return;
+          }
+        }
+        next();
+      },
+      (error: unknown) => {
+        if (error instanceof BodyTooLargeError) {
+          res.status(413).set("Cache-Control", "no-store").json({
+            error: "invalid_request",
+            error_description: "request body too large",
+          });
+          return;
+        }
+        next(error);
+      },
+    );
+  };
+
   const toProvider = (req: Request, res: Response): void => {
     const tenantProvider = tenantOf(res);
+    res.setHeader("Content-Security-Policy", PROVIDER_CSP);
     // oidc-provider derives its mount path from `originalUrl.indexOf(url)`, which picks the wrong
     // prefix for a slug that starts with a route name (`/t/authority/auth`). Without
     // `originalUrl` it uses `baseUrl`, which is exactly the tenant's base path.
@@ -136,6 +253,6 @@ export function tenantRoutes(options: TenantRoutesOptions): Router {
 
   const tenantScoped =
     options.loginRoutes === undefined ? [interactions] : [interactions, options.loginRoutes];
-  router.use("/t/:slug", resolveTenant, ...tenantScoped, toProvider);
+  router.use("/t/:slug", resolveTenant, ...tenantScoped, limitProvider, toProvider);
   return router;
 }

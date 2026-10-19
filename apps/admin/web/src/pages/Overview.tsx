@@ -1,6 +1,6 @@
 import { Badge, Button, Card } from "@portvakt/design-system/components";
 import { EmptyState, PageHeader, StatCard } from "@portvakt/design-system/patterns";
-import { format, formatDate, useI18n, type Messages, type Locale } from "../i18n";
+import { format, formatDate, plural, useI18n, type Messages, type Locale } from "../i18n";
 import type { Dashboard, Warning } from "../types";
 import { ErrorState, useAdmin, useResource } from "../ui";
 
@@ -55,7 +55,7 @@ export function OverviewPage() {
                 loading={loading}
                 label={t.overview.logins24h}
                 value={String(data?.logins.last24h ?? 0)}
-                hint={format(t.overview.failed24h, { count: data?.logins.failedLast24h ?? 0 })}
+                hint={plural(t.overview.failed24h, data?.logins.failedLast24h ?? 0)}
               />
             </div>
             <div data-testid="stat-logins-7d">

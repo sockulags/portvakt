@@ -45,7 +45,11 @@ export interface PortvaktClientConfig {
    */
   readonly failureCacheSeconds?: number;
   readonly jwks?: {
-    /** Keys are refetched in the background of a request after this. Default 600 seconds. */
+    /**
+     * Keys are refetched in the background of a request after this. Default 300 seconds; keep it
+     * below Portvakt's KEY_MANUAL_PUBLISH_AHEAD minus 90 seconds (a new key is published that long
+     * before it signs).
+     */
     readonly cacheMaxAgeSeconds?: number;
     /**
      * At most one fetch per this many seconds (unknown `kid`s and refreshes alike); an unknown
@@ -156,12 +160,12 @@ function configSchema(allowInsecure: () => boolean) {
       failureCacheSeconds: secondsSchema(300).default(5),
       jwks: z
         .object({
-          cacheMaxAgeSeconds: secondsSchema(86_400).default(600),
+          cacheMaxAgeSeconds: secondsSchema(86_400).default(300),
           cooldownSeconds: secondsSchema(3600).default(30),
           staleMaxAgeSeconds: secondsSchema(7 * 86_400).default(86_400),
         })
         .strict()
-        .default({ cacheMaxAgeSeconds: 600, cooldownSeconds: 30, staleMaxAgeSeconds: 86_400 }),
+        .default({ cacheMaxAgeSeconds: 300, cooldownSeconds: 30, staleMaxAgeSeconds: 86_400 }),
       outageGraceSeconds: secondsSchema(7 * 86_400).default(0),
       acrRanking: z
         .array(z.string().min(1).max(255))

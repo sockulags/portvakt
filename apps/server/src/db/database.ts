@@ -7,6 +7,21 @@ export interface PoolOptions {
   readonly searchPath?: string;
   readonly applicationName?: string;
   readonly connectionTimeoutMillis?: number;
+  /**
+   * `statement_timeout` of every connection (seconds; the runtime role's pool). A statement
+   * running longer is cancelled by Postgres.
+   */
+  readonly statementTimeoutSeconds?: number;
+  /**
+   * `idle_in_transaction_session_timeout` (seconds): a connection idle inside a transaction this
+   * long is terminated, so a stuck caller cannot hold row or advisory locks forever.
+   */
+  readonly idleInTransactionTimeoutSeconds?: number;
+  /**
+   * Channel of the change notifications written through these connections
+   * (`portvakt.change_channel`; default CHANGE_CHANNEL). Tests give each schema its own.
+   */
+  readonly changeChannel?: string;
   /** Receives errors from idle clients (for example the server restarting). */
   readonly onIdleError?: (error: Error) => void;
 }
@@ -18,6 +33,18 @@ export function createPool(options: PoolOptions): Pool {
   if (options.searchPath !== undefined) {
     if (!IDENTIFIER.test(options.searchPath)) throw new TypeError("Invalid search_path schema");
     runtimeOptions.push(`-c search_path=${options.searchPath}`);
+  }
+  if (options.changeChannel !== undefined) {
+    if (!IDENTIFIER.test(options.changeChannel)) throw new TypeError("Invalid change channel");
+    runtimeOptions.push(`-c portvakt.change_channel=${options.changeChannel}`);
+  }
+  for (const [name, seconds] of [
+    ["statement_timeout", options.statementTimeoutSeconds],
+    ["idle_in_transaction_session_timeout", options.idleInTransactionTimeoutSeconds],
+  ] as const) {
+    if (seconds === undefined) continue;
+    if (!Number.isInteger(seconds) || seconds < 0) throw new TypeError(`Invalid ${name}`);
+    runtimeOptions.push(`-c ${name}=${seconds * 1000}`);
   }
   const pool = new pg.Pool({
     connectionString: options.url,

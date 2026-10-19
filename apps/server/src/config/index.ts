@@ -4,6 +4,7 @@ import {
   PIN_REPRESENTATION_MIN_ACR,
   type LoginMethodKind,
 } from "../domain/login-method.js";
+import { parseRateLimit, type RateLimit } from "@portvakt/http-kit";
 import { parsePersonnummer } from "../domain/personnummer.js";
 import { parseDurationSeconds } from "./duration.js";
 
@@ -91,6 +92,57 @@ export interface TokenLifetimes {
   readonly interactionSeconds: number;
 }
 
+/**
+ * What the SDKs cache by default (both SDKs: `jwks.cacheMaxAgeSeconds` 5 minutes, unknown-kid
+ * refetches at most every 30 s) plus the `Cache-Control` max-age of the JWKS endpoint (60 s). A
+ * manually rotated key is published at least this long before it signs, so every verifier with
+ * the default cache has fetched it by then.
+ */
+export const SDK_JWKS_CACHE_SECONDS = 300;
+export const SDK_JWKS_COOLDOWN_SECONDS = 30;
+export const JWKS_HTTP_MAX_AGE_SECONDS = 60;
+export const MIN_MANUAL_PUBLISH_AHEAD_SECONDS =
+  SDK_JWKS_CACHE_SECONDS + SDK_JWKS_COOLDOWN_SECONDS + JWKS_HTTP_MAX_AGE_SECONDS;
+
+/**
+ * Rate limits, per replica (token buckets in memory): `<count>/<period>`, or `off`. Keys: the
+ * client IP (as TRUST_PROXY resolves it), the client_id (per tenant), or the admin API caller.
+ */
+export const RATE_LIMIT_NAMES = [
+  "authorizeIp",
+  "authorizeClient",
+  "interactionIp",
+  "federationIp",
+  "tokenIp",
+  "tokenClient",
+  "adminApi",
+] as const;
+export type RateLimitName = (typeof RATE_LIMIT_NAMES)[number];
+
+export interface HttpLimits {
+  /** `server.requestTimeout`: the whole request, headers and body (HTTP_REQUEST_TIMEOUT). */
+  readonly requestTimeoutSeconds: number;
+  /** `server.headersTimeout` (HTTP_HEADERS_TIMEOUT). */
+  readonly headersTimeoutSeconds: number;
+  /** `server.keepAliveTimeout` (HTTP_KEEP_ALIVE_TIMEOUT): above the load balancer's idle timeout. */
+  readonly keepAliveTimeoutSeconds: number;
+  /** Longest request URL (MAX_URL_LENGTH); longer ones get 414. */
+  readonly maxUrlLength: number;
+  /** Largest request header block in bytes (HTTP_MAX_HEADER_SIZE); larger ones get 431. */
+  readonly maxHeaderBytes: number;
+}
+
+export interface MetricsConfig {
+  /** METRICS_ENABLED (default true). */
+  readonly enabled: boolean;
+  /** METRICS_PORT: a separate listener for `/metrics` (otherwise the main port). */
+  readonly port: number | undefined;
+  /** METRICS_HOST: the separate listener's address (default 0.0.0.0). */
+  readonly host: string;
+  /** METRICS_TOKEN: bearer token required to scrape. */
+  readonly token: string | undefined;
+}
+
 export interface Config {
   readonly nodeEnv: NodeEnv;
   readonly isProduction: boolean;
@@ -133,7 +185,16 @@ export interface Config {
     readonly publishAheadSeconds: number;
     /** How long a `retiring` key stays in JWKS; must cover the longest token lifetime. */
     readonly retireAfterSeconds: number;
+    /**
+     * Manual rotation without `emergency` (admin API): the new key is published at once and
+     * signs after this long (KEY_MANUAL_PUBLISH_AHEAD); longer than the SDKs' JWKS caching.
+     */
+    readonly manualPublishAheadSeconds: number;
   };
+  /** Rate limits per replica; `null` when off. */
+  readonly rateLimits: Readonly<Record<RateLimitName, RateLimit | null>>;
+  readonly http: HttpLimits;
+  readonly metrics: MetricsConfig;
   readonly bootstrap: {
     readonly idp: BootstrapIdpConfig | undefined;
     /** The upstream subject of the first platform admin at the bootstrap login method. */
@@ -180,6 +241,8 @@ export interface Config {
     /** AUDIT_RETENTION: audit events older than this are deleted by `npm run audit:prune`. */
     readonly retentionSeconds: number;
   };
+  /** Allowed but notable settings (production only), logged at start and by config:check. */
+  readonly warnings: readonly string[];
 }
 
 export interface DatabaseConfig {
@@ -192,15 +255,24 @@ export interface DatabaseConfig {
   /** False when both URLs use the same role (development fallback): no grants are applied. */
   readonly separateRoles: boolean;
   readonly poolMax: number;
+  /** `statement_timeout` of runtime connections (DATABASE_STATEMENT_TIMEOUT). */
+  readonly statementTimeoutSeconds: number;
+  /** `idle_in_transaction_session_timeout` (DATABASE_IDLE_IN_TRANSACTION_TIMEOUT). */
+  readonly idleInTransactionTimeoutSeconds: number;
+  /** How long acquiring a pool connection may take (DATABASE_CONNECTION_TIMEOUT). */
+  readonly connectionTimeoutSeconds: number;
 }
 
 export class ConfigError extends Error {
   readonly issues: readonly string[];
+  /** Warnings found along the way (when the variables could be parsed at all). */
+  readonly warnings: readonly string[];
 
-  constructor(issues: readonly string[]) {
+  constructor(issues: readonly string[], warnings: readonly string[] = []) {
     super(`Invalid configuration:\n${issues.map((issue) => `  - ${issue}`).join("\n")}`);
     this.name = "ConfigError";
     this.issues = issues;
+    this.warnings = warnings;
   }
 }
 
@@ -266,6 +338,21 @@ const booleanFlag = z.preprocess(
     .transform((value) => (value === undefined ? undefined : value === "true" || value === "1")),
 );
 
+const rateLimit = (fallback: string) =>
+  z.preprocess(emptyToUndefined, z.string().default(fallback)).transform((value, ctx) => {
+    const parsed = parseRateLimit(value);
+    if (parsed === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message: "must be <count>/<period> such as 60/1m or 10/30s, or off",
+      });
+      return z.NEVER;
+    }
+    return parsed;
+  });
+
+const port = z.coerce.number().int().min(1).max(65535);
+
 const envSchema = z.object({
   NODE_ENV: z.preprocess(emptyToUndefined, z.enum(NODE_ENVS).default("development")),
   PORT: z.preprocess(emptyToUndefined, z.coerce.number().int().min(1).max(65535).default(3000)),
@@ -310,6 +397,39 @@ const envSchema = z.object({
   KEY_ROTATION_INTERVAL: duration("90d"),
   KEY_PUBLISH_AHEAD: duration("2d"),
   KEY_RETIRE_AFTER: duration("2d"),
+  KEY_MANUAL_PUBLISH_AHEAD: duration("10m"),
+  RATE_LIMIT_AUTHORIZE_IP: rateLimit("120/1m"),
+  RATE_LIMIT_AUTHORIZE_CLIENT: rateLimit("3000/1m"),
+  RATE_LIMIT_INTERACTION_IP: rateLimit("60/1m"),
+  RATE_LIMIT_FEDERATION_IP: rateLimit("120/1m"),
+  RATE_LIMIT_TOKEN_IP: rateLimit("600/1m"),
+  RATE_LIMIT_TOKEN_CLIENT: rateLimit("1200/1m"),
+  RATE_LIMIT_ADMIN_API: rateLimit("600/1m"),
+  HTTP_REQUEST_TIMEOUT: duration("30s"),
+  HTTP_HEADERS_TIMEOUT: duration("20s"),
+  HTTP_KEEP_ALIVE_TIMEOUT: duration("65s"),
+  MAX_URL_LENGTH: z.preprocess(
+    emptyToUndefined,
+    z.coerce.number().int().min(1024).max(65_536).default(8192),
+  ),
+  HTTP_MAX_HEADER_SIZE: z.preprocess(
+    emptyToUndefined,
+    z.coerce.number().int().min(4096).max(65_536).default(16_384),
+  ),
+  DATABASE_STATEMENT_TIMEOUT: duration("15s"),
+  DATABASE_IDLE_IN_TRANSACTION_TIMEOUT: duration("60s"),
+  DATABASE_CONNECTION_TIMEOUT: duration("5s"),
+  METRICS_ENABLED: booleanFlag,
+  METRICS_PORT: z.preprocess(emptyToUndefined, port.optional()),
+  METRICS_HOST: z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9.:-]{1,253}$/, "must be a host name or IP address")
+      .default("0.0.0.0"),
+  ),
+  METRICS_TOKEN: optionalString,
   BOOTSTRAP_IDP_ISSUER: optionalString,
   BOOTSTRAP_IDP_CLIENT_ID: optionalString,
   BOOTSTRAP_IDP_CLIENT_SECRET: optionalString,
@@ -464,6 +584,32 @@ function productionIssues(env: Env, publicUrl: URL | undefined): string[] {
   if (env.ADMIN_CLIENT_SECRET === DEV_ADMIN_CLIENT_SECRET) {
     issues.push("ADMIN_CLIENT_SECRET: the development secret is not allowed in production");
   }
+  if (
+    env.BOOTSTRAP_IDP_ISSUER !== undefined &&
+    URL.canParse(env.BOOTSTRAP_IDP_ISSUER) &&
+    isLocalHostname(new URL(env.BOOTSTRAP_IDP_ISSUER).hostname)
+  ) {
+    // The mock IdP (and anything else on this machine) is never an upstream in production.
+    issues.push("BOOTSTRAP_IDP_ISSUER: must not point at a local or .test host in production");
+  }
+
+  // Metrics: on a port of their own (not exposed through the ingress) or behind a token.
+  if (env.METRICS_ENABLED !== false && env.METRICS_PORT === undefined) {
+    if (env.METRICS_TOKEN === undefined) {
+      issues.push(
+        "METRICS_TOKEN: required in production unless METRICS_PORT serves metrics separately (or METRICS_ENABLED=false)",
+      );
+    }
+  }
+  if (env.METRICS_TOKEN !== undefined && env.METRICS_TOKEN.length < 32) {
+    issues.push("METRICS_TOKEN: at least 32 characters in production");
+  }
+  if (env.KEY_MANUAL_PUBLISH_AHEAD < MIN_MANUAL_PUBLISH_AHEAD_SECONDS) {
+    issues.push(
+      `KEY_MANUAL_PUBLISH_AHEAD: at least ${MIN_MANUAL_PUBLISH_AHEAD_SECONDS}s in production (the SDKs' JWKS cache, refetch cooldown and the JWKS max-age)`,
+    );
+  }
+  issues.push(...reusedSecretIssues(env));
   if (env.ADMIN_PUBLIC_URL !== undefined && URL.canParse(env.ADMIN_PUBLIC_URL)) {
     const url = new URL(env.ADMIN_PUBLIC_URL);
     if (url.protocol !== "https:") issues.push("ADMIN_PUBLIC_URL: must use https in production");
@@ -474,6 +620,103 @@ function productionIssues(env: Env, publicUrl: URL | undefined): string[] {
 
   return issues;
 }
+
+/**
+ * Secrets that must be independent of each other: a value used for two purposes (a cookie key
+ * that is also the master key, a metrics token that is also a client secret, a database password
+ * shared by both roles) is refused. Names only, never values.
+ */
+function reusedSecretIssues(env: Env): string[] {
+  const secrets: { readonly name: string; readonly forms: readonly string[] }[] = [];
+  const masterForms = (key: Buffer): string[] => [
+    key.toString("base64"),
+    key.toString("base64url"),
+    key.toString("hex"),
+    key.toString("latin1"),
+  ];
+  secrets.push({ name: "MASTER_KEY", forms: masterForms(env.MASTER_KEY) });
+  for (const key of env.MASTER_KEY_PREVIOUS) {
+    secrets.push({ name: "MASTER_KEY_PREVIOUS", forms: masterForms(key) });
+  }
+  for (const key of env.COOKIE_KEYS) secrets.push({ name: "COOKIE_KEYS", forms: [key] });
+  for (const [name, value] of [
+    ["ADMIN_CLIENT_SECRET", env.ADMIN_CLIENT_SECRET],
+    ["METRICS_TOKEN", env.METRICS_TOKEN],
+    ["BOOTSTRAP_IDP_CLIENT_SECRET", env.BOOTSTRAP_IDP_CLIENT_SECRET],
+  ] as const) {
+    if (value !== undefined) secrets.push({ name, forms: [value] });
+  }
+  for (const [name, value] of [
+    ["DATABASE_URL", env.DATABASE_URL],
+    ["MIGRATION_DATABASE_URL", env.MIGRATION_DATABASE_URL],
+  ] as const) {
+    if (value === undefined || !URL.canParse(value)) continue;
+    const password = decodeURIComponent(new URL(value).password);
+    if (password !== "") secrets.push({ name, forms: [password] });
+  }
+
+  const issues = new Set<string>();
+  const seen = new Map<string, string>();
+  for (const { name, forms } of secrets) {
+    const owners = new Set<string>();
+    for (const form of forms) {
+      const owner = seen.get(form);
+      if (owner !== undefined) owners.add(owner);
+    }
+    for (const owner of owners) {
+      issues.add(
+        owner === name
+          ? `${name}: the same value appears twice`
+          : `${name}: reuses the value of ${owner}; every secret must be generated separately`,
+      );
+    }
+    for (const form of forms) if (!seen.has(form)) seen.set(form, name);
+  }
+  return [...issues];
+}
+
+/**
+ * Settings that are allowed in production but deserve an operator's attention (printed by
+ * `npm run config:check` and logged at start).
+ */
+function productionWarnings(env: Env): string[] {
+  const warnings: string[] = [];
+  if (env.TRUST_PROXY === true) {
+    warnings.push(
+      "TRUST_PROXY: true trusts every X-Forwarded-For hop, so clients can choose their IP (rate limits per IP); set the number of proxies instead",
+    );
+  }
+  if (env.LOG_LEVEL === "debug" || env.LOG_LEVEL === "trace") {
+    warnings.push("LOG_LEVEL: debug and trace are verbose; use info in production");
+  }
+  for (const variable of Object.keys(RATE_LIMIT_ENV) as (keyof typeof RATE_LIMIT_ENV)[]) {
+    if (env[variable] === null) {
+      warnings.push(`${variable}: off; this replica does not limit these requests`);
+    }
+  }
+  if (env.METRICS_PORT !== undefined && env.METRICS_TOKEN === undefined) {
+    warnings.push(
+      "METRICS_TOKEN: not set; keep METRICS_PORT reachable from the metrics scraper only",
+    );
+  }
+  if (env.MIGRATE_ON_START === true) {
+    warnings.push(
+      "MIGRATE_ON_START: the runtime replicas need the owner role; prefer a separate migration job",
+    );
+  }
+  return warnings;
+}
+
+/** The RATE_LIMIT_* variable of each limit. */
+export const RATE_LIMIT_ENV = {
+  RATE_LIMIT_AUTHORIZE_IP: "authorizeIp",
+  RATE_LIMIT_AUTHORIZE_CLIENT: "authorizeClient",
+  RATE_LIMIT_INTERACTION_IP: "interactionIp",
+  RATE_LIMIT_FEDERATION_IP: "federationIp",
+  RATE_LIMIT_TOKEN_IP: "tokenIp",
+  RATE_LIMIT_TOKEN_CLIENT: "tokenClient",
+  RATE_LIMIT_ADMIN_API: "adminApi",
+} as const satisfies Record<string, RateLimitName>;
 
 function bootstrapConfig(env: Env, issues: string[]): Config["bootstrap"] {
   const idpVariables = [
@@ -647,6 +890,16 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
   if (env.AUDIT_RETENTION < MIN_AUDIT_RETENTION_SECONDS) {
     issues.push("AUDIT_RETENTION: must be at least 90 days");
   }
+  if (env.KEY_MANUAL_PUBLISH_AHEAD >= env.KEY_ROTATION_INTERVAL) {
+    issues.push("KEY_MANUAL_PUBLISH_AHEAD: must be shorter than KEY_ROTATION_INTERVAL");
+  }
+  // Node refuses a headers timeout above the request timeout.
+  if (env.HTTP_HEADERS_TIMEOUT > env.HTTP_REQUEST_TIMEOUT) {
+    issues.push("HTTP_HEADERS_TIMEOUT: must not exceed HTTP_REQUEST_TIMEOUT");
+  }
+  if (env.METRICS_PORT !== undefined && env.METRICS_PORT === env.PORT) {
+    issues.push("METRICS_PORT: must differ from PORT");
+  }
   const allMasterKeys = [env.MASTER_KEY, ...env.MASTER_KEY_PREVIOUS];
   const distinct = new Set(allMasterKeys.map((key) => key.toString("base64")));
   if (distinct.size !== allMasterKeys.length) {
@@ -671,7 +924,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
   const admin = adminConfig(env, isProduction, issues);
   if (isProduction) issues.push(...productionIssues(env, publicUrl));
   if (issues.length > 0 || publicUrl === undefined || database === undefined) {
-    throw new ConfigError(issues);
+    throw new ConfigError(issues, isProduction ? productionWarnings(env) : []);
   }
 
   return {
@@ -704,6 +957,29 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
       intervalSeconds: env.KEY_ROTATION_INTERVAL,
       publishAheadSeconds: env.KEY_PUBLISH_AHEAD,
       retireAfterSeconds: env.KEY_RETIRE_AFTER,
+      manualPublishAheadSeconds: env.KEY_MANUAL_PUBLISH_AHEAD,
+    },
+    rateLimits: {
+      authorizeIp: env.RATE_LIMIT_AUTHORIZE_IP,
+      authorizeClient: env.RATE_LIMIT_AUTHORIZE_CLIENT,
+      interactionIp: env.RATE_LIMIT_INTERACTION_IP,
+      federationIp: env.RATE_LIMIT_FEDERATION_IP,
+      tokenIp: env.RATE_LIMIT_TOKEN_IP,
+      tokenClient: env.RATE_LIMIT_TOKEN_CLIENT,
+      adminApi: env.RATE_LIMIT_ADMIN_API,
+    },
+    http: {
+      requestTimeoutSeconds: env.HTTP_REQUEST_TIMEOUT,
+      headersTimeoutSeconds: env.HTTP_HEADERS_TIMEOUT,
+      keepAliveTimeoutSeconds: env.HTTP_KEEP_ALIVE_TIMEOUT,
+      maxUrlLength: env.MAX_URL_LENGTH,
+      maxHeaderBytes: env.HTTP_MAX_HEADER_SIZE,
+    },
+    metrics: {
+      enabled: env.METRICS_ENABLED ?? true,
+      port: env.METRICS_PORT,
+      host: env.METRICS_HOST,
+      token: env.METRICS_TOKEN,
     },
     bootstrap,
     admin,
@@ -718,6 +994,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     },
     loginUiDir: env.LOGIN_UI_DIR,
     audit: { retentionSeconds: env.AUDIT_RETENTION },
+    warnings: isProduction ? productionWarnings(env) : [],
   };
 }
 
@@ -737,7 +1014,13 @@ function parseDatabaseUrl(name: string, value: string, issues: string[]): URL | 
 
 type DatabaseEnv = Pick<
   Env,
-  "NODE_ENV" | "DATABASE_URL" | "MIGRATION_DATABASE_URL" | "DATABASE_POOL_MAX"
+  | "NODE_ENV"
+  | "DATABASE_URL"
+  | "MIGRATION_DATABASE_URL"
+  | "DATABASE_POOL_MAX"
+  | "DATABASE_STATEMENT_TIMEOUT"
+  | "DATABASE_IDLE_IN_TRANSACTION_TIMEOUT"
+  | "DATABASE_CONNECTION_TIMEOUT"
 >;
 
 /**
@@ -778,6 +1061,9 @@ function resolveDatabase(env: DatabaseEnv, issues: string[]): DatabaseConfig | u
     runtimeRole,
     separateRoles: runtimeRole !== "" && runtimeRole !== migrationRole,
     poolMax: env.DATABASE_POOL_MAX,
+    statementTimeoutSeconds: env.DATABASE_STATEMENT_TIMEOUT,
+    idleInTransactionTimeoutSeconds: env.DATABASE_IDLE_IN_TRANSACTION_TIMEOUT,
+    connectionTimeoutSeconds: env.DATABASE_CONNECTION_TIMEOUT,
   };
 }
 
@@ -791,6 +1077,9 @@ export function loadDatabaseConfig(source: NodeJS.ProcessEnv = process.env): Dat
     DATABASE_URL: true,
     MIGRATION_DATABASE_URL: true,
     DATABASE_POOL_MAX: true,
+    DATABASE_STATEMENT_TIMEOUT: true,
+    DATABASE_IDLE_IN_TRANSACTION_TIMEOUT: true,
+    DATABASE_CONNECTION_TIMEOUT: true,
   });
   const parsed = schema.safeParse(source);
   if (!parsed.success) throw new ConfigError(formatZodIssues(parsed.error));
@@ -813,6 +1102,9 @@ export function loadAuditPruneConfig(source: NodeJS.ProcessEnv = process.env): {
     DATABASE_URL: true,
     MIGRATION_DATABASE_URL: true,
     DATABASE_POOL_MAX: true,
+    DATABASE_STATEMENT_TIMEOUT: true,
+    DATABASE_IDLE_IN_TRANSACTION_TIMEOUT: true,
+    DATABASE_CONNECTION_TIMEOUT: true,
     AUDIT_RETENTION: true,
   });
   const parsed = schema.safeParse(source);
@@ -824,4 +1116,25 @@ export function loadAuditPruneConfig(source: NodeJS.ProcessEnv = process.env): {
   }
   if (issues.length > 0 || database === undefined) throw new ConfigError(issues);
   return { database, retentionSeconds: parsed.data.AUDIT_RETENTION };
+}
+
+/** What `npm run config:check` reports: every problem and warning, by variable name only. */
+export interface ConfigReport {
+  readonly ok: boolean;
+  readonly nodeEnv: string;
+  readonly issues: readonly string[];
+  readonly warnings: readonly string[];
+}
+
+/** Validates `source` like the server does at start, without throwing. */
+export function checkConfig(source: NodeJS.ProcessEnv = process.env): ConfigReport {
+  const nodeEnv =
+    source.NODE_ENV === undefined || source.NODE_ENV === "" ? "development" : source.NODE_ENV;
+  try {
+    const config = loadConfig(source);
+    return { ok: true, nodeEnv, issues: [], warnings: config.warnings };
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    return { ok: false, nodeEnv, issues: error.issues, warnings: error.warnings };
+  }
 }

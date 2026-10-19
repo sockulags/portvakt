@@ -1,3 +1,4 @@
+import { logIds } from "@portvakt/http-kit";
 import { pino, type DestinationStream, type Logger } from "pino";
 import type { LogLevel } from "../config/index.js";
 
@@ -100,7 +101,10 @@ export function redactKeys(value: unknown, depth = 0, seen = new WeakSet<object>
   return copy;
 }
 
-/** Structured JSON logger (one object per line). */
+/**
+ * Structured JSON logger (one object per line). Every line written while a request is handled
+ * carries its `requestId` and `traceId` (the request context, `@portvakt/http-kit`).
+ */
 export function createLogger(options: LoggerOptions): Logger {
   const settings = {
     level: options.level,
@@ -111,6 +115,7 @@ export function createLogger(options: LoggerOptions): Logger {
       error: (value: unknown) => (value instanceof Error ? serializeError(value) : value),
     },
     timestamp: pino.stdTimeFunctions.isoTime,
+    mixin: () => ({ ...logIds() }),
     formatters: {
       level: (label: string) => ({ level: label }),
       // Runs before the serializers, so serialized errors keep their (non-personal) fields.

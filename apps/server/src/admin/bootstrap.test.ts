@@ -104,6 +104,7 @@ describe.skipIf(ts === undefined)("bootstrap", () => {
       MIGRATION_DATABASE_URL: "postgres://owner:Secr3t-owner-pw@db.example.org/portvakt",
       MASTER_KEY: Buffer.from("0123456789abcdefghijklmnopqrstuv").toString("base64"),
       COOKIE_KEYS: "a-production-cookie-key-with-enough-length-0123",
+      METRICS_TOKEN: "a-production-metrics-token-0123456789abcdef",
       BOOTSTRAP_IDP_ISSUER: "https://login.microsoftonline.com/tenant/v2.0",
       BOOTSTRAP_IDP_CLIENT_ID: "portvakt",
       BOOTSTRAP_ADMIN_SUBJECT: ERIK_OID,

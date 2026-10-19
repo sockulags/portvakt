@@ -55,3 +55,11 @@ export const METHODS = {
 export const RUN_ID = Date.now().toString(36).slice(-6);
 /** Three digits of the same kind, for identifiers that must be numbers (organisationsnummer). */
 export const RUN_DIGITS = String(Date.now() % 1000).padStart(3, "0");
+
+/**
+ * The e2e stack's ACCESS_TOKEN_TTL (scripts/e2e.js). Both SDKs refresh a session's access token
+ * once less than half its lifetime is left; waiting this long after the last refresh makes the
+ * next API call refresh first ("the next refresh").
+ */
+export const ACCESS_TOKEN_TTL_SECONDS = 10;
+export const ACCESS_TOKEN_DUE_MS = (ACCESS_TOKEN_TTL_SECONDS / 2 + 1.5) * 1000;

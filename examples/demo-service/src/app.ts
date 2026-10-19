@@ -67,6 +67,7 @@ export function createDemoApp(config: DemoConfig, options: DemoAppOptions = {}):
   const app = express();
   app.disable("x-powered-by");
   const issuerOrigin = new URL(config.issuer).origin;
+  const hsts = config.publicUrl.startsWith("https://");
   const securityHeaders: RequestHandler = (_req, res, next) => {
     res.set({
       // Logout posts a form here and is redirected to Portvakt: form-action must allow it.
@@ -81,6 +82,9 @@ export function createDemoApp(config: DemoConfig, options: DemoAppOptions = {}):
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+      ...(hsts ? { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" } : {}),
     });
     next();
   };

@@ -24,7 +24,12 @@ class DemoApplicationTest {
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.status").value("ok"))
         .andExpect(jsonPath("$.app").value("Tjänst C"))
-        .andExpect(header().string("Content-Security-Policy", org.hamcrest.Matchers.containsString("form-action 'self' http://localhost:9")));
+        .andExpect(header().string("Content-Security-Policy", org.hamcrest.Matchers.containsString("form-action 'self' http://localhost:9")))
+        .andExpect(header().string("Content-Security-Policy", org.hamcrest.Matchers.containsString("frame-ancestors 'none'")))
+        .andExpect(header().string("X-Frame-Options", "DENY"))
+        .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+        .andExpect(header().string("Cross-Origin-Opener-Policy", "same-origin"))
+        .andExpect(header().string("Permissions-Policy", org.hamcrest.Matchers.containsString("camera=()")));
     String page =
         mvc.perform(get("/").accept("text/html")).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
     assertThat(page).contains("data-testid=\"signed-out-view\"").contains("data-testid=\"sign-in\"");

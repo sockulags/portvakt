@@ -282,7 +282,7 @@ describe("removing things", () => {
     await userEvent.click(await screen.findByTestId("application-detach-bygglov"));
     const list = await screen.findByTestId("application-detach-usage");
     expect(list.textContent).toContain("3 rolltilldelningar");
-    expect(list.textContent).toContain("1 regler");
+    expect(list.textContent).toContain("1 regel");
     expect(list.textContent).not.toContain("attribut");
     const confirm = screen.getByTestId<HTMLButtonElement>("application-detach-dialog-confirm");
     expect(confirm.disabled).toBe(true);

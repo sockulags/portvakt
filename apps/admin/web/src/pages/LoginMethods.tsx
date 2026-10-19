@@ -32,7 +32,7 @@ import {
   type OidcDraft,
   type SamlDraft,
 } from "../forms";
-import { format, formatDate, useI18n } from "../i18n";
+import { format, formatDate, plural, useI18n } from "../i18n";
 import { hrefOf } from "../router";
 import type { List, LoginMethod } from "../types";
 import {
@@ -135,7 +135,7 @@ function LoginMethodList() {
                   </Badge>
                   {method.warnings.length > 0 && (
                     <Badge color="warning">
-                      {format(t.methods.warningsCount, { count: method.warnings.length })}
+                      {plural(t.methods.warningsCount, method.warnings.length)}
                     </Badge>
                   )}
                 </span>

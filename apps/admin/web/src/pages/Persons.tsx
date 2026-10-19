@@ -1,7 +1,7 @@
 import { Badge, Button, Card, Field, TextInput } from "@portvakt/design-system/components";
 import { DataTable, EmptyState, PageHeader } from "@portvakt/design-system/patterns";
 import { useState } from "react";
-import { format, formatDate, useI18n } from "../i18n";
+import { format, formatDate, plural, useI18n } from "../i18n";
 import { hrefOf } from "../router";
 import type { List, Person, PersonSummary } from "../types";
 import { ActionError, ConfirmDialog, ErrorState, Loading, useAdmin, useResource } from "../ui";
@@ -361,16 +361,20 @@ function PersonDetail({ id }: { readonly id: string }) {
         >
           <ul className="pv-plain-list" data-testid="delete-person-impact">
             <li>
-              <strong>{data.identities.length}</strong> {t.persons.identities}
+              <strong>{data.identities.length}</strong>{" "}
+              {plural(t.persons.deleteImpact.identities, data.identities.length)}
             </li>
             <li>
-              <strong>{data.roleAssignments.length}</strong> {t.persons.roleAssignments}
+              <strong>{data.roleAssignments.length}</strong>{" "}
+              {plural(t.persons.deleteImpact.roleAssignments, data.roleAssignments.length)}
             </li>
             <li>
-              <strong>{data.attributeAssignments.length}</strong> {t.persons.attributes}
+              <strong>{data.attributeAssignments.length}</strong>{" "}
+              {plural(t.persons.deleteImpact.attributes, data.attributeAssignments.length)}
             </li>
             <li>
-              <strong>{data.grants.length}</strong> {t.persons.grants}
+              <strong>{data.grants.length}</strong>{" "}
+              {plural(t.persons.deleteImpact.grants, data.grants.length)}
             </li>
           </ul>
         </ConfirmDialog>

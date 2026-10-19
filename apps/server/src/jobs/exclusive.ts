@@ -22,14 +22,23 @@ export type ExclusiveResult<T> =
  *
  * `wait: false` (scheduled jobs): if another replica holds the lock, skip and return
  * `{ ran: false }`. `wait: true` (start-up, admin actions): wait for the lock.
+ *
+ * `idleInTransactionTimeoutSeconds` overrides the connection's
+ * `idle_in_transaction_session_timeout` for this transaction (0: none), for a job that holds the
+ * lock while it works outside the transaction (network requests with their own timeouts).
  */
 export async function runExclusive<T>(
   db: Db,
   lock: JobLock,
-  options: { readonly wait: boolean },
+  options: { readonly wait: boolean; readonly idleInTransactionTimeoutSeconds?: number },
   fn: (tx: Db) => Promise<T>,
 ): Promise<ExclusiveResult<T>> {
   return db.transaction(async (tx): Promise<ExclusiveResult<T>> => {
+    const idle = options.idleInTransactionTimeoutSeconds;
+    if (idle !== undefined) {
+      if (!Number.isInteger(idle) || idle < 0) throw new TypeError("Invalid idle timeout");
+      await tx.query(`SET LOCAL idle_in_transaction_session_timeout = ${idle * 1000}`);
+    }
     const key = "hashtext(current_schema() || ':' || $2)";
     if (options.wait) {
       await tx.query(`SELECT pg_advisory_xact_lock($1, ${key})`, [LOCK_NAMESPACE, lock]);

@@ -15,6 +15,11 @@ export interface SigningKey {
   readonly activatedAt: Date | null;
   readonly retiringAt: Date | null;
   readonly retiredAt: Date | null;
+  /**
+   * A `next` key from a manual rotation: when it becomes active (published until then). Keys of
+   * the scheduled rotation have none and activate KEY_PUBLISH_AHEAD after creation.
+   */
+  readonly activateAt: Date | null;
 }
 
 /** A published key together with its decrypted private JWK, for loading into the provider. */

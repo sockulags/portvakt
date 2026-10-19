@@ -18,12 +18,14 @@ there are not reopened during delivery.
 | `packages/sdk-node`          | `@portvakt/sdk-node`: BFF, access token validation, s2s tokens      |
 | `packages/design-system`     | Delivered design system; source in `src/` kept as delivered         |
 | `packages/fonts`             | Self-hosted design-system fonts (`@portvakt/fonts/fonts.css`)       |
+| `packages/http-kit`          | Metrics registry (Prometheus), request context (traceparent), rate  |
+|                              | limiter, security headers: shared by the server and the admin BFF   |
 | `examples/demo-service`      | Demo service (Express + SDK, React SPA in `web/`), run as A and B   |
 | `sdk-java`                   | Java SDK (Maven, Java 21): `portvakt-sdk-core`, Spring Boot starter |
 | `examples/demo-service-java` | Java demo "Tjänst C" (Spring Boot + starter, Thymeleaf), :3300      |
 | `e2e`                        | Playwright suite (`scripts/e2e.js` runs it over the whole stack)    |
 | `deploy`                     | `docker-compose.dev.yml` (dev/test Postgres), later images/Helm     |
-| `docs`                       | Plan, claims contract, admin API (`admin-api.md`)                   |
+| `docs`                       | Plan, claims contract, admin API, threat model (`threat-model.md`)  |
 
 Shared config at the root: `tsconfig.base.json` (strict), `tsconfig.node.json` (NodeNext, Node
 packages), `tsconfig.vite.json` (Bundler resolution, Vite apps), `eslint.config.js`,
@@ -54,6 +56,9 @@ npm run build -w examples/demo-service # demo SPA into examples/demo-service/dis
 npm run build -w packages/sdk-node     # SDK into packages/sdk-node/dist (JS + .d.ts)
 npm run start -w apps/admin            # admin portal on :3400 (build its SPA first)
 npm run test:java      # Java SDK and Java demo: mvn verify in Docker against a real Portvakt
+npm audit              # dependency audit (CI fails on any finding)
+npm run license:check  # licenses of the production npm dependencies (allowlist; Maven: verify)
+npm run config:check -w apps/server   # problems and warnings of the configuration in the env
 ```
 
 Local stack (`npm run dev:stack`, `scripts/dev-stack.js`, plain Node, works on Windows): db:up,
@@ -117,9 +122,11 @@ skips the Java demo and its variants (local iteration only); `--keep` leaves the
 
 They differ from dev:stack (3000...) and test:java (3900, 4900), so all three can run at once,
 but not two e2e runs, and not test:java while the e2e Java build runs (both write
-`sdk-java/target`). The e2e stack sets ACCESS_TOKEN_TTL=60s: both SDKs refresh tokens valid for
-less than 60 s, so every API call refreshes first and "the next refresh" (scenario 6) is the next
-call, with no waiting.
+`sdk-java/target`). The e2e stack sets ACCESS_TOKEN_TTL=10s: both SDKs refresh a session's token
+once less than half its lifetime is left, so "the next refresh" (scenarios 6 and 9) is the next
+API call after waiting `ACCESS_TOKEN_DUE_MS` (`src/env.ts`). It sets KEY_MANUAL_PUBLISH_AHEAD=15s
+(scenario 9 waits for the activation) and raises every rate limit (all browsers sign in from
+127.0.0.1).
 
 Debugging a failing scenario: process logs are in `e2e/.artifacts/logs/<process>.log`, and the
 lines a failed test added are attached to it; the HTML report is `npx playwright show-report
@@ -163,8 +170,12 @@ pages; `login_hint` only signs the tenant administrator in. Scenario 2 needs `e2
 |                   | JWKS, SAML SP endpoints in `saml-routes.ts`), CSRF, login UI shell          |
 | `keys/`           | `SigningKeyCache` (keys of this replica) and `KeyRotationService`           |
 | `jobs/`           | Advisory-locked `runExclusive` and the `PeriodicTask` scheduler             |
-| `net/`            | `OutboundGuard`: every request to a configured URL (SSRF, redirects, size)  |
-| `logging/`        | pino JSON logger with redaction, request logging                            |
+| `net/`            | `OutboundGuard`: every request to a configured URL (SSRF, redirects, size), |
+|                   | metrics per login method (`withOutboundContext`)                            |
+| `logging/`        | pino JSON logger with redaction and request ids, request logging            |
+| `http/`           | Rate limits (`RequestLimits`), route templates for metrics, client ids of   |
+|                   | token requests (`client-id.ts`); `hardening.test.ts` covers M8 end to end   |
+| `metrics/`        | Metric names (`registry.ts`), scrape-time collectors (pool, keys, SAML)     |
 | `admin/`          | Bootstrap (`bootstrap.ts`), admin API v1 (`api/`: auth, registry with the   |
 |                   | OpenAPI generator, problems, etags, diffs, `routes/` per resource)          |
 | `server.ts`       | `createPortvakt()`: composition root, start-up, jobs, graceful shutdown     |
@@ -247,7 +258,12 @@ dependency would only wrap.
   `/t/{slug}/api/*` -> `{ADMIN_API_URL}/admin/api/v1/*` with the session's access token. A
   tenant client is created only after Portvakt's discovery for the slug answers 200 (unknown
   slugs: 404, remembered in a bounded negative cache that never evicts real tenants; Portvakt
-  unreachable: 503). HSTS is sent when ADMIN_PUBLIC_URL is https. (CSRF
+  unreachable: 503). The BFF has the server's M8 layers (`@portvakt/http-kit`): request
+  context and pino logs with ids (`src/observability.ts`), the baseline security headers (HSTS when
+  ADMIN_PUBLIC_URL is https) and the SPA's `ADMIN_PAGE_CSP`, `/metrics` (`portvakt_admin_*`,
+  ADMIN_METRICS_TOKEN required in production), sign-in routes limited per client IP
+  (ADMIN_RATE_LIMIT_LOGIN, ADMIN_TRUST_PROXY), and the proxy forwards `traceparent` and
+  `X-Request-Id` to the admin API. (CSRF
   token, same-origin and JSON required for mutations; only validated path segments below the
   API base are forwarded). `web/` is the SPA (design system only; Swedish always by default,
   English only when chosen and stored, never from `navigator.languages`; strings in
@@ -434,12 +450,19 @@ batch_size)`, which refuses a cutoff younger than 90 days, sets a transaction-lo
   hold one owner connection each while they run. Keep `replicas × (DATABASE_POOL_MAX + 1) + 2`
   (plus any admin tooling) below the database's max_connections minus its reserved slots.
 - `AuditSink` (`audit/audit-log.ts`) receives committed events; the default forwards nothing.
-  Events that `SamlLoginMethodAdmin` writes are not forwarded (it has no audit log yet); a real
-  forwarder should rather tail `audit_events` by `seq`, which also covers every transaction.
+  `SamlLoginMethodAdmin` writes through `AuditLog` too (`onWritten` inside an admin API
+  transaction, forwarded after the commit). A real forwarder should rather tail `audit_events` by
+  `seq`, which also covers every transaction.
 - Downstream client secrets are stored encrypted (oidc-provider needs the plaintext to verify
   `client_secret_basic`/`client_secret_post`); read them with `applications.getClientSecret`.
 - Signing key transitions are time-guarded in SQL (`KEY_PUBLISH_AHEAD`, `KEY_RETIRE_AFTER`, passed
-  by the caller). Only the audited `force` path (key compromise) skips the wait.
+  by the caller). Only the audited `force` path (key compromise, `emergency`) skips the wait.
+  A manual rotation without emergency publishes ahead: `signing_keys.activate_at` (migration 0006)
+  is set to KEY_MANUAL_PUBLISH_AHEAD after the next key's creation, `activate()` honours it, and
+  every replica arms a timer for it (`scheduleActivation` in `server.ts`, re-armed on every
+  `signing_keys` event) that runs the rotation job then; the periodic check is the fallback.
+  Production requires KEY_MANUAL_PUBLISH_AHEAD of at least 390 s (the SDKs' default JWKS cache
+  5 min + cooldown 30 s + JWKS max-age 60 s); keep the SDKs' `jwks.cacheMaxAge` below it.
 - Rotating `MASTER_KEY` also changes the blind-index key: lookups try every configured key until
   `rewrap-secrets` has re-indexed the rows. Representation grant lookups therefore take the
   agent's indexes under every key (`persons.pinIndexCandidates`), never a stored `pinIndex`.
@@ -453,8 +476,11 @@ batch_size)`, which refuses a cutoff younger than 90 days, sets a transaction-lo
   when it changes a row a cached provider or the key cache is built from: tenant, application
   client configuration, tenant attachment, login methods (their acr values become the
   provider's `acrValues`), signing key state. Roles, rules, attributes and
-  persons are read live and emit nothing. NOTIFY is database-wide, so parallel test files see
-  each other's events; they only cause harmless invalidations, so never assert on cache sizes.
+  persons are read live and emit nothing. NOTIFY is database-wide: `emitChange` notifies the
+  channel the connection names in `portvakt.change_channel` (default `portvakt_changes`), and
+  `createPortvakt` listens on the channel its pool reports. The test database sets a channel per
+  schema, so parallel test files never see each other's events and tests may assert on cache
+  invalidation directly.
 - `oidc/routes.ts` deletes `req.originalUrl` before handing a request to the provider:
   oidc-provider derives its mount path with `originalUrl.indexOf(url)`, which is wrong for a slug
   starting with a route name (`/t/authority/auth`); without it, it uses `req.baseUrl`.
@@ -595,8 +621,8 @@ number>`.
   or `trustUpstreamEmail`. Protected identity is sticky on the person (`persons.protected_identity`;
   `persons.clearProtectedIdentity` is the admin hook for M6).
 - Upstream callbacks with an unknown state are not audited (anyone can send them): they are
-  logged and counted in `portvakt_federation_callback_rejected_total` (`metrics/registry.ts`, an
-  in-process registry that M8 exposes to Prometheus). One pending `federation_states` row per
+  logged and counted in `portvakt_federation_callback_rejected_total` (`metrics/registry.ts`,
+  served at `/metrics`). One pending `federation_states` row per
   (interaction, login method) is reused while valid. Discovery failures are cached for
   `UPSTREAM_FAILURE_CACHE`. Follow-up: rotation of the per-login-method upstream client key
   (private_key_jwt) with an overlap; today a key is generated once.
@@ -811,8 +837,40 @@ packages/sdk-node` emits `dist/` with declarations. Publishing (exports pointing
 - SDK ID token signatures (both SDKs) are checked with the SDK's own JWKS cache, never
   openid-client's non-repudiation checks (their cache refetches an unknown kid only after 60 s).
   ID tokens come from the token endpoint, so an unknown kid refetches regardless of the cooldown:
-  the portal's key rotation activates the new key at once, and the next refresh must not end the
+  an emergency rotation activates the new key at once, and the next refresh must not end the
   session (e2e scenario 9). Access tokens (bearer, from anyone) keep the cooldown.
+- SDK refresh threshold (both SDKs): a session's access token is refreshed when less than the
+  default minimum (clock skew + 30 s) is left, but never more than half its lifetime
+  (`refreshThreshold`, `PortvaktRefreshTokenProvider.threshold`), so a short ACCESS_TOKEN_TTL does
+  not refresh on every request. An explicit `minValiditySeconds` / `MIN_VALIDITY_ATTRIBUTE` is
+  used as given (tests force refreshes with it). Concurrent refreshes share one (session lock).
+- M8 request path (`app.ts`): request context first (`@portvakt/http-kit`: a valid `traceparent`
+  is continued, otherwise a trace starts; `X-Request-Id` kept when well-formed, else the trace id;
+  both echoed), so every pino line has `requestId`/`traceId` (the logger's `mixin` reads the
+  AsyncLocalStorage; 'finish' handlers restore it with `runWithRequest`), then request logging,
+  HTTP metrics by route template (`http/route-template.ts`; the admin API sets
+  `res.locals.routeTemplate`), the baseline security headers (JSON CSP, X-Frame-Options DENY,
+  nosniff, no-referrer, COOP same-origin, Permissions-Policy, HSTS for an https PUBLIC_URL), the
+  URL length bound, then the routes. Pages set their own CSP on top (login UI, SAML POST pages);
+  provider responses get `PROVIDER_CSP` (`oidc/routes.ts`): oidc-provider adds the hash of its
+  `form_post` script to an existing `script-src` itself, so no `'unsafe-inline'` is needed.
+- Rate limits (`http/rate-limits.ts`, RATE_LIMIT_*): token buckets per replica, keyed by
+  `req.ip` (TRUST_PROXY), `{slug}:{client_id}` or the admin caller; a refused request is counted
+  by limit name only. The per-client token endpoint limit needs the client_id of form bodies
+  (`client_secret_post`, `private_key_jwt`): `readReplayableForm` reads the body (56 KB, the
+  provider's limit) and makes the request readable again (`req.readable`, `req.iterator()`, as
+  oidc-provider's `selective_body.js` reads it), so the provider parses the same bytes; if
+  oidc-provider changes how it reads bodies, the token endpoint tests fail. `startTestServer`
+  turns every limit off (`RATE_LIMIT_*=off`); `http/hardening.test.ts` sets small ones and a
+  fresh X-Forwarded-For per test (TRUST_PROXY=1).
+- Runtime pool connections carry `statement_timeout` and `idle_in_transaction_session_timeout`
+  (DATABASE_*; test pools 30 s / 60 s). A job that holds its advisory lock transaction while
+  working outside it (the SAML metadata refresh) passes `idleInTransactionTimeoutSeconds: 0` to
+  `runExclusive` (`SET LOCAL`). Waiting for a lock (`wait: true`) counts as statement time.
+- Metrics: `/metrics` on the main port behind METRICS_TOKEN, or `listenMetrics` on METRICS_PORT
+  (main.ts); production refuses the main port without a token. Labels are route templates,
+  reason codes, grant types, limit names, kids, login method ids and tenant slugs; never paths,
+  client ids of requests, personal data or tenant-chosen text.
 - Playwright: `page.route` never sees the target of a redirect, so `src/rp.ts` reads the code from
   the callback's request event. The design system's checkboxes and switches cover their input:
   click the label (`AdminPortal.toggle`), not the input.

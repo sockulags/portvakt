@@ -87,8 +87,8 @@ export class DemoPage {
 
   /**
    * "Anropa API": the demo's BFF calls its own API with the session's access token (refreshed
-   * first: the e2e stack's tokens are always due for a refresh). Returns the API's HTTP status
-   * and body, or `"session_ended"` when the demo answered by ending the session.
+   * first when it is due: see `ACCESS_TOKEN_DUE_MS`). Returns the API's HTTP status and body,
+   * or `"session_ended"` when the demo answered by ending the session.
    */
   async callApi(): Promise<{ status: number; body: unknown } | "session_ended"> {
     const status = this.page.getByTestId("api-status");

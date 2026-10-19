@@ -109,7 +109,8 @@ the existing session exactly as it was.
   Activity is `requireLogin`, `requireAcr`, `loadSession` and `getAccessToken`; reading
   `GET /auth/session` is not.
 - `getAccessToken` refreshes when the token has less than `minValiditySeconds` left (default: clock
-  skew + 30 s). Refreshes of one session never run concurrently: an in-process lock, plus the
+  skew + 30 s, but at most half the token's lifetime, so short-lived tokens are not refreshed on
+  every request; an explicit `minValiditySeconds` is used as given). Refreshes of one session never run concurrently: an in-process lock, plus the
   store's `withLock` across replicas (`PgSessionStore` uses an advisory lock). Portvakt rotates
   refresh tokens and treats a replay as theft, so concurrent refreshes would end the grant.
 - A refused refresh (`invalid_grant`: grant revoked, representation no longer valid, broker
@@ -221,7 +222,7 @@ semantics and its default ranking (`DEFAULT_ACR_RANKING`: loa2 < loa3 < loa4).
 | `clockSkewSeconds`                   | 30                         | Tolerance for `exp`, `nbf`, `iat`.                                                                                                                                                                 |
 | `httpTimeoutSeconds`                 | 10                         | Every request to Portvakt.                                                                                                                                                                         |
 | `discoveryCacheSeconds`              | 3600                       | Discovery is refetched after this (stale metadata is kept on failure).                                                                                                                             |
-| `jwks.cacheMaxAgeSeconds`            | 600                        | Keys are refetched after this.                                                                                                                                                                     |
+| `jwks.cacheMaxAgeSeconds`            | 300                        | Keys are refetched after this. Keep it below Portvakt's KEY_MANUAL_PUBLISH_AHEAD minus 90 s.                                                                                                       |
 | `failureCacheSeconds`                | 5                          | With nothing cached, a failed discovery or JWKS fetch is retried after this.                                                                                                                       |
 | `jwks.cooldownSeconds`               | 30                         | At most one JWKS fetch per this for access tokens; an unknown `kid` within it is refused. ID tokens from the token endpoint always refetch an unknown `kid` (a key rotation never ends a session). |
 | `jwks.staleMaxAgeSeconds`            | 86400                      | While refetches fail, keys stay in use until `cacheMaxAgeSeconds` plus this                                                                                                                        |

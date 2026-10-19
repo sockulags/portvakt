@@ -11,6 +11,7 @@ import { uniqueSuffix } from "../testing/fixtures.js";
 import { startTestServer } from "../testing/test-server.js";
 import { createLogger } from "../logging/logger.js";
 import { createPortvakt } from "../server.js";
+import { generateSigningKey } from "../crypto/jwk.js";
 import { JOB_LOCKS, runExclusive } from "../jobs/exclusive.js";
 
 const ts = await startTestServer();
@@ -140,41 +141,112 @@ describe.skipIf(ts === undefined)("signing keys and rotation", () => {
     await expect(verify(tokenOfRetiringKey.issuer, tokenOfRetiringKey.token)).rejects.toThrow();
   });
 
-  it("rotates on demand: the next token uses a new kid, the previous kid stays verifiable", async () => {
+  /** Moves a scheduled activation into the past, as if KEY_MANUAL_PUBLISH_AHEAD had passed. */
+  async function makeDue(kid: string): Promise<void> {
+    await db.ownerDb.query(
+      "UPDATE signing_keys SET activate_at = now() - interval '1 second' WHERE kid = $1",
+      [kid],
+    );
+  }
+
+  it("rotates on demand by publishing ahead: the new key is in JWKS first, signs after the wait", async () => {
     const { rp, issuer } = await world();
     const before = portvakt.keyCache.current!.activeKid;
     const oldToken = await newToken(rp);
+    const started = Date.now();
     const result = await portvakt.rotation.rotateNow({
       actor: { type: "person", id: crypto.randomUUID() },
       reason: "scheduled maintenance",
       emergency: false,
     });
-    expect(result).toMatchObject({ retiringKid: before, retiredKids: [] });
-    expect(result.activatedKid).not.toBe(before);
-    expect(portvakt.keyCache.current!.activeKid).toBe(result.activatedKid);
-    expect(decodeProtectedHeader(await newToken(rp)).kid).toBe(result.activatedKid);
+    if (result.status !== "scheduled") throw new Error(`expected scheduled, got ${result.status}`);
+    const { nextKid, activatesAt } = result;
+    // KEY_MANUAL_PUBLISH_AHEAD (10 minutes by default) from now.
+    expect(activatesAt.getTime()).toBeGreaterThanOrEqual(
+      started + policy.manualPublishAheadSeconds * 1000 - 2000,
+    );
+    expect(activatesAt.getTime()).toBeLessThanOrEqual(
+      Date.now() + policy.manualPublishAheadSeconds * 1000 + 2000,
+    );
+    // Published at once, not signing yet: the job does nothing before the time.
+    expect((await jwksOf(issuer)).keys.map((key) => key.kid)).toContain(nextKid);
+    expect(decodeProtectedHeader(await newToken(rp)).kid).toBe(before);
+    expect((await portvakt.jobs.rotateKeys()).activatedKid).toBeNull();
+    expect((await repos.signingKeys.findByKid(nextKid))?.activateAt?.getTime()).toBe(
+      activatesAt.getTime(),
+    );
+
+    // A second request while one is pending keeps the schedule (idempotent).
+    const again = await portvakt.rotation.rotateNow({
+      actor: { type: "system", id: null },
+      reason: "clicked twice",
+      emergency: false,
+    });
+    expect(again).toEqual({ status: "scheduled", nextKid, activatesAt });
+
+    // Once due, the rotation job activates it (no forced transition).
+    await makeDue(nextKid);
+    expect(await portvakt.jobs.rotateKeys()).toMatchObject({ activatedKid: nextKid });
+    expect(portvakt.keyCache.current!.activeKid).toBe(nextKid);
+    expect(decodeProtectedHeader(await newToken(rp)).kid).toBe(nextKid);
     expect((await verify(issuer, oldToken)).protectedHeader.kid).toBe(before);
+    expect((await repos.signingKeys.findByKid(nextKid))?.activateAt).toBeNull();
     const audit = await repos.audit.query(
       { allTenants: true, tenantId: null },
-      { actions: ["key.rotate", "key.activate_forced"] },
+      { actions: ["key.rotate", "key.activate", "key.activate_forced"] },
     );
-    expect(audit.events.map((event) => event.action).sort()).toEqual([
-      "key.activate_forced",
+    const forKey = audit.events.filter((event) => event.subject?.id === nextKid);
+    expect(forKey.map((event) => event.action).sort()).toEqual([
+      "key.activate",
+      "key.rotate",
       "key.rotate",
     ]);
+    expect(forKey.find((event) => event.action === "key.rotate")?.details).toMatchObject({
+      emergency: false,
+      activatesAt: activatesAt.toISOString(),
+    });
   });
 
-  it("emergency rotation retires the compromised key at once", async () => {
+  it("activates at once a next key that was published long enough ago", async () => {
+    const before = portvakt.keyCache.current!.activeKid;
+    const next = await repos.signingKeys.createNext(generateSigningKey());
+    await age(next.kid, policy.manualPublishAheadSeconds + 60);
+    const result = await portvakt.rotation.rotateNow({
+      actor: { type: "system", id: null },
+      reason: "published by the scheduled rotation",
+      emergency: false,
+    });
+    expect(result).toEqual({
+      status: "activated",
+      activatedKid: next.kid,
+      retiringKid: before,
+      retiredKids: [],
+    });
+    expect(portvakt.keyCache.current!.activeKid).toBe(next.kid);
+  });
+
+  it("emergency rotation activates at once and retires the compromised key", async () => {
     const { rp, issuer } = await world();
     const compromised = portvakt.keyCache.current!.activeKid;
     const signedByIt = await newToken(rp);
+    // A pending manual rotation is overtaken: its published key signs at once.
+    const pending = await portvakt.rotation.rotateNow({
+      actor: { type: "system", id: null },
+      reason: "planned",
+      emergency: false,
+    });
+    expect(pending.status).toBe("scheduled");
     const result = await portvakt.rotation.rotateNow({
       actor: { type: "system", id: null },
       reason: "key compromise",
       emergency: true,
     });
-    expect(result.retiredKids).toEqual([compromised]);
-    expect(result.retiringKid).toBeNull();
+    expect(result).toMatchObject({
+      status: "activated",
+      activatedKid: pending.status === "scheduled" ? pending.nextKid : "",
+      retiringKid: null,
+      retiredKids: [compromised],
+    });
     expect((await jwksOf(issuer)).keys.map((key) => key.kid)).not.toContain(compromised);
     await expect(verify(issuer, signedByIt)).rejects.toThrow();
     await expect(
@@ -186,9 +258,10 @@ describe.skipIf(ts === undefined)("signing keys and rotation", () => {
     ).rejects.toThrow(/Invalid input/);
   });
 
-  it("lets only one replica run the job, and other replicas follow on NOTIFY", async () => {
+  it("lets only one replica run the job, and replicas activate a scheduled key on time", async () => {
+    // A replica with a one-second publish-ahead: its timer runs the job when the key is due.
     const replica = createPortvakt({
-      config,
+      config: { ...config, keyRotation: { ...config.keyRotation, manualPublishAheadSeconds: 1 } },
       pool: db.pool,
       logger: createLogger({ level: "silent" }),
       keys: db.keys,
@@ -205,12 +278,20 @@ describe.skipIf(ts === undefined)("signing keys and rotation", () => {
         value: { ran: false, createdKid: null, activatedKid: null, retiredKids: [] },
       });
 
-      const result = await portvakt.rotation.rotateNow({
+      const result = await replica.rotation.rotateNow({
         actor: { type: "system", id: null },
         reason: "replica convergence",
         emergency: false,
       });
-      await expect.poll(() => replica.keyCache.current?.activeKid).toBe(result.activatedKid);
+      if (result.status !== "scheduled") throw new Error("expected a scheduled rotation");
+      // Both replicas see the published key at once (NOTIFY), and the active one after it is due.
+      await expect
+        .poll(() => portvakt.keyCache.current?.kids.map((key) => key.kid))
+        .toContain(result.nextKid);
+      await expect
+        .poll(() => portvakt.keyCache.current?.activeKid, { timeout: 10_000 })
+        .toBe(result.nextKid);
+      await expect.poll(() => replica.keyCache.current?.activeKid).toBe(result.nextKid);
     } finally {
       await replica.shutdown();
     }

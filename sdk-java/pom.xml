@@ -47,6 +47,7 @@
     <maven-clean-plugin.version>3.5.0</maven-clean-plugin.version>
     <maven-site-plugin.version>3.22.0</maven-site-plugin.version>
     <maven-antrun-plugin.version>3.2.0</maven-antrun-plugin.version>
+    <license-maven-plugin.version>2.7.1</license-maven-plugin.version>
   </properties>
 
   <dependencyManagement>
@@ -143,6 +144,11 @@
           <version>${maven-enforcer-plugin.version}</version>
         </plugin>
         <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>license-maven-plugin</artifactId>
+          <version>${license-maven-plugin.version}</version>
+        </plugin>
+        <plugin>
           <groupId>org.springframework.boot</groupId>
           <artifactId>spring-boot-maven-plugin</artifactId>
           <version>${spring-boot.version}</version>
@@ -185,6 +191,52 @@
                 <dependencyConvergence/>
                 <banDuplicatePomDependencyVersions/>
               </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <!--
+        License check (verify): every runtime dependency (compile and runtime scope; test,
+        provided and system excluded) must be under a permissive license. A dependency with
+        several licenses passes when one of them is allowed (logback: EPL-2.0 or LGPL-2.1;
+        jakarta.annotation: EPL-2.0 or GPL-2.0 with the Classpath Exception). GPL and AGPL alone,
+        and a missing license, fail the build. The license names of the POMs are merged into SPDX
+        ids first; THIRD-PARTY.txt (target/generated-sources/license) lists the result.
+      -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>license-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>third-party-licenses</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>add-third-party</goal>
+            </goals>
+            <configuration>
+              <excludedScopes>test,provided,system</excludedScopes>
+              <excludedGroups>^se.portvakt</excludedGroups>
+              <failOnMissing>true</failOnMissing>
+              <failOnBlacklist>true</failOnBlacklist>
+              <includedLicenses>
+                <includedLicense>Apache-2.0</includedLicense>
+                <includedLicense>MIT</includedLicense>
+                <includedLicense>BSD-2-Clause</includedLicense>
+                <includedLicense>BSD-3-Clause</includedLicense>
+                <includedLicense>EPL-1.0</includedLicense>
+                <includedLicense>EPL-2.0</includedLicense>
+                <includedLicense>CC0-1.0</includedLicense>
+              </includedLicenses>
+              <licenseMerges>
+                <licenseMerge>Apache-2.0|Apache License, Version 2.0|Apache License, version 2.0|The Apache Software License, Version 2.0|The Apache License, Version 2.0|Apache License 2.0|Apache 2.0|Apache 2|Apache License Version 2.0</licenseMerge>
+                <licenseMerge>MIT|MIT License|The MIT License|The MIT License (MIT)</licenseMerge>
+                <licenseMerge>BSD-3-Clause|BSD License 3|The BSD 3-Clause License|BSD 3-Clause|New BSD License</licenseMerge>
+                <licenseMerge>BSD-2-Clause|BSD 2-Clause|The BSD 2-Clause License</licenseMerge>
+                <licenseMerge>EPL-2.0|EPL 2.0|Eclipse Public License v2.0|Eclipse Public License - v 2.0|Eclipse Public License 2.0</licenseMerge>
+                <licenseMerge>EPL-1.0|EPL 1.0|Eclipse Public License v1.0|Eclipse Public License - v 1.0</licenseMerge>
+                <licenseMerge>LGPL-2.1-only|GNU Lesser General Public License|LGPL 2.1|GNU Lesser General Public License, version 2.1</licenseMerge>
+                <licenseMerge>GPL-2.0-with-classpath-exception|GPL2 w/ CPE|GNU General Public License, version 2 with the GNU Classpath Exception</licenseMerge>
+              </licenseMerges>
             </configuration>
           </execution>
         </executions>
