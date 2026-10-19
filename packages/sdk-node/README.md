@@ -47,7 +47,7 @@ const bff = portvakt.bff({
   sessionStore: new MemoryStore(), // PgSessionStore in production
   encryptionKey: process.env.SESSION_ENCRYPTION_KEY!, // 32 random bytes, base64
   cookie: {
-    name: "case_session",
+    name: "__Host-case_session", // __Host-: Secure, path /, no domain (checked at start)
     secrets: [process.env.COOKIE_SECRET!], // at least 32 characters
     secure: true,
     sameSite: "lax",
@@ -57,6 +57,7 @@ const bff = portvakt.bff({
 const app = express();
 app.use(bff); // GET /auth/login, /auth/callback, /auth/session, /auth/step-up,
 // /auth/select-representation; POST /auth/logout
+app.use(express.urlencoded({ extended: false })); // forms send the CSRF token as `_csrf`
 
 app.get("/cases", bff.requireLogin(), async (req, res, next) => {
   try {
@@ -71,20 +72,39 @@ app.get("/cases", bff.requireLogin(), async (req, res, next) => {
   }
 });
 
+// Unsafe methods (POST, PUT, PATCH, DELETE) behind requireLogin/requireAcr need the session's
+// CSRF token (`X-CSRF-Token` header, or `_csrf` in the parsed body) and a same-origin request.
 app.post("/cases/:id/decide", bff.requireAcr("http://id.elegnamnden.se/loa/1.0/loa4"), handler);
 app.use(bff.errorHandler()); // LoginRequiredError -> 401/redirect, PortvaktUnavailableError -> 503
 ```
 
+The SPA reads the token from `GET /auth/session` (`csrfToken`) and sends it with every unsafe
+request:
+
+```ts
+await fetch("/cases/7/decide", { method: "POST", headers: { "x-csrf-token": session.csrfToken } });
+```
+
+### CSRF
+
+`requireLogin()` and `requireAcr(acr)` protect unsafe methods (everything but GET, HEAD and
+OPTIONS) by default: the session's CSRF token as `X-CSRF-Token` header or `_csrf` body field
+(parse the body before the middleware for forms), and, when the browser says where the request
+came from, a same-origin `Sec-Fetch-Site` and `Origin`. Failures answer 403 `invalid_csrf_token`
+or `cross_site_request`. A route that protects itself another way opts out with
+`requireLogin({ csrf: false })`; `bff.requireCsrf()` is the check on its own (it needs a
+session).
+
 ### Routes
 
-| Route                                  | What it does                                                                                                                                                                                                   |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /auth/login`                      | Starts a login. Query: `returnTo` (same-origin relative path; anything else falls back to `defaultReturnTo`), `acr`, `prompt` (`login`, `select_account`, `none`), `loginHint`, `uiLocales`.                   |
-| `GET /auth/callback`                   | Verifies the pending login (single use, bound to the browser by a cookie), state, PKCE and nonce, validates the ID token, then starts a **new** session id and redirects to `returnTo`.                        |
-| `POST /auth/logout`                    | Requires the CSRF token (`_csrf` form field or `X-CSRF-Token` header). Ends the session and redirects to Portvakt's end-session endpoint with `id_token_hint` and `post_logout_redirect_uri` (JSON for fetch). |
-| `GET /auth/session`                    | JSON for SPAs: `authenticated`, `principal` (without `pin`), `expiresAt`, `sessionEndsAt`, `csrfToken`. Never tokens. Not counted as activity.                                                                 |
-| `GET /auth/select-representation`      | A new authorization with `prompt=select_account`: the representation chooser, without a new upstream login.                                                                                                    |
-| `GET /auth/step-up?acr=...&returnTo=/` | A new authorization with `acr_values`; the callback answers 403 `acr_not_met` if the login did not reach it.                                                                                                   |
+| Route                                  | What it does                                                                                                                                                                                                                                                                                                                                                           |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /auth/login`                      | Starts a login. Query: `returnTo` (same-origin relative path; anything else falls back to `defaultReturnTo`), `acr`, `prompt` (`login`, `select_account`, `none`), `loginHint`, `uiLocales`.                                                                                                                                                                           |
+| `GET /auth/callback`                   | Verifies the pending login (single use, bound to the browser by a cookie; a callback with another `state` consumes nothing), PKCE and nonce, validates the ID token, then starts a **new** session id and redirects to `returnTo`.                                                                                                                                     |
+| `POST /auth/logout`                    | Requires the CSRF token (`_csrf` form field or `X-CSRF-Token` header) when a session exists. Ends the session and redirects to Portvakt's end-session endpoint with `id_token_hint`, `client_id` and `post_logout_redirect_uri` (JSON for fetch); without a local session also, with `client_id` and `post_logout_redirect_uri` (Portvakt asks the person to confirm). |
+| `GET /auth/session`                    | JSON for SPAs: `authenticated`, `principal` (without `pin`), `expiresAt`, `sessionEndsAt`, `csrfToken`. Never tokens. Not counted as activity.                                                                                                                                                                                                                         |
+| `GET /auth/select-representation`      | A new authorization with `prompt=select_account`: the representation chooser, without a new upstream login.                                                                                                                                                                                                                                                            |
+| `GET /auth/step-up?acr=...&returnTo=/` | A new authorization with `acr_values`; the callback answers 403 `acr_not_met` if the login did not reach it.                                                                                                                                                                                                                                                           |
 
 `requireLogin()` and `requireAcr(acr)` redirect browser navigations (`Sec-Fetch-Mode: navigate`, or
 a GET accepting HTML) to the login or step-up and answer XHR/fetch with 401 JSON:
@@ -93,9 +113,11 @@ a GET accepting HTML) to the login or step-up and answer XHR/fetch with 401 JSON
 Step-up and the representation switch replace the session's login, so another site must not be
 able to start them; the same holds for `/auth/login` with `acr` or `prompt`, and for any login
 while a session exists. When the browser sends `Sec-Fetch-Site`, it must be `same-origin` or
-`none` (otherwise 403 `cross_site_request`); without it, a same-origin `Referer` or the session's
-CSRF token as `csrf` query parameter is required. Plain links from your own pages work as they
-are, and a plain login without a session may be linked from anywhere.
+`none`; without it, a same-origin `Referer` is required. A browser navigation from another site
+(also a deep link to a route behind `requireAcr`) gets a minimal page of your application instead
+("Fortsätt till inloggning", no styles or scripts, strict CSP) whose button starts the same flow
+from here; fetch and other non-navigations get 403 `cross_site_request`. Plain links from your
+own pages work as they are, and a plain login without a session may be linked from anywhere.
 A step-up whose login does not reach the requested level answers 403 `acr_not_met` and leaves
 the existing session exactly as it was.
 
@@ -115,6 +137,13 @@ the existing session exactly as it was.
   refresh tokens and treats a replay as theft, so concurrent refreshes would end the grant.
 - A refused refresh (`invalid_grant`: grant revoked, representation no longer valid, broker
   session ended) ends the session: `LoginRequiredError`.
+- Portvakt asks to retry later (HTTP 429, or the OAuth error `temporarily_unavailable` with any
+  status), at a refresh or at the login callback: transient. `getAccessToken` throws
+  `PortvaktUnavailableError` (503 with Portvakt's `Retry-After`, `retryAfterSeconds`); the
+  session keeps its unchanged refresh token and no outage starts (the grace is not involved);
+  the callback shows the unavailable page.
+- A refresh never moves the session's end later: it is the earliest of the current end, the
+  login plus `maxAgeSeconds` and the refreshed ID token's `session_exp`.
 - Portvakt unreachable during a refresh (network error, timeout or a 5xx answer): with
   `outageGraceSeconds` 0 (default) the session ends. With a grace, the first failed refresh starts
   the outage: `getAccessToken` throws `PortvaktUnavailableError` (503) and the session continues.
@@ -192,7 +221,9 @@ const response = await fetch(url, {
 ```
 
 Tokens are cached until shortly before they expire (10% of the lifetime, at least 30 s) and
-fetched once at a time. The target must be enabled in the same tenant.
+fetched once at a time. The target must be enabled in the same tenant and listed in the calling
+application's `serviceAudiences` in Portvakt (empty by default: no service tokens for other
+applications; a token for the application itself always works).
 
 ## Principal
 
@@ -210,35 +241,35 @@ semantics and its default ranking (`DEFAULT_ACR_RANKING`: loa2 < loa3 < loa4).
 
 ## Configuration reference
 
-| Option                               | Default                    | Meaning                                                                                                                                                                                            |
-| ------------------------------------ | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `issuer`                             | required                   | The tenant issuer `{PUBLIC_URL}/t/{tenant}`, exactly (no trailing slash).                                                                                                                          |
-| `clientId`                           | required                   | The application's client_id.                                                                                                                                                                       |
-| `clientAuth`                         | required                   | `client_secret_basic`/`client_secret_post` with `clientSecret`, or                                                                                                                                 |
-|                                      |                            | `private_key_jwt` with `privateJwk` (its public key registered in Portvakt).                                                                                                                       |
-| `redirectUri`                        | (required for the BFF)     | `{origin}{mountPath}/callback`.                                                                                                                                                                    |
-| `postLogoutRedirectUri`              | none                       | Registered post-logout URI.                                                                                                                                                                        |
-| `scopes`                             | `openid profile email`     | Must include `openid`; `pin`/`hsa` only if the application is allowed them.                                                                                                                        |
-| `clockSkewSeconds`                   | 30                         | Tolerance for `exp`, `nbf`, `iat`.                                                                                                                                                                 |
-| `httpTimeoutSeconds`                 | 10                         | Every request to Portvakt.                                                                                                                                                                         |
-| `discoveryCacheSeconds`              | 3600                       | Discovery is refetched after this (stale metadata is kept on failure).                                                                                                                             |
-| `jwks.cacheMaxAgeSeconds`            | 300                        | Keys are refetched after this. Keep it below Portvakt's KEY_MANUAL_PUBLISH_AHEAD minus 90 s.                                                                                                       |
-| `failureCacheSeconds`                | 5                          | With nothing cached, a failed discovery or JWKS fetch is retried after this.                                                                                                                       |
-| `jwks.cooldownSeconds`               | 30                         | At most one JWKS fetch per this for access tokens; an unknown `kid` within it is refused. ID tokens from the token endpoint always refetch an unknown `kid` (a key rotation never ends a session). |
-| `jwks.staleMaxAgeSeconds`            | 86400                      | While refetches fail, keys stay in use until `cacheMaxAgeSeconds` plus this                                                                                                                        |
-|                                      |                            | after their last successful fetch; then validation answers 503.                                                                                                                                    |
-| `outageGraceSeconds`                 | 0                          | See "Session semantics".                                                                                                                                                                           |
-| `acrRanking`                         | `DEFAULT_ACR_RANKING`      | Must match Portvakt's `ACR_RANKING`.                                                                                                                                                               |
-| `allowInsecureRequests`              | false                      | Allows an `http:` issuer (local development only).                                                                                                                                                 |
-| `logger`                             | console (warnings, errors) | pino-compatible `{ debug, info, warn, error }(details, message)`.                                                                                                                                  |
-| `fetch`                              | global fetch               | For proxies and tests.                                                                                                                                                                             |
-| `bff.mountPath`                      | `/auth`                    | Where the BFF routes live.                                                                                                                                                                         |
-| `bff.idleTimeoutSeconds`             | 1800                       | Idle timeout of the BFF session.                                                                                                                                                                   |
-| `bff.maxAgeSeconds`                  | 43200                      | The BFF's own cap (the broker's `session_exp` caps it further).                                                                                                                                    |
-| `bff.defaultReturnTo`                | `/`                        | After login without `returnTo`, after logout without a post-logout URI.                                                                                                                            |
-| `bff.loginTimeoutSeconds`            | 600                        | How long a started login may take.                                                                                                                                                                 |
-| `bff.cookie.*`                       | see above                  | `name` must differ between applications on one host (cookies ignore ports).                                                                                                                        |
-| `bff.onError`, `bff.sessionResponse` | built in                   | Custom error page; custom `/auth/session` body.                                                                                                                                                    |
+| Option                               | Default                    | Meaning                                                                                                                                                                                                                                                            |
+| ------------------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `issuer`                             | required                   | The tenant issuer `{PUBLIC_URL}/t/{tenant}`, exactly (no trailing slash).                                                                                                                                                                                          |
+| `clientId`                           | required                   | The application's client_id.                                                                                                                                                                                                                                       |
+| `clientAuth`                         | required                   | `client_secret_basic`/`client_secret_post` with `clientSecret`, or                                                                                                                                                                                                 |
+|                                      |                            | `private_key_jwt` with `privateJwk` (its public key registered in Portvakt).                                                                                                                                                                                       |
+| `redirectUri`                        | (required for the BFF)     | `{origin}{mountPath}/callback`.                                                                                                                                                                                                                                    |
+| `postLogoutRedirectUri`              | none                       | Registered post-logout URI.                                                                                                                                                                                                                                        |
+| `scopes`                             | `openid profile email`     | Must include `openid`; `pin`/`hsa` only if the application is allowed them.                                                                                                                                                                                        |
+| `clockSkewSeconds`                   | 30                         | Tolerance for `exp`, `nbf`, `iat`.                                                                                                                                                                                                                                 |
+| `httpTimeoutSeconds`                 | 10                         | Every request to Portvakt.                                                                                                                                                                                                                                         |
+| `discoveryCacheSeconds`              | 3600                       | Discovery is refetched after this (stale metadata is kept on failure).                                                                                                                                                                                             |
+| `jwks.cacheMaxAgeSeconds`            | 300                        | Keys are refetched after this. Keep it below Portvakt's KEY_MANUAL_PUBLISH_AHEAD minus 90 s.                                                                                                                                                                       |
+| `failureCacheSeconds`                | 5                          | With nothing cached, a failed discovery or JWKS fetch is retried after this.                                                                                                                                                                                       |
+| `jwks.cooldownSeconds`               | 30                         | At most one JWKS fetch per this for access tokens; an unknown `kid` within it is refused. ID tokens from the token endpoint always refetch an unknown `kid` (a key rotation never ends a session).                                                                 |
+| `jwks.staleMaxAgeSeconds`            | 3600                       | While refetches fail, keys stay in use until `cacheMaxAgeSeconds` plus this                                                                                                                                                                                        |
+|                                      |                            | after their last successful fetch; then validation answers 503. Longer keeps APIs answering through longer outages, but trusts a key an emergency rotation retired that much longer.                                                                               |
+| `outageGraceSeconds`                 | 0                          | See "Session semantics".                                                                                                                                                                                                                                           |
+| `acrRanking`                         | `DEFAULT_ACR_RANKING`      | Must match Portvakt's `ACR_RANKING`.                                                                                                                                                                                                                               |
+| `allowInsecureRequests`              | false                      | Allows an `http:` issuer (local development only).                                                                                                                                                                                                                 |
+| `logger`                             | console (warnings, errors) | pino-compatible `{ debug, info, warn, error }(details, message)`.                                                                                                                                                                                                  |
+| `fetch`                              | global fetch               | For proxies and tests.                                                                                                                                                                                                                                             |
+| `bff.mountPath`                      | `/auth`                    | Where the BFF routes live.                                                                                                                                                                                                                                         |
+| `bff.idleTimeoutSeconds`             | 1800                       | Idle timeout of the BFF session.                                                                                                                                                                                                                                   |
+| `bff.maxAgeSeconds`                  | 43200                      | The BFF's own cap (the broker's `session_exp` caps it further).                                                                                                                                                                                                    |
+| `bff.defaultReturnTo`                | `/`                        | After login without `returnTo`, after logout without a post-logout URI.                                                                                                                                                                                            |
+| `bff.loginTimeoutSeconds`            | 600                        | How long a started login may take.                                                                                                                                                                                                                                 |
+| `bff.cookie.*`                       | see above                  | `name` must differ between applications on one host (cookies ignore ports); `__Host-` names need `secure`, path `/` and no domain, `__Secure-` names `secure`. The pending-login cookie `{name}_tx` has the same path, so `mountPath` must be below `cookie.path`. |
+| `bff.onError`, `bff.sessionResponse` | built in                   | Custom error page; custom `/auth/session` body.                                                                                                                                                                                                                    |
 
 ## Security notes
 

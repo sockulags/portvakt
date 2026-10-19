@@ -92,7 +92,8 @@ export class DemoPage {
    */
   async callApi(): Promise<{ status: number; body: unknown } | "session_ended"> {
     const status = this.page.getByTestId("api-status");
-    // The SPA fetches /app/api-call; the Java page submits a GET form to /call-api.
+    // The SPA POSTs /app/api-call (with the CSRF token); the Java page submits a form to
+    // /call-api.
     const path = this.isJava ? "/call-api" : "/app/api-call";
     const answered = this.page.waitForResponse(
       (response) => new URL(response.url()).pathname === path,

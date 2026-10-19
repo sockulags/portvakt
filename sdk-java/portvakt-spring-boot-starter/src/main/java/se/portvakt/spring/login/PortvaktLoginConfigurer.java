@@ -10,7 +10,10 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestRedirectFilter;
 import org.springframework.security.oauth2.client.web.OAuth2LoginAuthenticationFilter;
+import org.springframework.security.web.context.DelegatingSecurityContextRepository;
+import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
 import org.springframework.security.web.context.SecurityContextHolderFilter;
+import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 import org.springframework.security.web.util.matcher.OrRequestMatcher;
@@ -38,6 +41,13 @@ public class PortvaktLoginConfigurer extends AbstractHttpConfigurer<PortvaktLogi
   public void init(HttpSecurity http) {
     PortvaktLoginComponents components = components(http);
     PortvaktLoginSettings settings = components.settings();
+    // The person (the ID token) lives in the token store, never in the HTTP session.
+    SecurityContextRepository contexts =
+        new DelegatingSecurityContextRepository(
+            new RequestAttributeSecurityContextRepository(),
+            new PortvaktSecurityContextRepository(components.sessions().store()));
+    http.setSharedObject(SecurityContextRepository.class, contexts);
+    http.securityContext(context -> context.securityContextRepository(contexts));
     http.oauth2Login(
         login ->
             login
@@ -73,6 +83,15 @@ public class PortvaktLoginConfigurer extends AbstractHttpConfigurer<PortvaktLogi
                         return filter;
                       }
                     }));
+    // Logout without a local session needs no CSRF token (there is no session to hold one, and
+    // nothing local to protect): the browser goes to Portvakt's end-session confirmation.
+    http.csrf(
+        csrf ->
+            csrf.ignoringRequestMatchers(
+                request ->
+                    "POST".equals(request.getMethod())
+                        && se.portvakt.spring.web.HttpRequests.pathOf(request).equals(settings.logoutPath())
+                        && PortvaktSessionState.of(request.getSession(false)) == null));
     http.logout(
         logout ->
             logout

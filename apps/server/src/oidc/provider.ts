@@ -32,6 +32,7 @@ import { CLAIMS_BY_SCOPE, ClaimsService } from "./claims.js";
 import { clientIdFromResource, clientMetadataFor, resourceIndicatorFor } from "./clients.js";
 import {
   LoginStateStore,
+  mergeUpstreams,
   PENDING_LOGIN_RESULT_KEY,
   pendingLoginSchema,
   REPRESENTATION_RESULT_KEY,
@@ -42,6 +43,7 @@ import {
   rememberSessionRecord,
   type LoginContext,
   type SessionRecord,
+  type SessionUpstream,
 } from "./login-context.js";
 import type { ProviderPages } from "./pages.js";
 import { representationPrompt } from "./representation-prompt.js";
@@ -65,12 +67,14 @@ export const FRESH_LOGIN_REASONS: ReadonlySet<string> = new Set([
   "session_idle",
   "sso_not_allowed",
   "acr_not_met",
+  "login_revoked",
 ]);
 
 /** RP-initiated logout ended a broker session whose latest login was upstream SAML. */
 export interface UpstreamLogoutInput {
   readonly tenant: Tenant;
-  readonly record: SessionRecord;
+  /** The session's upstream SAML sessions, newest first: each gets a LogoutRequest in turn. */
+  readonly upstreams: readonly SessionUpstream[];
   /** Where oidc-provider sends the browser after the logout (post_logout_redirect_uri). */
   readonly returnTo: string;
 }
@@ -125,6 +129,10 @@ export interface TenantProvider {
   /** Hands a request below `basePath` (already stripped of it) to the provider. */
   readonly handle: (req: IncomingMessage, res: ServerResponse) => void;
 }
+
+const upstreamsOf = (
+  upstreams: SessionUpstream[] | undefined,
+): { upstreams?: SessionUpstream[] } => (upstreams === undefined ? {} : { upstreams });
 
 /** The grant login a session record establishes for `clientId`. */
 function loginFromRecord(
@@ -231,6 +239,16 @@ export function buildTenantProvider(
         if (clientId !== undefined) await tokenDenied(refresh, clientId, sub, "session_ended");
         return undefined;
       }
+      // The kill switches: the tenant still active, the grant login's method still enabled and
+      // the person still holding an identity through it. Otherwise the grant is revoked, so
+      // re-enabling the method later never brings this refresh token back.
+      if (clientId !== undefined && !(await loginAllowed(login))) {
+        if (presented.grantId !== undefined) {
+          await revokeGrant(presented.grantId, clientId, sub, "login_revoked");
+        }
+        await tokenDenied(refresh, clientId, sub, "login_revoked");
+        return undefined;
+      }
       // The representation the grant was issued with must still hold (not revoked, inside its
       // validity window, the application still covered): otherwise the grant is revoked.
       const denial =
@@ -273,6 +291,13 @@ export function buildTenantProvider(
     };
     return account;
   };
+
+  /** Whether a login (person and login method) may still be used: see `persons.loginAllowed`. */
+  const loginAllowed = (login: {
+    readonly personId: string;
+    readonly loginMethodId: string;
+  }): Promise<boolean> =>
+    repos.persons.loginAllowed(tenant.id, login.personId, login.loginMethodId);
 
   /**
    * Why the grant login's representation no longer holds for the application, if it does not:
@@ -365,6 +390,11 @@ export function buildTenantProvider(
       if (ctx.oidc.route !== "token" || grantType !== "client_credentials") {
         throw new errors.InvalidTarget("the resource must be the requesting application");
       }
+      // The requesting application must list the target (`serviceAudiences`, empty by default).
+      const requester = await repos.applications.findEnabledByClientId(tenant.id, client.clientId);
+      if (requester?.serviceAudiences.includes(target) !== true) {
+        throw new errors.InvalidTarget("the application may not request tokens for this resource");
+      }
       const application = await repos.applications.findEnabledByClientId(tenant.id, target);
       if (application === null) {
         throw new errors.InvalidTarget("the resource is not an application of this tenant");
@@ -417,7 +447,16 @@ export function buildTenantProvider(
       allowSso: policyOf.allowSso,
       clientId,
       lastActivityAt: now,
-      ...(pending.data.upstream === undefined ? {} : { upstream: pending.data.upstream }),
+      // Every upstream SAML session of the same person's logins in this browser session stays
+      // known: single logout reaches each IdP, and each IdP's logout ends this session.
+      ...upstreamsOf(
+        mergeUpstreams(
+          previous?.personId === session.accountId ? (previous.upstreams ?? []) : [],
+          pending.data.upstream === undefined
+            ? undefined
+            : { ...pending.data.upstream, loginMethodId: pending.data.loginMethodId },
+        ),
+      ),
     };
   }
 
@@ -439,7 +478,7 @@ export function buildTenantProvider(
     } else {
       record = await sessionRecordFor(ctx, session.uid);
     }
-    if (record !== undefined && usableFor(record, session.accountId, client.clientId)) {
+    if (record !== undefined && (await usableFor(record, session.accountId, client.clientId))) {
       // The grant expires with the session's real end, so its login is known before it is saved.
       // A record the login prompt will refuse is not used: the existing grant keeps its expiry.
       rememberLoginContext(ctx, loginFromRecord(record, client.clientId, session.uid));
@@ -524,14 +563,24 @@ export function buildTenantProvider(
     return true;
   }
 
-  /** Whether the session's latest login may serve an authorization of `clientId` right now. */
-  const usableFor = (record: SessionRecord, accountId: string, clientId: string): boolean => {
+  /**
+   * Whether the session's latest login may serve an authorization of `clientId` right now: the
+   * session policy, and the kill switches (the tenant active, the application enabled in it, the
+   * login method enabled, the person's identity through it still there).
+   */
+  const usableFor = async (
+    record: SessionRecord,
+    accountId: string,
+    clientId: string,
+  ): Promise<boolean> => {
     const now = epochNow();
     return (
       record.personId === accountId &&
       record.sessionExpiresAt > now &&
       now - record.lastActivityAt <= record.idleSeconds &&
-      (record.allowSso || record.clientId === clientId)
+      (record.allowSso || record.clientId === clientId) &&
+      (await repos.applications.findEnabledByClientId(tenant.id, clientId)) !== null &&
+      (await loginAllowed(record))
     );
   };
 
@@ -547,7 +596,11 @@ export function buildTenantProvider(
   const sessionCheck = (
     reason: string,
     description: string,
-    fails: (record: SessionRecord, ctx: KoaContextWithOIDC, now: number) => boolean,
+    fails: (
+      record: SessionRecord,
+      ctx: KoaContextWithOIDC,
+      now: number,
+    ) => boolean | Promise<boolean>,
   ): interactionPolicy.Check =>
     new interactionPolicy.Check(reason, description, async (ctx) => {
       const { session, result } = ctx.oidc;
@@ -574,6 +627,13 @@ export function buildTenantProvider(
   );
   loginChecks.add(
     sessionCheck("session_unknown", "the broker session must be established again", () => false),
+  );
+  loginChecks.add(
+    sessionCheck(
+      "login_revoked",
+      "the login method or the identity of the session's login is no longer available",
+      async (record) => !(await loginAllowed(record)),
+    ),
   );
   loginChecks.add(
     sessionCheck(
@@ -910,8 +970,8 @@ export function buildTenantProvider(
       if (returnTo === "" || returnTo.startsWith(`${issuer}/auth`)) return;
       try {
         const record = await loginState.findSession(oidc.session?.uid);
-        if (record?.upstream === undefined) return;
-        const target = await upstreamLogout({ tenant, record, returnTo });
+        if (record?.upstreams === undefined) return;
+        const target = await upstreamLogout({ tenant, upstreams: record.upstreams, returnTo });
         if (target !== undefined) {
           ctx.status = 303;
           ctx.redirect(target);

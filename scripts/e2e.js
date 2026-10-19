@@ -39,6 +39,7 @@ import { connect } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
+import { image } from "./images.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const isWindows = process.platform === "win32";
@@ -72,7 +73,8 @@ const SECRETS = {
   c: "e2e-only-service-c-client-secret-0123456789",
   admin: "e2e-only-admin-client-secret-0123456789abcdef",
 };
-const JAVA_IMAGE = "maven:3.9-eclipse-temurin-21";
+/** maven:3.9-eclipse-temurin-21, pinned by digest in deploy/images.Dockerfile. */
+const JAVA_IMAGE = image("maven");
 const JAVA_CONTAINER = "portvakt-e2e-java";
 const M2 = process.env.PORTVAKT_M2_DIR ?? "portvakt-m2";
 
@@ -412,7 +414,7 @@ function startJava() {
     "set -u",
     `java /workspace/scripts/java-test/PortForward.java host.docker.internal ${PORTS.portvakt} ${PORTS.mockIdp} > /tmp/forward.log 2>&1 &`,
     "echo '[java] building the demo'",
-    "mvn -B -ntp -q -DskipTests -pl :portvakt-demo-service-java -am package; status=$?",
+    "mvn -B -ntp -C -q -DskipTests -pl :portvakt-demo-service-java -am package; status=$?",
     // Linux: the build output belongs to the user who ran the suite, not to root.
     ...(isLinux
       ? [
@@ -451,6 +453,9 @@ function startJava() {
     `CLIENT_SECRET=${SECRETS.c}`,
     "-e",
     "COOKIE_NAME=demo_c_e2e_session",
+    // http on localhost: the demo's local profile (insecure cookie, http issuer).
+    "-e",
+    "SPRING_PROFILES_ACTIVE=local",
     JAVA_IMAGE,
     "sh",
     "-c",

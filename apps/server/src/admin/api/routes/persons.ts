@@ -7,6 +7,7 @@ import type { PersonSummary } from "../../../repositories/persons.js";
 import {
   actorOf,
   assertPlatformReachable,
+  endLogins,
   inTransaction,
   lockRow,
   targetTenant,
@@ -249,6 +250,18 @@ export function personRoutes(deps: AdminDeps): AdminRoute[] {
           if (identities.length === 1) throw new ApiError("last_identity");
           await tx.repos.persons.deleteIdentity(tenant.id, current.id, identity.id);
           await assertPlatformReachable(tx, tenant);
+          // The person's logins through that identity end now.
+          await endLogins(
+            tx,
+            caller,
+            tenant.id,
+            { personId: current.id, loginMethodId: identity.loginMethodId },
+            {
+              reason: "identity_unlinked",
+              subject: { type: "person", id: current.id },
+              loginMethodId: identity.loginMethodId,
+            },
+          );
           await tx.record({
             action: "admin.person.identity_unlink",
             tenantId: tenant.id,
@@ -259,6 +272,38 @@ export function personRoutes(deps: AdminDeps): AdminRoute[] {
           return current;
         });
         return { body: await personView(deps, tenant, person) };
+      },
+    }),
+    route({
+      method: "post",
+      path: "/tenants/{tenantId}/persons/{personId}/end-sessions",
+      operationId: "endPersonSessions",
+      summary: "End every session and grant of a person",
+      description:
+        "Signs the person out everywhere in the tenant at once: every broker session whose " +
+        "login is the person's ends, and every grant of the person is revoked with its codes " +
+        "and refresh tokens, so applications must send the person to a new login at their next " +
+        "refresh. Access tokens already issued stay valid until they expire (ACCESS_TOKEN_TTL). " +
+        "Audited as `sessions.revoked` (reason `ended_by_admin`) with the counts.",
+      tag: "Persons",
+      params: personParams,
+      response: z.object({ sessions: z.number().int(), grants: z.number().int() }).strict(),
+      handler: async ({ caller, params }) => {
+        const tenant = await targetTenant(deps, caller, params.tenantId);
+        const ended = await inTransaction(deps, async (tx) => {
+          await lockRow(tx, "persons", "tenant_id = $1 AND id = $2", [tenant.id, params.personId]);
+          return endLogins(
+            tx,
+            caller,
+            tenant.id,
+            { personId: params.personId },
+            {
+              reason: "ended_by_admin",
+              subject: { type: "person", id: params.personId },
+            },
+          );
+        });
+        return { body: { sessions: ended.sessions, grants: ended.grants } };
       },
     }),
     route({
@@ -277,6 +322,16 @@ export function personRoutes(deps: AdminDeps): AdminRoute[] {
           const identities = await tx.repos.persons.listIdentities(tenant.id, current.id);
           await tx.repos.persons.delete(tenant.id, current.id);
           await assertPlatformReachable(tx, tenant);
+          await endLogins(
+            tx,
+            caller,
+            tenant.id,
+            { personId: current.id },
+            {
+              reason: "person_deleted",
+              subject: { type: "person", id: current.id },
+            },
+          );
           await tx.record({
             action: "admin.person.delete",
             tenantId: tenant.id,

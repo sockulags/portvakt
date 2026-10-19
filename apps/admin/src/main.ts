@@ -35,6 +35,7 @@ function configOrExit(): AdminConfig {
 function main(): void {
   const config = configOrExit();
   const logger = createAdminLogger(config.logLevel);
+  for (const warning of config.warnings) logger.warn({}, warning);
   const metrics = new MetricRegistry({ prefix: "portvakt_admin" });
   const stopProcessMetrics = registerProcessMetrics(metrics);
   let store: SessionStore | undefined;

@@ -39,14 +39,19 @@ public final class PortvaktLoginResponses {
     Responses.json(response, 401, body);
   }
 
-  /** The session's acr is too low: a step-up to {@code acr}. */
+  /**
+   * The session's acr is too low: a step-up to {@code acr} (a navigation from another site gets
+   * the interstitial page instead of the redirect).
+   */
   public void stepUpRequired(HttpServletRequest request, HttpServletResponse response, String acr) throws IOException {
     String stepUpUrl =
         request.getContextPath()
             + settings.stepUpUrl(acr, HttpRequests.returnToOf(request, settings.defaultReturnTo()));
     response.setHeader("Cache-Control", "no-store");
     if (HttpRequests.isBrowserNavigation(request)) {
-      response.sendRedirect(stepUpUrl);
+      // A deep link from another site: the step-up starts from a page of this application.
+      if (SameSiteStart.startedHere(request, settings)) response.sendRedirect(stepUpUrl);
+      else Responses.interstitial(response, stepUpUrl);
       return;
     }
     Map<String, Object> body = new LinkedHashMap<>();

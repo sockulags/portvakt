@@ -2,7 +2,7 @@ import express, { Router, type NextFunction, type Request, type Response } from 
 import { z } from "zod";
 import { ROUTE_TEMPLATE } from "../../app.js";
 import { ADMIN_API_BASE } from "../constants.js";
-import { clientIp, type RequestLimits } from "../../http/rate-limits.js";
+import { clientIpKey, type RequestLimits } from "../../http/rate-limits.js";
 import type { Logger } from "../../logging/logger.js";
 import { SYSTEM_TENANT_SLUG } from "../../domain/tenant.js";
 import type { AdminAuthenticator, Caller } from "./auth.js";
@@ -152,7 +152,7 @@ export function mountRoutes(options: MountOptions): Router {
           caller = await options.authenticator.authenticate(req.get("authorization"));
         } catch (error) {
           // Failed authentications count against the client IP (token guessing, broken clients).
-          limit(`ip:${clientIp(req)}`);
+          limit(`ip:${clientIpKey(req)}`);
           throw error;
         }
         limit(`caller:${caller.tenant.id}:${caller.personId}`);

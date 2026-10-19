@@ -225,30 +225,50 @@ describe.skipIf(ts === undefined)("signing keys and rotation", () => {
     expect(portvakt.keyCache.current!.activeKid).toBe(next.kid);
   });
 
-  it("emergency rotation activates at once and retires the compromised key", async () => {
+  it("emergency rotation signs with a fresh key and retires every other key at once", async () => {
     const { rp, issuer } = await world();
     const compromised = portvakt.keyCache.current!.activeKid;
     const signedByIt = await newToken(rp);
-    // A pending manual rotation is overtaken: its published key signs at once.
+    // The previous cases left retiring keys; a pending manual rotation adds a published next key.
+    const retiring = (await repos.signingKeys.list(["retiring"])).map((key) => key.kid);
+    expect(retiring.length).toBeGreaterThan(0);
+    expect((await jwksOf(issuer)).keys.map((key) => key.kid)).toEqual(
+      expect.arrayContaining(retiring),
+    );
     const pending = await portvakt.rotation.rotateNow({
       actor: { type: "system", id: null },
       reason: "planned",
       emergency: false,
     });
-    expect(pending.status).toBe("scheduled");
+    if (pending.status !== "scheduled") throw new Error("expected a scheduled rotation");
     const result = await portvakt.rotation.rotateNow({
       actor: { type: "system", id: null },
       reason: "key compromise",
       emergency: true,
     });
-    expect(result).toMatchObject({
-      status: "activated",
-      activatedKid: pending.status === "scheduled" ? pending.nextKid : "",
-      retiringKid: null,
-      retiredKids: [compromised],
-    });
-    expect((await jwksOf(issuer)).keys.map((key) => key.kid)).not.toContain(compromised);
+    if (result.status !== "activated") throw new Error("expected an activated rotation");
+    // A fresh key: neither the pending next key (stored next to the compromised one) nor another.
+    const others = [compromised, ...retiring, pending.nextKid];
+    expect(others).not.toContain(result.activatedKid);
+    expect(result.retiringKid).toBeNull();
+    expect([...result.retiredKids].sort()).toEqual([...others].sort());
+    for (const kid of others) {
+      expect((await repos.signingKeys.findByKid(kid))?.state).toBe("retired");
+    }
+    // JWKS publishes the new key only, at once (this replica reloaded in the same call).
+    expect((await jwksOf(issuer)).keys.map((key) => key.kid)).toEqual([result.activatedKid]);
     await expect(verify(issuer, signedByIt)).rejects.toThrow();
+    expect(decodeProtectedHeader(await newToken(rp)).kid).toBe(result.activatedKid);
+    const [rotateEvent] = (
+      await repos.audit.query(
+        { allTenants: true, tenantId: null },
+        { actions: ["key.rotate"], subjectId: result.activatedKid },
+      )
+    ).events;
+    expect(rotateEvent?.details).toMatchObject({ emergency: true, retiringKid: null });
+    expect([...((rotateEvent?.details.retiredKids as string[] | undefined) ?? [])].sort()).toEqual(
+      [...result.retiredKids].sort(),
+    );
     await expect(
       portvakt.rotation.rotateNow({
         actor: { type: "system", id: null },

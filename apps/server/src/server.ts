@@ -247,6 +247,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     samlAdmin,
     auditLog,
     outbound,
+    upstream,
     logger,
     limits,
   });
@@ -405,7 +406,7 @@ export function createPortvakt(options: PortvaktOptions): Portvakt {
     };
   };
 
-  // loadConfig only allows test mode with a loopback or .test PUBLIC_URL.
+  // loadConfig only allows test mode with a loopback or .localhost PUBLIC_URL.
   const testRoutes = config.nodeEnv === "test";
   if (testRoutes) {
     logger.warn(

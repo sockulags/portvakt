@@ -3,7 +3,14 @@ import { REPRESENTATION_SOURCE_IDS } from "../../../domain/representation.js";
 import { displayNameSchema, tenantSlugSchema } from "../../../domain/schemas.js";
 import { SYSTEM_TENANT_SLUG, TENANT_STATUSES, type Tenant } from "../../../domain/tenant.js";
 import type { Caller } from "../auth.js";
-import { actorOf, inTransaction, lockRow, targetTenant, type AdminDeps } from "../context.js";
+import {
+  actorOf,
+  endLogins,
+  inTransaction,
+  lockRow,
+  targetTenant,
+  type AdminDeps,
+} from "../context.js";
 import { diff } from "../diff.js";
 import { requireMatch, withEtag } from "../etag.js";
 import { ApiError } from "../problem.js";
@@ -84,6 +91,19 @@ async function changeStatus(
     requireMatch(ifMatch, tenantView(current).etag);
     if (current.status === status) return tenantView(current);
     const updated = await tx.repos.tenants.update(tenant.id, { status });
+    if (status === "suspended") {
+      // Every login of the tenant ends now; reactivating it never brings one back.
+      await endLogins(
+        tx,
+        caller,
+        tenant.id,
+        { all: true },
+        {
+          reason: "tenant_suspended",
+          subject: { type: "tenant", id: tenant.id },
+        },
+      );
+    }
     await tx.record({
       action: status === "suspended" ? "admin.tenant.suspend" : "admin.tenant.reactivate",
       tenantId: tenant.id,

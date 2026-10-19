@@ -8,7 +8,10 @@ meaning or type, is a breaking change and needs a new contract version; adding a
 ## Principles
 
 - `sub` is always the UUID of the signed-in person in the tenant, stable across logins and login
-  methods (identities linked by personal identity number share one person). It stays the signed-in
+  methods (identities linked by personal identity number share one person: `linkByPin`, only
+  between login methods that map the number and assert an acr ranked at least loa3, checked when
+  the method is saved and again at every login; a self-asserted or unranked level never links).
+  It stays the signed-in
   person when representing someone; the represented party arrives as `rep`. There is no `act`
   claim.
 - Access tokens are JWTs for exactly one application (`aud` is its `client_id`). They carry
@@ -113,7 +116,10 @@ upstream login through a login method that satisfies the request (the same ranki
 filtering as above; no method: `no_acceptable_method`). When Portvakt knows the person's
 personal identity number it names the person upstream: SAML PrincipalSelection (when the IdP
 advertises it), or for OIDC the number as `login_hint` when the login method accepts it
-(`pinLoginHint`, off by default). The step-up must sign in the same person: a login that
+(`pinLoginHint`, off by default), sent only in a pushed authorization request (PAR, RFC 9126)
+when the upstream advertises `pushed_authorization_request_endpoint`, so the number never
+appears in a browser URL; without PAR the hint is left out (the admin API warns at save,
+`pin_login_hint_without_par`). The step-up must sign in the same person: a login that
 resolves to another person (after identity linking) is refused with `step_up_person_mismatch`
 and the existing session is kept as it was. The higher `acr` and the new `auth_time` apply to
 this application's grant (ID token and access token); other applications keep the claims of
@@ -140,6 +146,18 @@ A backend-for-frontend must end its own session no later than this. Refresh toke
 next authorization requires a login. Each application keeps the claims of the login it was
 issued tokens for: a fresh login for another application in the same browser does not change
 them.
+
+### Service tokens (client_credentials)
+
+An application can get an access token of its own with the client_credentials grant, without a
+person: `sub` and `client_id` are its client_id, `tid` the tenant, and none of the person
+claims (`idp`, `idp_kind`, `acr`, `auth_time`, `roles`, `attrs`, `rep`) are present. By default
+the token is for the application itself (`aud` = its client_id). A token for another
+application (`resource=urn:portvakt:app:{client_id}`, `aud` = that client_id) is issued only
+when the requesting application lists that client_id in its `serviceAudiences` (admin API and
+portal; empty by default) and the target is enabled in the same tenant; otherwise the answer is
+`invalid_target`. The receiving API must still accept service callers explicitly (both SDKs
+refuse them unless `allowService` / `allowed-services` says so).
 
 ### `pin`
 

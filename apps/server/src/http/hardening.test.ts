@@ -28,6 +28,7 @@ const ts = await startTestServer({
     RATE_LIMIT_FEDERATION_IP: "2/1m",
     RATE_LIMIT_TOKEN_IP: "3/1m",
     RATE_LIMIT_TOKEN_CLIENT: "4/1m",
+    RATE_LIMIT_AUTHORIZE_CLIENT: "5/1m",
     RATE_LIMIT_ADMIN_API: "3/1m",
     METRICS_TOKEN,
   },
@@ -176,38 +177,90 @@ describe.skipIf(ts === undefined)("production hardening (M8)", () => {
       expect((await tokenRequest(world.tenant.slug, freshIp(), auth)).status).toBe(200);
     });
 
-    it("limits the token endpoint per client_id from Basic auth and from the form body", async () => {
+    it("charges the per-client token bucket only for failed client authentication (Basic and form body)", async () => {
       const world = await createTenantWorld(repos, "rl-client");
-      const basicAuth = { header: basic(world.app.application.clientId, world.app.secret) };
-      for (let i = 0; i < 4; i += 1) {
-        expect((await tokenRequest(world.tenant.slug, freshIp(), basicAuth)).status).toBe(200);
+      const clientId = world.app.application.clientId;
+      const good = { header: basic(clientId, world.app.secret) };
+      const forged = { header: basic(clientId, "guessed-secret-0123456789abcdef") };
+      // Successful authentications never charge the bucket.
+      for (let i = 0; i < 6; i += 1) {
+        expect((await tokenRequest(world.tenant.slug, freshIp(), good)).status).toBe(200);
       }
-      expect((await tokenRequest(world.tenant.slug, freshIp(), basicAuth)).status).toBe(429);
+      // Failed ones from anywhere do; once the bucket is empty they answer 429.
+      for (let i = 0; i < 4; i += 1) {
+        expect((await tokenRequest(world.tenant.slug, freshIp(), forged)).status).toBe(401);
+      }
+      const refused = await tokenRequest(world.tenant.slug, freshIp(), forged);
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get("www-authenticate")).toBeNull();
+      expect(Number(refused.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+      expect(await refused.json()).toMatchObject({ error: "temporarily_unavailable" });
+      // Other parties' failures never block the real client.
+      const ok = await tokenRequest(world.tenant.slug, freshIp(), good);
+      expect(ok.status).toBe(200);
+      expect(((await ok.json()) as { access_token?: string }).access_token).toBeTypeOf("string");
 
       // client_secret_post: the client_id is read from the body, which the provider still
       // parses as sent (the tokens are issued).
+      const secret = "post-secret-0123456789abcdef-0123456789";
       const post = await createTestClient(repos, world.tenant, {
-        clientAuth: {
-          method: "client_secret_post",
-          clientSecret: "post-secret-0123456789abcdef-0123456789",
-        },
+        clientAuth: { method: "client_secret_post", clientSecret: secret },
       });
-      const body = {
-        body: {
-          client_id: post.application.clientId,
-          client_secret: "post-secret-0123456789abcdef-0123456789",
-        },
-      };
+      const body = { body: { client_id: post.application.clientId, client_secret: secret } };
+      const wrong = { body: { client_id: post.application.clientId, client_secret: `${secret}x` } };
       for (let i = 0; i < 4; i += 1) {
-        const ok = await tokenRequest(world.tenant.slug, freshIp(), body);
-        expect(ok.status).toBe(200);
-        expect(((await ok.json()) as { access_token?: string }).access_token).toBeTypeOf("string");
+        expect((await tokenRequest(world.tenant.slug, freshIp(), wrong)).status).toBe(401);
       }
-      expect((await tokenRequest(world.tenant.slug, freshIp(), body)).status).toBe(429);
+      expect((await tokenRequest(world.tenant.slug, freshIp(), wrong)).status).toBe(429);
+      const issued = await tokenRequest(world.tenant.slug, freshIp(), body);
+      expect(issued.status).toBe(200);
+      expect(((await issued.json()) as { access_token?: string }).access_token).toBeTypeOf(
+        "string",
+      );
       // The same client_id in another tenant has a bucket of its own.
       const other = await createTenantWorld(repos, "rl-client-2");
       await repos.applications.enableForTenant(other.tenant.id, post.application.id);
-      expect((await tokenRequest(other.tenant.slug, freshIp(), body)).status).toBe(200);
+      expect((await tokenRequest(other.tenant.slug, freshIp(), wrong)).status).toBe(401);
+    });
+
+    it("keys IPv6 clients by their /64 prefix", async () => {
+      const world = await createTenantWorld(repos, "rl-ipv6");
+      const auth = { header: basic(world.app.application.clientId, world.app.secret) };
+      const prefix = `2001:db8:${(ipCounter += 1).toString(16)}:7`;
+      for (const host of ["::1", ":a:b:c:d", "::ffff"]) {
+        expect((await tokenRequest(world.tenant.slug, `${prefix}${host}`, auth)).status).toBe(200);
+      }
+      // Another address of the same /64 shares the bucket; another /64 has its own.
+      expect((await tokenRequest(world.tenant.slug, `${prefix}:1:2:3:4`, auth)).status).toBe(429);
+      expect(
+        (await tokenRequest(world.tenant.slug, `${prefix.slice(0, -1)}8::1`, auth)).status,
+      ).toBe(200);
+    });
+
+    it("limits POSTed authorization requests per client_id from the form body", async () => {
+      const world = await createTenantWorld(repos, "rl-auth-post");
+      const form = new URLSearchParams({
+        client_id: world.app.application.clientId,
+        redirect_uri: world.app.application.redirectUris[0]!,
+        response_type: "code",
+        scope: "openid",
+        code_challenge: await client.calculatePKCECodeChallenge(client.randomPKCECodeVerifier()),
+        code_challenge_method: "S256",
+      }).toString();
+      const post = () =>
+        fetch(`${baseUrl}/t/${world.tenant.slug}/auth`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-forwarded-for": freshIp(),
+          },
+          body: form,
+          redirect: "manual",
+        });
+      // oidc-provider serves the authorization endpoint over GET only (no enableHttpPostMethods),
+      // so these reach it and are refused there; the limit in front charges the body's client.
+      for (let i = 0; i < 5; i += 1) expect((await post()).status).toBe(404);
+      expect((await post()).status).toBe(429);
     });
 
     it("limits authorization requests per IP with the login UI's page", async () => {
@@ -270,6 +323,20 @@ describe.skipIf(ts === undefined)("production hardening (M8)", () => {
       expect(refused.status).toBe(429);
       expect(refused.headers.get("retry-after")).not.toBeNull();
       expect(await refused.json()).toMatchObject({ error: "rate_limited" });
+    });
+
+    it("limits the SAML SP metadata and HTTP-POST pages per IP", async () => {
+      const world = await createTenantWorld(repos, "rl-saml");
+      for (const page of ["metadata", "post?RelayState=x", "logout?RelayState=x"]) {
+        const ip = freshIp();
+        const url = `${baseUrl}/t/${world.tenant.slug}/saml/${randomUUID()}/${page}`;
+        for (let i = 0; i < 2; i += 1) {
+          expect((await fetch(url, { headers: { "x-forwarded-for": ip } })).status).toBe(404);
+        }
+        const refused = await fetch(url, { headers: { "x-forwarded-for": ip } });
+        expect(refused.status).toBe(429);
+        expect(refused.headers.get("retry-after")).not.toBeNull();
+      }
     });
 
     it("limits upstream callbacks per IP with the login UI's page", async () => {

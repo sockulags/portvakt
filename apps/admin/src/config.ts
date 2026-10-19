@@ -39,6 +39,13 @@ export interface AdminConfig {
    * `step-up`, `select-representation`, `callback`). `null` when off (ADMIN_RATE_LIMIT_LOGIN).
    */
   readonly loginRateLimit: RateLimit | null;
+  /**
+   * Per client IP, per replica: lookups of tenant slugs the portal does not know yet (each asks
+   * Portvakt's discovery). `null` when off (ADMIN_RATE_LIMIT_TENANT_LOOKUP).
+   */
+  readonly tenantLookupRateLimit: RateLimit | null;
+  /** Allowed but notable settings, logged at start (names only, never values). */
+  readonly warnings: readonly string[];
   /** `/metrics` (ADMIN_METRICS_ENABLED, default true), behind ADMIN_METRICS_TOKEN when set. */
   readonly metrics: { readonly enabled: boolean; readonly token: string | undefined };
   readonly logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
@@ -72,6 +79,19 @@ const origin = z.string().superRefine((value, ctx) => {
     ctx.addIssue({ code: "custom", message: "must be an http(s) origin without a path" });
   }
 });
+
+const rateLimit = (fallback: string) =>
+  z.preprocess(
+    empty,
+    z
+      .string()
+      .default(fallback)
+      .refine(
+        (value) => parseRateLimit(value) !== undefined,
+        "must be <count>/<period> such as 30/1m, or off",
+      )
+      .transform((value) => parseRateLimit(value) ?? null),
+  );
 
 const envSchema = z.object({
   NODE_ENV: z.preprocess(empty, z.string().default("development")),
@@ -110,17 +130,8 @@ const envSchema = z.object({
         value === "true" ? true : value === "false" || value === "0" ? false : Number(value),
       ),
   ),
-  ADMIN_RATE_LIMIT_LOGIN: z.preprocess(
-    empty,
-    z
-      .string()
-      .default("30/1m")
-      .refine(
-        (value) => parseRateLimit(value) !== undefined,
-        "must be <count>/<period> such as 30/1m, or off",
-      )
-      .transform((value) => parseRateLimit(value) ?? null),
-  ),
+  ADMIN_RATE_LIMIT_LOGIN: rateLimit("30/1m"),
+  ADMIN_RATE_LIMIT_TENANT_LOOKUP: rateLimit("30/1m"),
   ADMIN_METRICS_ENABLED: z.preprocess(empty, z.enum(["true", "false"]).default("true")),
   ADMIN_METRICS_TOKEN: z.preprocess(empty, z.string().optional()),
   ADMIN_LOG_LEVEL: z.preprocess(
@@ -130,6 +141,10 @@ const envSchema = z.object({
 });
 
 const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/** Loopback hosts: plain http to the admin API is allowed only there, and never in production. */
+const isLoopback = (hostname: string): boolean =>
+  LOCAL.has(hostname) || /^127(?:\.\d{1,3}){3}$/.test(hostname) || hostname.endsWith(".localhost");
 
 /** Reads the configuration; throws {@link AdminConfigError} naming variables, never values. */
 export function loadAdminConfig(env: NodeJS.ProcessEnv = process.env): AdminConfig {
@@ -156,6 +171,24 @@ export function loadAdminConfig(env: NodeJS.ProcessEnv = process.env): AdminConf
   const keys = list(data.ADMIN_SESSION_ENCRYPTION_KEY);
   if (cookieSecrets.some((secret) => secret.length < 32)) {
     issues.push("ADMIN_COOKIE_SECRET: each secret must be at least 32 characters");
+  }
+  // The proxy sends administrators' access tokens there: https, or http to this machine in
+  // development only.
+  if (data.ADMIN_API_URL !== undefined) {
+    const api = new URL(data.ADMIN_API_URL);
+    if (api.protocol !== "https:" && (production || !isLoopback(api.hostname))) {
+      issues.push(
+        production
+          ? "ADMIN_API_URL: must use https in production"
+          : "ADMIN_API_URL: http is allowed only to a loopback host (use https)",
+      );
+    }
+  }
+  const warnings: string[] = [];
+  if (data.ADMIN_TRUST_PROXY === true) {
+    warnings.push(
+      "ADMIN_TRUST_PROXY: true trusts every X-Forwarded-For hop, so clients can choose their IP (rate limits per IP); set the number of proxies instead",
+    );
   }
   if (production) {
     if (data.ADMIN_PUBLIC_URL === undefined)
@@ -232,6 +265,8 @@ export function loadAdminConfig(env: NodeJS.ProcessEnv = process.env): AdminConf
     webDir: data.ADMIN_WEB_DIR ?? fileURLToPath(new URL("../dist/web", import.meta.url)),
     trustProxy: data.ADMIN_TRUST_PROXY,
     loginRateLimit: data.ADMIN_RATE_LIMIT_LOGIN,
+    tenantLookupRateLimit: data.ADMIN_RATE_LIMIT_TENANT_LOOKUP,
+    warnings,
     metrics: {
       enabled: data.ADMIN_METRICS_ENABLED === "true",
       token: data.ADMIN_METRICS_TOKEN,

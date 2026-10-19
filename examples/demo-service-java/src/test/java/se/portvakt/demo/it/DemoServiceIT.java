@@ -21,6 +21,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -51,6 +52,7 @@ import se.portvakt.spring.login.PortvaktAccessTokens;
       "portvakt.login.idle-timeout=1d"
     })
 @Import({DemoServiceIT.TestSupport.class, DemoServiceIT.TestSupport.TokenController.class})
+@ActiveProfiles("local")
 class DemoServiceIT {
   static final String APP = PortvaktStack.APP;
   static final String LOA3 = AcrRanking.LOA3;
@@ -267,10 +269,15 @@ class DemoServiceIT {
     assertThat(body.get("acr").asString()).isEqualTo(LOA4);
     String stepUpUrl = APP + body.get("stepUpUrl").asString();
 
-    // Another site cannot start it.
+    // Another site cannot start it: a navigation gets the interstitial page (its button starts
+    // the step-up from here), anything else is refused.
     TestBrowser.Response crossSite = driver.browser().get(stepUpUrl, "Sec-Fetch-Site", "cross-site", "Accept", "text/html");
-    assertThat(crossSite.status()).isEqualTo(403);
-    assertThat(crossSite.body()).contains("cross_site_request");
+    assertThat(crossSite.status()).isEqualTo(200);
+    assertThat(crossSite.body()).contains("Fortsätt till inloggning").contains("action=\"/auth/step-up\"");
+    TestBrowser.Response fetched =
+        driver.browser().get(stepUpUrl, "Sec-Fetch-Site", "cross-site", "Accept", "application/json");
+    assertThat(fetched.status()).isEqualTo(403);
+    assertThat(fetched.body()).contains("cross_site_request");
 
     int visited = driver.visited.size();
     TestBrowser.Response start = driver.browser().get(stepUpUrl, "Sec-Fetch-Site", "same-origin");
@@ -396,6 +403,7 @@ class DemoServiceIT {
                 DemoApplication.class, TestSupport.class, TestSupport.TokenController.class)
             .run(
                 "--server.port=3301",
+                "--spring.profiles.active=local",
                 "--server.servlet.session.cookie.name=demo_d_session",
                 "--portvakt.issuer=" + PortvaktStack.ISSUER,
                 "--portvakt.allow-insecure-requests=true",

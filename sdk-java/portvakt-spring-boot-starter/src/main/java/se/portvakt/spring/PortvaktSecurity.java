@@ -56,9 +56,28 @@ public class PortvaktSecurity {
     return new PortvaktResourceServerConfigurer();
   }
 
-  /** The principal of the current request (browser session or bearer token). */
+  /**
+   * Request attribute: the restricted token a route's {@code portvakt.accessToken(r -> ...)}
+   * accepted explicitly.
+   */
+  static final String ACCEPTED_ATTRIBUTE = PortvaktSecurity.class.getName() + ".accepted";
+
+  /**
+   * The principal of the current request (browser session or bearer token). Empty for a bearer
+   * token the resource server's defaults restrict (a service or representation token the
+   * defaults refuse), unless the route accepted it explicitly with {@code portvakt.accessToken(r
+   * -> r.allowService(true))} (or another relaxation).
+   */
   public static Optional<PortvaktPrincipal> currentPrincipal() {
-    return Optional.ofNullable(principalOf(SecurityContextHolder.getContext().getAuthentication()));
+    Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+    if (authentication instanceof PortvaktJwtAuthenticationToken token
+        && token.restriction() != null
+        && org.springframework.web.context.request.RequestContextHolder.getRequestAttributes()
+                instanceof org.springframework.web.context.request.ServletRequestAttributes attributes
+        && attributes.getRequest().getAttribute(ACCEPTED_ATTRIBUTE) == token) {
+      return Optional.of(token.getPortvaktPrincipal());
+    }
+    return allowed();
   }
 
   /** The principal of an authentication, or {@code null} when it is none of Portvakt's. */
@@ -125,6 +144,8 @@ public class PortvaktSecurity {
       }
       try {
         verifier.authorize(token.getPortvaktPrincipal(), requirements);
+        // A route that accepts a token the defaults restrict says so for currentPrincipal().
+        if (token.restriction() != null) context.getRequest().setAttribute(ACCEPTED_ATTRIBUTE, token);
         return PortvaktAuthorizationDecision.granted();
       } catch (AccessTokenException denied) {
         return new PortvaktAuthorizationDecision(false, null, denied);

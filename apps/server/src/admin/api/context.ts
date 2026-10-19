@@ -1,5 +1,5 @@
 import type { AuditLog } from "../../audit/audit-log.js";
-import type { AuditAction, CatalogueEvent } from "../../audit/catalogue.js";
+import type { AuditAction, AuditDetails, CatalogueEvent } from "../../audit/catalogue.js";
 import type { Config } from "../../config/index.js";
 import type { KeyRing } from "../../crypto/keyring.js";
 import type { Db } from "../../db/database.js";
@@ -7,6 +7,7 @@ import type { AuditEvent } from "../../domain/audit.js";
 import { SYSTEM_TENANT_SLUG, type Tenant } from "../../domain/tenant.js";
 import { SamlLoginMethodAdmin } from "../../federation/saml/admin.js";
 import type { SamlFederation } from "../../federation/saml/service.js";
+import type { UpstreamClients } from "../../federation/upstream.js";
 import type { SigningKeyCache } from "../../keys/key-cache.js";
 import type { RequestLimits } from "../../http/rate-limits.js";
 import type { KeyRotationService } from "../../keys/rotation.js";
@@ -18,6 +19,10 @@ import {
   type Repositories,
   type RepositoryOptions,
 } from "../../repositories/index.js";
+import type {
+  LoginRevocationResult,
+  LoginRevocationScope,
+} from "../../repositories/oidc-payloads.js";
 import type { Caller } from "./auth.js";
 import { platformAccess } from "../../repositories/guard.js";
 import { ADMIN_CLIENT_ID, PLATFORM_ADMIN_ROLE } from "../constants.js";
@@ -37,6 +42,8 @@ export interface AdminDeps {
   /** Pool-backed SAML admin operations (SP certificate expiry and warnings). */
   readonly samlAdmin: SamlLoginMethodAdmin;
   readonly auditLog: AuditLog;
+  /** Upstream OIDC discovery (cached), for warnings that depend on the upstream's metadata. */
+  readonly upstream?: Pick<UpstreamClients, "setupFor">;
   /** Checks administrator-configured URLs (upstream issuers) before they are saved. */
   readonly outbound: OutboundGuard;
   readonly logger: Logger;
@@ -173,4 +180,39 @@ export async function assertPlatformReachable(
   if (access.enabledLoginMethods === 0 || access.platformAdminPaths === 0) {
     throw new ApiError("self_lockout");
   }
+}
+
+/**
+ * A kill switch: ends the logins `scope` names at once, in the change's transaction, and audits
+ * it (`sessions.revoked`, with how many sessions and grants ended). Refresh tokens of those
+ * grants never work again, also after whatever was switched off is switched on again.
+ */
+export async function endLogins(
+  tx: Tx,
+  caller: Caller,
+  tenantId: string,
+  scope: LoginRevocationScope,
+  audit: {
+    readonly reason: AuditDetails<"sessions.revoked">["reason"];
+    readonly subject: { readonly type: string; readonly id: string };
+    readonly clientId?: string;
+    readonly loginMethodId?: string;
+  },
+): Promise<LoginRevocationResult> {
+  const ended = await tx.repos.oidcPayloads.revokeLogins(tenantId, scope);
+  await tx.record({
+    action: "sessions.revoked",
+    tenantId,
+    actor: actorOf(caller),
+    subject: audit.subject,
+    details: {
+      actorTenantId: caller.tenant.id,
+      reason: audit.reason,
+      sessions: ended.sessions,
+      grants: ended.grants,
+      ...(audit.clientId === undefined ? {} : { clientId: audit.clientId }),
+      ...(audit.loginMethodId === undefined ? {} : { loginMethodId: audit.loginMethodId }),
+    },
+  });
+  return ended;
 }

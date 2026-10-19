@@ -68,6 +68,9 @@ async function main(): Promise<void> {
       url: value("DEMO_SERVICE_C_URL", "http://localhost:3300").replace(/\/+$/, ""),
       secret: optional("DEMO_SERVICE_C_CLIENT_SECRET"),
       enabled: true,
+      // The Java integration tests show that a service token for service-a is refused by
+      // service-c's API (wrong audience), so service-c may request one.
+      serviceAudiences: ["service-a"],
     },
   ];
   const serviceDJwk = optional("DEMO_SERVICE_D_PUBLIC_JWK");

@@ -20,17 +20,30 @@ import java.util.function.UnaryOperator;
  */
 public interface PortvaktTokenStore {
   /**
-   * The tokens of one grant.
+   * The tokens of one grant, and the session's signed-in person as its ID token (personal data:
+   * kept here, sealed, never in the HTTP session; see {@link PortvaktSecurityContextRepository}).
    *
    * @param accessToken the access token
    * @param issuedAt when it was issued
    * @param expiresAt when it expires
    * @param scopes its scopes
    * @param refreshToken the refresh token, or {@code null}
+   * @param idToken the latest verified ID token of the session, or {@code null} until the login
+   *     stored it
    */
-  record StoredTokens(String accessToken, Instant issuedAt, Instant expiresAt, Set<String> scopes, String refreshToken) {
+  record StoredTokens(
+      String accessToken, Instant issuedAt, Instant expiresAt, Set<String> scopes, String refreshToken, String idToken) {
     public StoredTokens {
       scopes = scopes == null ? Set.of() : Set.copyOf(scopes);
+    }
+
+    public StoredTokens(String accessToken, Instant issuedAt, Instant expiresAt, Set<String> scopes, String refreshToken) {
+      this(accessToken, issuedAt, expiresAt, scopes, refreshToken, null);
+    }
+
+    /** The same tokens with another ID token. */
+    public StoredTokens withIdToken(String value) {
+      return new StoredTokens(accessToken, issuedAt, expiresAt, scopes, refreshToken, value);
     }
 
     /** JSON (only ever stored sealed, or in memory). */
@@ -41,6 +54,7 @@ public interface PortvaktTokenStore {
       json.put("exp", expiresAt == null ? null : expiresAt.getEpochSecond());
       json.put("scp", List.copyOf(scopes));
       json.put("rt", refreshToken);
+      if (idToken != null) json.put("idt", idToken);
       return JSONObjectUtils.toJSONString(json);
     }
 
@@ -53,7 +67,8 @@ public interface PortvaktTokenStore {
             json.get("iat") instanceof Number number ? Instant.ofEpochSecond(number.longValue()) : null,
             json.get("exp") instanceof Number number ? Instant.ofEpochSecond(number.longValue()) : null,
             scopes instanceof List<?> list ? Set.copyOf(list.stream().map(String::valueOf).toList()) : Set.of(),
-            (String) json.get("rt"));
+            (String) json.get("rt"),
+            (String) json.get("idt"));
       } catch (java.text.ParseException | ClassCastException invalid) {
         throw new IllegalStateException("unreadable stored tokens");
       }

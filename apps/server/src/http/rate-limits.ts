@@ -1,4 +1,4 @@
-import { RateLimiterSet, type RateLimit } from "@portvakt/http-kit";
+import { ipRateLimitKey, RateLimiterSet, type RateLimit } from "@portvakt/http-kit";
 import type { Request, Response } from "express";
 import type { RateLimitName } from "../config/index.js";
 import { METRICS, type Counter, type MetricRegistry } from "../metrics/registry.js";
@@ -33,8 +33,12 @@ export class RequestLimits {
   }
 }
 
-/** The client IP Express resolved (TRUST_PROXY decides how many forwarded hops count). */
-export const clientIp = (req: Request): string => req.ip ?? req.socket.remoteAddress ?? "unknown";
+/**
+ * The rate-limit key of the client IP Express resolved (TRUST_PROXY decides how many forwarded
+ * hops count): the IPv4 address, or the /64 prefix of an IPv6 address (`ipRateLimitKey`).
+ */
+export const clientIpKey = (req: Request): string =>
+  ipRateLimitKey(req.ip ?? req.socket.remoteAddress ?? "unknown");
 
 /** 429 with `Retry-After` and no caching; the caller writes the body. */
 export function tooManyRequests(res: Response, retryAfterSeconds: number): Response {

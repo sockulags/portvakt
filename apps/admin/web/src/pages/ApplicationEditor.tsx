@@ -40,6 +40,7 @@ interface Draft {
   attributeKeys: string;
   representationMode: RepresentationMode;
   allowedExtraScopes: readonly ("pin" | "hsa")[];
+  serviceAudiences: string;
 }
 
 function draftOf(application: Application): Draft {
@@ -57,6 +58,7 @@ function draftOf(application: Application): Draft {
     attributeKeys: application.attributeKeys.map((key) => key.key).join("\n"),
     representationMode: application.representationMode,
     allowedExtraScopes: application.allowedExtraScopes,
+    serviceAudiences: application.serviceAudiences.join("\n"),
   };
 }
 
@@ -173,6 +175,7 @@ export function ApplicationEditor({
         [...draft.allowedExtraScopes].sort(),
         [...application.allowedExtraScopes].sort(),
       ),
+      serviceAudiences: changed(lines(draft.serviceAudiences), [...application.serviceAudiences]),
     };
     return Object.fromEntries(Object.entries(entries).filter(([, value]) => value !== undefined));
   };
@@ -402,6 +405,19 @@ export function ApplicationEditor({
             />
           ))}
         </fieldset>
+        <Field
+          label={t.applications.serviceAudiences}
+          hint={t.applications.serviceAudiencesHint}
+          error={errors.serviceAudiences}
+        >
+          <Textarea
+            rows={2}
+            value={draft.serviceAudiences}
+            data-testid="application-edit-service-audiences"
+            invalid={errors.serviceAudiences !== undefined}
+            onChange={(event) => set("serviceAudiences", event.target.value)}
+          />
+        </Field>
         <ActionError error={error} />
       </div>
     </Modal>

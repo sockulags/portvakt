@@ -58,6 +58,7 @@ npm run start -w apps/admin            # admin portal on :3400 (build its SPA fi
 npm run test:java      # Java SDK and Java demo: mvn verify in Docker against a real Portvakt
 npm audit              # dependency audit (CI fails on any finding)
 npm run license:check  # licenses of the production npm dependencies (allowlist; Maven: verify)
+npm run images:check   # compose and CI name the images pinned in deploy/images.Dockerfile
 npm run config:check -w apps/server   # problems and warnings of the configuration in the env
 ```
 
@@ -210,7 +211,8 @@ Bolagsverket or Mina ombud as further `RepresentationSource`s in `server.ts` and
 tenant), and `createPortvakt({ auditSink })` (forwarding audit events to the starter kit's log
 service).
 
-Migrations are plain SQL in `apps/server/migrations/NNNN_name.sql`, applied by our own runner
+Migration 0007 (`0007_security_review.sql`) adds `applications.service_audiences`. Migrations are
+plain SQL in `apps/server/migrations/NNNN_name.sql`, applied by our own runner
 (`src/db/migrate.ts`): it is ~150 lines, takes an advisory lock and keeps checksums, which a
 dependency would only wrap.
 
@@ -247,6 +249,21 @@ dependency would only wrap.
   `admin.*` event) and lock the row (`lockRow`) before `requireMatch(If-Match)`. Diffs
   (`admin/api/diff.ts`) mark redacted fields `changed`; the catalogue's `changesOf()` refuses a
   value for a redacted field.
+- Kill switches (`endLogins` in `admin/api/context.ts`, `oidcPayloads.revokeLogins`): suspending
+  a tenant, disabling or detaching an application in a tenant, disabling or deleting a login
+  method, unlinking an identity, deleting a person and `POST
+/tenants/{id}/persons/{personId}/end-sessions` delete the affected sessions (oidc-provider
+  Session, session record) and grants (with codes and refresh tokens) in `oidc_payloads`, in the
+  change's transaction, audited as `sessions.revoked`; nothing is kept that re-enabling could
+  revive. Independently, `findAccount` (every refresh) and `usableFor` plus the login check
+  `login_revoked` (every authorization reusing a session) require the tenant active, the
+  application enabled, the grant login's method enabled and the person's identity through it
+  (`persons.loginAllowed`); a refused refresh revokes the grant (`grant.revoked` and
+  `token.refresh_denied` with reason `login_revoked`). Tenant creation emits a `tenant` change
+  event (the registry's negative cache of unknown slugs is cleared by any invalidation).
+- ADMIN_MIN_ACR (a value of ACR_RANKING, optional; `config:check` warns in production when
+  unset): `AdminAuthenticator` refuses tokens whose acr ranks lower or is unranked (403
+  `acr_too_low`).
 - Pending assignments (migration 0005): `repos.pending`; resolved in `persons.upsertFromLogin`
   (`resolvePending`, inside the JIT transaction) and audited by the federation as
   `assignment.pending_resolved`. A pin target needs a method with `trustPinForRepresentation`.
@@ -263,7 +280,9 @@ dependency would only wrap.
   ADMIN_PUBLIC_URL is https) and the SPA's `ADMIN_PAGE_CSP`, `/metrics` (`portvakt_admin_*`,
   ADMIN_METRICS_TOKEN required in production), sign-in routes limited per client IP
   (ADMIN_RATE_LIMIT_LOGIN, ADMIN_TRUST_PROXY), and the proxy forwards `traceparent` and
-  `X-Request-Id` to the admin API. (CSRF
+  `X-Request-Id` to the admin API. Unknown tenant slugs are looked up at most
+  ADMIN_RATE_LIMIT_TENANT_LOOKUP per client IP (429), ADMIN_API_URL must be https in production
+  (http only to loopback outside it), and ADMIN_TRUST_PROXY=true is a start-up warning. (CSRF
   token, same-origin and JSON required for mutations; only validated path segments below the
   API base are forwarded). `web/` is the SPA (design system only; Swedish always by default,
   English only when chosen and stored, never from `navigator.languages`; strings in
@@ -320,14 +339,16 @@ Build and test only in Docker (no local JDK). `npm run test:java` (`scripts/test
 db:up, a fresh database `portvakt_java_test`, migrations, the login UI build when missing, the
 mock IdP on :4900, `seed:dev` (with `SEED_ISOLATION_TENANT=demo-isolation` and service-d with
 private_key_jwt, a key made for the run: `DEMO_SERVICE_D_PUBLIC_JWK`), Portvakt on :3900,
-then `mvn verify` in `maven:3.9-eclipse-temurin-21` (the named volume `portvakt-m2` holds
-~/.m2, or the host directory `PORTVAKT_M2_DIR`, as in CI), then it stops what it started.
+then `mvn -C verify` (strict checksums) in the `maven` image pinned by digest in
+`deploy/images.Dockerfile` (maven:3.9-eclipse-temurin-21; `scripts/images.js` reads it; the
+named volume `portvakt-m2` holds ~/.m2, or the host directory `PORTVAKT_M2_DIR`, as in CI), then
+it stops what it started.
 `--build` rebuilds the login UI, `--keep` leaves Portvakt and the mock running, every other
 argument goes to Maven (`npm run test:java -- -pl portvakt-sdk-core`). Unit tests alone:
 
 ```sh
 docker run --rm -v "<repo>:/workspace" -v portvakt-m2:/root/.m2 -w /workspace/sdk-java \
-  maven:3.9-eclipse-temurin-21 mvn -B -ntp verify
+  maven:3.9-eclipse-temurin-21 mvn -B -ntp -C verify
 ```
 
 The integration tests (the demo's `DemoServiceIT`, the starter's `JdbcTokenStoreIT` against the
@@ -339,11 +360,14 @@ stack's Postgres) skip without `portvakt.it.issuer` / `portvakt.it.jdbc-url`; wi
 docker run --rm -p 3300:3300 -v "<repo>:/workspace" -v portvakt-m2:/root/.m2 \
   -w /workspace/sdk-java maven:3.9-eclipse-temurin-21 sh -c "java \
   /workspace/scripts/java-test/PortForward.java host.docker.internal 3000 4500 & \
-  mvn -B -ntp -q -DskipTests package && java -jar \
-  ../examples/demo-service-java/target/portvakt-demo-service-java-1.0.0-SNAPSHOT.jar"
+  mvn -B -ntp -C -q -DskipTests package && java -jar \
+  ../examples/demo-service-java/target/portvakt-demo-service-java-1.0.0-SNAPSHOT.jar \
+  --spring.profiles.active=local"
 ```
 
-(on Linux add `--add-host=host.docker.internal:host-gateway`).
+(on Linux add `--add-host=host.docker.internal:host-gateway`). The demo's session cookie is
+Secure and an http issuer refused unless the `local` profile is active
+(`application-local.yml`); e2e and the Java integration tests activate it.
 
 ## Conventions
 
@@ -457,6 +481,9 @@ batch_size)`, which refuses a cutoff younger than 90 days, sets a transaction-lo
   `client_secret_basic`/`client_secret_post`); read them with `applications.getClientSecret`.
 - Signing key transitions are time-guarded in SQL (`KEY_PUBLISH_AHEAD`, `KEY_RETIRE_AFTER`, passed
   by the caller). Only the audited `force` path (key compromise, `emergency`) skips the wait.
+  An emergency always generates a fresh key (never the pending `next`, whose private part sat
+  next to the compromised one), activates it and retires every other next/active/retiring key in
+  the same transaction, so JWKS publishes only the new key.
   A manual rotation without emergency publishes ahead: `signing_keys.activate_at` (migration 0006)
   is set to KEY_MANUAL_PUBLISH_AHEAD after the next key's creation, `activate()` honours it, and
   every replica arms a timer for it (`scheduleActivation` in `server.ts`, re-armed on every
@@ -485,7 +512,9 @@ batch_size)`, which refuses a cutoff younger than 90 days, sets a transaction-lo
   oidc-provider derives its mount path with `originalUrl.indexOf(url)`, which is wrong for a slug
   starting with a route name (`/t/authority/auth`); without it, it uses `req.baseUrl`.
 - Access tokens are always JWTs for one application (`aud` = client_id, resource
-  `urn:portvakt:app:{client_id}`); only client_credentials may name another app of the tenant.
+  `urn:portvakt:app:{client_id}`); only client_credentials may name another app of the tenant,
+  and only one the requesting app lists in `serviceAudiences` (migration 0007; default empty:
+  no service tokens for other apps; the seed lets `service-c` ask for `service-a`).
   The userinfo endpoint is disabled: oidc-provider only accepts audience-less access tokens there,
   so RPs read claims from the ID token.
 - Representation (`representation/`, `oidc/representation-prompt.ts`): the chooser is the
@@ -514,7 +543,10 @@ batch_size)`, which refuses a cutoff younger than 90 days, sets a transaction-lo
 - Step-up (`isStepUp` in `oidc/interactions.ts`): a login prompt whose only reasons are
   `acr_not_met` and/or `max_age` with a signed-in session. `federation.begin` then names the
   person upstream (`persons.latestPin`: SAML PrincipalSelection, or an OIDC `login_hint` when
-  the method sets `pinLoginHint`), `completeLogin` refuses another person
+  the method sets `pinLoginHint`, only through PAR when the upstream advertises
+  `pushed_authorization_request_endpoint`, otherwise left out; the mock's `bankid` issuer has
+  PAR, `idp.oidc(kind).advertisePushedAuthorizationRequests(false)` hides it in tests),
+  `completeLogin` refuses another person
   (`step_up_person_mismatch`, audited, nothing about the session changes; the login UI treats it
   as terminal), and the pending login carries `stepUp` so the consent check audits
   `step_up.success` with the grant login. The session record follows the latest login, so the
@@ -574,8 +606,10 @@ batch_size)`, which refuses a cutoff younger than 90 days, sets a transaction-lo
   `maxAgeSeconds` above `SESSION_TTL` is refused at write time by the server's repositories
   (`createRepositories(db, keys, { maxSessionSeconds })`; the plain test database repositories
   have no ceiling) and capped at runtime.
-- NODE_ENV=test is refused unless `PUBLIC_URL` is loopback, `.localhost` or `.test`, and the
-  server logs a warning whenever the test-only login route is mounted.
+- NODE_ENV=development and NODE_ENV=test are refused unless `PUBLIC_URL` is loopback or
+  `*.localhost` (`isLoopbackHost`; `.test` is not allowed, anyone can point it anywhere), so a
+  deployment on a real host must run as production. The server logs a warning whenever the
+  test-only login route is mounted.
 - The test-only login route `POST /t/{slug}/interaction/{uid}/__test__/login` exists only with
   NODE_ENV=test. It lives below the interaction path because the interaction cookie is scoped to
   it.
@@ -730,7 +764,7 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
 - Outbound requests to configured URLs (SAML metadata, upstream OIDC discovery, JWKS, token and
   userinfo, downstream client `jwks_uri`) go through `net/outbound.ts`: the connection's DNS
   lookup refuses loopback, private, link-local (169.254.169.254), unique-local, unspecified,
-  multicast and NAT64/6to4 (64:ff9b::/96, 64:ff9b:1::/48, 2002::/16) addresses (also after DNS rebinding), literal IP hosts are checked first, redirects are
+  multicast, IPv4-compatible (::/96) and NAT64/6to4 (64:ff9b::/96, 64:ff9b:1::/48, 2002::/16) addresses (also after DNS rebinding), literal IP hosts are checked first, redirects are
   followed by hand (3 hops, each checked), bodies are capped, and production requires https.
   The guard uses `undici` (a direct dependency, `~7.29.1`) for its `Agent` and `fetch`, so the
   connect-time lookup does not depend on the undici version bundled in Node.
@@ -742,14 +776,19 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
   `rotateSpKeys` makes it active and the old key `previous` (no longer published, still used for
   decryption until the next rotation or `deletePreviousSpKey`). Requests are signed with the
   active key.
-- SAML single logout: the session record keeps the upstream session as `upstream`: the NameID's
-  and SessionIndex's blind indexes (HMAC with the blind-index key, per login method) and the
-  values sealed with SecretBox (for the SP-initiated LogoutRequest); never in the clear. The
-  record is indexed by `saml:<loginMethodId>:<NameID index>` (`oidc_payloads.uid`). An
-  RP-initiated logout of the whole session goes through the IdP's SLO after the local logout
-  (HTTP-Redirect, or the `/logout` HTTP-POST page; the `upstreamLogout` hook in
-  `oidc/provider.ts`, never for the session switch during a login), and a LogoutResponse that
-  cannot be verified still ends at the application. A signed IdP-initiated LogoutRequest (its
+- SAML single logout: the session record keeps every upstream SAML session of the person's logins
+  in that browser session as `upstreams` (newest first, at most 8, one per login method and
+  NameID; `mergeUpstreams` at each fresh login of the same person): the NameID's and
+  SessionIndex's blind indexes (HMAC with the blind-index key, per login method) and the values
+  sealed with SecretBox (for the SP-initiated LogoutRequest); never in the clear. Each upstream
+  has an index row `PortvaktUpstreamSession` (`uid` = `saml:<loginMethodId>:<NameID index>`,
+  payload `{ sessionUid }`), written with the record. An RP-initiated logout of the whole
+  session goes through each IdP's SLO in turn after the local logout (HTTP-Redirect, or the
+  `/logout` HTTP-POST page; the `upstreamLogout` hook in `oidc/provider.ts`, never for the
+  session switch during a login): the logout state carries the remaining upstreams, and each
+  LogoutResponse, also one that cannot be verified, continues to the next IdP and finally to
+  the application. An IdP-initiated logout from any of them ends the session. A signed
+  IdP-initiated LogoutRequest (its
   Destination the SP's SLO URL, IssueInstant within 5 minutes plus skew, its ID accepted once)
   ends the matching sessions (their oidc-provider Session and grants are deleted,
   `logout.idp_initiated` is audited) and gets a signed LogoutResponse over HTTP-Redirect, or
@@ -794,6 +833,16 @@ packages/sdk-node` emits `dist/` with declarations. Publishing (exports pointing
   repackaged jar hides the classes ("Failed to find merged annotation for @BootstrapWith").
 - Starter: `DefaultOidcUser.getClaims()` calls `getAttributes()`; overriding `getAttributes()`
   to return the claims recurses forever.
+- Starter: the security context never lives in the HTTP session either:
+  `PortvaktSecurityContextRepository` (set by `PortvaktLoginConfigurer` through
+  `http.securityContext`) stores the person's ID token in the token store
+  (`StoredTokens.idToken`, sealed) and rebuilds the `OAuth2AuthenticationToken` per request; the
+  session holds `PortvaktSessionState` and the CSRF token only. A refresh keeps the stored ID
+  token until `PortvaktAccessTokens` saves the new one. The expiry filter ends a session whose
+  state has no person any more (store entry gone). `PortvaktSecurity.currentPrincipal()` is empty
+  for a restricted bearer token unless the route's `portvakt.accessToken(r -> ...)` accepted it
+  (request attribute). The starter warns at start about an insecure session cookie in a
+  production profile (`PortvaktCookieCheck`).
 - Starter: tokens and pending logins never live in the HTTP session. A Spring Session snapshot
   written back by a concurrent request would bring an old refresh token back (a replay, and
   Portvakt revokes the grant), and a lock alone cannot prevent that. The session holds the grant
@@ -854,13 +903,19 @@ packages/sdk-node` emits `dist/` with declarations. Publishing (exports pointing
   URL length bound, then the routes. Pages set their own CSP on top (login UI, SAML POST pages);
   provider responses get `PROVIDER_CSP` (`oidc/routes.ts`): oidc-provider adds the hash of its
   `form_post` script to an existing `script-src` itself, so no `'unsafe-inline'` is needed.
-- Rate limits (`http/rate-limits.ts`, RATE_LIMIT_*): token buckets per replica, keyed by
-  `req.ip` (TRUST_PROXY), `{slug}:{client_id}` or the admin caller; a refused request is counted
-  by limit name only. The per-client token endpoint limit needs the client_id of form bodies
-  (`client_secret_post`, `private_key_jwt`): `readReplayableForm` reads the body (56 KB, the
-  provider's limit) and makes the request readable again (`req.readable`, `req.iterator()`, as
-  oidc-provider's `selective_body.js` reads it), so the provider parses the same bytes; if
-  oidc-provider changes how it reads bodies, the token endpoint tests fail. `startTestServer`
+- Rate limits (`http/rate-limits.ts`, RATE_LIMIT_*): token buckets per replica, keyed by the
+  client IP (`clientIpKey`: `req.ip` under TRUST_PROXY; IPv6 by its /64, `ipRateLimitKey` in
+  http-kit), `{slug}:{client_id}` or the admin caller; a refused request is counted by limit
+  name only. The per-client bucket of the token, introspection, revocation and PAR endpoints is
+  charged only for failed client authentication, after the provider answered
+  (`chargeFailedClientAuthentication` wraps `res.end`: a 401 takes a token, and with the bucket
+  empty the 401 becomes 429), so successful authentications are never blocked by others'
+  traffic; the per-IP limit runs before the provider. The per-client limits need the client_id
+  of form bodies (`client_secret_post`, `private_key_jwt`, a POSTed authorization request):
+  `readReplayableForm` reads the body (56 KB, the provider's limit) and makes the request
+  readable again (`req.readable`, `req.iterator()`, as oidc-provider's `selective_body.js` reads
+  it), so the provider parses the same bytes; if oidc-provider changes how it reads bodies, the
+  token endpoint tests fail. `startTestServer`
   turns every limit off (`RATE_LIMIT_*=off`); `http/hardening.test.ts` sets small ones and a
   fresh X-Forwarded-For per test (TRUST_PROXY=1).
 - Runtime pool connections carry `statement_timeout` and `idle_in_transaction_session_timeout`
@@ -874,7 +929,24 @@ packages/sdk-node` emits `dist/` with declarations. Publishing (exports pointing
 - Playwright: `page.route` never sees the target of a redirect, so `src/rp.ts` reads the code from
   the callback's request event. The design system's checkboxes and switches cover their input:
   click the label (`AdminPortal.toggle`), not the input.
-- BFF step-up and representation switches refuse cross-site starts (`Sec-Fetch-Site` same-origin
-  or none, else a same-origin Referer or the session's `csrf` token); so do logins with `acr` or
-  `prompt`, and any login while a session exists (both SDKs). Tests driving them with
-  Node's fetch send `sec-fetch-site: same-origin` explicitly.
+- BFF step-up and representation switches need a same-site start (`Sec-Fetch-Site` same-origin
+  or none, else a same-origin Referer; the `csrf` query parameter is gone); so do logins with
+  `acr` or `prompt`, and any login while a session exists (both SDKs). A browser navigation from
+  elsewhere (also a deep link behind `requireAcr` / `@RequireAcr`) gets the interstitial page
+  (`#interstitial` in bff.ts, `Responses.interstitial` in Java: a GET form with the same
+  parameters, "Fortsätt till inloggning", strict CSP, Referrer-Policy same-origin); other
+  requests 403 `cross_site_request`. Tests driving them with Node's fetch send
+  `sec-fetch-site: same-origin` explicitly.
+- TS BFF CSRF: `requireLogin` / `requireAcr` check unsafe methods by default (`X-CSRF-Token` or a
+  parsed `_csrf` body field, plus same-origin `Sec-Fetch-Site`/`Origin` when sent; opt out with
+  `{ csrf: false }`; `bff.requireCsrf()` alone). The demo's "Anropa API" is a POST with the
+  header. Cookie names may use `__Host-`/`__Secure-` (checked at start); the pending-login
+  cookie `{name}_tx` uses the session cookie's path, so `mountPath` must be below it.
+- Both SDKs: a token endpoint answer of 429 or `temporarily_unavailable` (any status) is
+  transient (TS `transientRefusal`, Java `PortvaktTokenEndpointErrors` throws
+  `PortvaktRetryLaterException`): the session keeps its refresh token, no outage starts, 503 with
+  Portvakt's Retry-After; also at the code exchange. Logout without a local session still goes
+  to Portvakt's end-session endpoint (`client_id`, `post_logout_redirect_uri`; Java exempts that
+  POST from CSRF when there is no session state). JWKS `staleMaxAge` defaults to 1 h. A TS
+  refresh never moves `endsAt` later; the TS callback consumes the pending login only when its
+  `state` matches.

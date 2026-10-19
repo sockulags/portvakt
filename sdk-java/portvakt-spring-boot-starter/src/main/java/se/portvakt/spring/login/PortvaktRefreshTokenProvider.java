@@ -13,6 +13,7 @@ import org.springframework.security.oauth2.core.OAuth2AccessToken;
 import org.springframework.security.oauth2.core.OAuth2AuthorizationException;
 import org.springframework.security.oauth2.core.OAuth2Error;
 import org.springframework.security.oauth2.core.endpoint.OAuth2AccessTokenResponse;
+import se.portvakt.sdk.PortvaktRetryLaterException;
 import se.portvakt.sdk.PortvaktUnavailableException;
 
 /**
@@ -21,8 +22,9 @@ import se.portvakt.sdk.PortvaktUnavailableException;
  * a short access token TTL, would otherwise be refreshed on every request); an explicit {@link
  * #MIN_VALIDITY_ATTRIBUTE} is used as given. Portvakt
  * rotates refresh tokens on every use. A network error, timeout or 5xx answer becomes {@link
- * PortvaktUnavailableException}; a refusal ({@code invalid_grant}: revoked, replayed, broker
- * session ended) a {@link ClientAuthorizationException}. The token response (with the new ID
+ * PortvaktUnavailableException}; a 429 or {@code temporarily_unavailable} stays {@link
+ * PortvaktRetryLaterException} (transient); a refusal ({@code invalid_grant}: revoked, replayed,
+ * broker session ended) a {@link ClientAuthorizationException}. The token response (with the new ID
  * token) is handed to the caller through the context attribute {@link #RESPONSE_ATTRIBUTE}.
  */
 public class PortvaktRefreshTokenProvider implements OAuth2AuthorizedClientProvider {
@@ -72,12 +74,16 @@ public class PortvaktRefreshTokenProvider implements OAuth2AuthorizedClientProvi
               new OAuth2RefreshTokenGrantRequest(
                   authorized.getClientRegistration(), authorized.getAccessToken(), authorized.getRefreshToken()));
     } catch (OAuth2AuthorizationException failure) {
+      PortvaktRetryLaterException later = Failures.find(failure, PortvaktRetryLaterException.class);
+      if (later != null) throw later;
       if (Failures.isUnavailable(failure)) {
         throw new PortvaktUnavailableException("Portvakt is unavailable", failure);
       }
       if (failure instanceof ClientAuthorizationException clientFailure) throw clientFailure;
       throw new ClientAuthorizationException(failure.getError(), registrationId, failure);
     } catch (RuntimeException failure) {
+      PortvaktRetryLaterException later = Failures.find(failure, PortvaktRetryLaterException.class);
+      if (later != null) throw later;
       if (Failures.isUnavailable(failure)) {
         throw new PortvaktUnavailableException("Portvakt is unavailable", failure);
       }

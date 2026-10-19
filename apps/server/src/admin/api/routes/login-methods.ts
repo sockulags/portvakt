@@ -27,6 +27,7 @@ import type { Caller } from "../auth.js";
 import {
   actorOf,
   assertPlatformReachable,
+  endLogins,
   inTransaction,
   lockRow,
   targetTenant,
@@ -54,6 +55,7 @@ export const WARNING_CODES = [
   "saml_minimum_comparison",
   "saml_missing_logo",
   "saml_missing_description",
+  "pin_login_hint_without_par",
 ] as const;
 export type WarningCode = (typeof WARNING_CODES)[number];
 
@@ -465,6 +467,46 @@ async function recordChange(
   });
 }
 
+/**
+ * Warnings that need the upstream's discovery document, computed after the change committed
+ * (never a network request inside a transaction): `pinLoginHint` is only ever sent through a
+ * pushed authorization request, so without `pushed_authorization_request_endpoint` (or when the
+ * discovery cannot be read now) the hint is left out at step-up.
+ */
+async function withUpstreamWarnings(
+  deps: AdminDeps,
+  tenant: Tenant,
+  view: LoginMethodView,
+): Promise<LoginMethodView> {
+  if (!("oidc" in view) || view.oidc?.pinLoginHint !== true || deps.upstream === undefined) {
+    return view;
+  }
+  const method = await deps.repos.loginMethods.findById(tenant.id, view.id);
+  if (method?.protocol !== "oidc") return view;
+  let par: boolean | undefined;
+  try {
+    const setup = await deps.upstream.setupFor(method);
+    par = typeof setup.metadata.pushed_authorization_request_endpoint === "string";
+  } catch {
+    par = undefined;
+  }
+  if (par === true) return view;
+  return {
+    ...view,
+    warnings: [
+      ...view.warnings,
+      {
+        code: "pin_login_hint_without_par",
+        field: "pinLoginHint",
+        message:
+          par === false
+            ? "the upstream does not advertise pushed_authorization_request_endpoint: the personal identity number is never sent as login_hint"
+            : "the upstream's discovery could not be read: pinLoginHint takes effect only with pushed authorization requests",
+      },
+    ],
+  };
+}
+
 async function update(
   deps: AdminDeps,
   caller: Caller,
@@ -473,7 +515,7 @@ async function update(
   ifMatch: string | undefined,
   body: z.output<typeof updateBody>,
 ): Promise<LoginMethodView> {
-  return inTransaction(deps, async (tx) => {
+  const view = await inTransaction(deps, async (tx) => {
     const current = await lockedMethod(tx, deps, tenant, id, ifMatch);
     let updated: LoginMethod;
     let secretChanged = false;
@@ -525,8 +567,23 @@ async function update(
       orphaned ? { orphanedLoginMethodId: current.id } : {},
     );
     await recordChange(tx, caller, tenant, current, updated, secretChanged);
+    if (current.enabled && !updated.enabled) {
+      // Every login through the method ends now; enabling it again never revives one.
+      await endLogins(
+        tx,
+        caller,
+        tenant.id,
+        { loginMethodId: current.id },
+        {
+          reason: "login_method_disabled",
+          subject: { type: "login_method", id: current.id },
+          loginMethodId: current.id,
+        },
+      );
+    }
     return loginMethodView(deps, tx, tenant, updated);
   });
+  return withUpstreamWarnings(deps, tenant, view);
 }
 
 function pick<T extends object, K extends keyof T>(
@@ -597,7 +654,7 @@ export function loginMethodRoutes(deps: AdminDeps): AdminRoute[] {
           );
           return loginMethodView(deps, tx, tenant, created);
         });
-        return { status: 201, body: view };
+        return { status: 201, body: await withUpstreamWarnings(deps, tenant, view) };
       },
     }),
     route({
@@ -745,6 +802,17 @@ export function loginMethodRoutes(deps: AdminDeps): AdminRoute[] {
           }
           await tx.repos.loginMethods.delete(tenant.id, current.id);
           await assertPlatformReachable(tx, tenant);
+          await endLogins(
+            tx,
+            caller,
+            tenant.id,
+            { loginMethodId: current.id },
+            {
+              reason: "login_method_deleted",
+              subject: { type: "login_method", id: current.id },
+              loginMethodId: current.id,
+            },
+          );
           await tx.record({
             action: "admin.login_method.delete",
             tenantId: tenant.id,

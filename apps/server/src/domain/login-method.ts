@@ -296,26 +296,41 @@ export function loginMethodRuleViolations(
 export const PIN_REPRESENTATION_MIN_ACR = "http://id.elegnamnden.se/loa/1.0/loa3";
 
 /**
- * `trustPinForRepresentation` needs a method that maps a personal identity number and asserts
- * an acr ranked at least loa3 (`acrRanking`: ACR_RANKING). Returns the violation messages.
+ * The acr values a method may assert to be trusted with a personal identity number (pin-addressed
+ * representation grants, identity linking): loa3 and everything ranked above it in `acrRanking`
+ * (ACR_RANKING). Unranked values, self-asserted ones included, never qualify.
+ */
+export function pinTrustedAcrs(acrRanking: readonly string[]): readonly string[] {
+  const minimum = acrRanking.indexOf(PIN_REPRESENTATION_MIN_ACR);
+  return minimum < 0 ? [] : acrRanking.slice(minimum);
+}
+
+/**
+ * `trustPinForRepresentation` and `linkByPin` each need a method that maps a personal identity
+ * number and asserts an acr ranked at least loa3 (`acrRanking`: ACR_RANKING). Returns the
+ * violation messages.
  */
 export function pinTrustViolations(
   method: {
     readonly trustPinForRepresentation: boolean;
+    readonly linkByPin?: boolean;
     readonly assertedAcr: string;
     readonly mapsPin: boolean;
   },
   acrRanking: readonly string[],
 ): string[] {
-  if (!method.trustPinForRepresentation) return [];
   const issues: string[] = [];
-  if (!method.mapsPin) {
-    issues.push("trustPinForRepresentation: the method must map a personal identity number");
-  }
-  const rank = acrRanking.indexOf(method.assertedAcr);
-  const minimum = acrRanking.indexOf(PIN_REPRESENTATION_MIN_ACR);
-  if (minimum < 0 || rank < minimum) {
-    issues.push("trustPinForRepresentation: the method must assert at least loa3");
+  const flags = [
+    ...(method.trustPinForRepresentation ? ["trustPinForRepresentation"] : []),
+    ...(method.linkByPin === true ? ["linkByPin"] : []),
+  ];
+  for (const flag of flags) {
+    if (!method.mapsPin) {
+      issues.push(`${flag}: the method must map a personal identity number`);
+    }
+    if (!pinTrustedAcrs(acrRanking).includes(method.assertedAcr)) {
+      issues.push(`${flag}: the method must assert at least loa3`);
+    }
   }
   return issues;
 }

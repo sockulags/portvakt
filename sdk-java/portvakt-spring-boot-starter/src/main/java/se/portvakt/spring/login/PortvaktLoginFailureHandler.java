@@ -11,6 +11,7 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
 import org.springframework.security.web.authentication.AuthenticationFailureHandler;
 import se.portvakt.sdk.PortvaktException;
+import se.portvakt.sdk.PortvaktUnavailableException;
 import se.portvakt.spring.web.Responses;
 
 /**
@@ -42,10 +43,19 @@ public class PortvaktLoginFailureHandler implements AuthenticationFailureHandler
   @Override
   public void onAuthenticationFailure(
       HttpServletRequest request, HttpServletResponse response, AuthenticationException exception) throws IOException {
+    CrossSiteNavigationException crossSite = Failures.find(exception, CrossSiteNavigationException.class);
+    if (crossSite != null) {
+      Responses.interstitial(response, crossSite.target());
+      return;
+    }
     String code = codeOf(exception);
     PortvaktException portvakt = Failures.find(exception, PortvaktException.class);
     int status = portvakt != null && portvakt.code().equals(code) ? portvakt.status() : STATUS.getOrDefault(code, 400);
     LOG.info("Portvakt login failed: {}", code);
+    if (status == 503) {
+      response.setHeader(
+          "Retry-After", Responses.retryAfterSeconds(Failures.find(exception, PortvaktUnavailableException.class)));
+    }
     Responses.error(request, response, status, code, settings.defaultReturnTo());
   }
 

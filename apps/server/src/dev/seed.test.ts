@@ -49,7 +49,13 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
         allowedExtraScopes: ["hsa"],
       },
       { clientId: "service-b", name: "Tjänst B", url: "http://localhost:3200", enabled: false },
-      { clientId: "service-c", name: "Tjänst C", url: "http://localhost:3300", enabled: true },
+      {
+        clientId: "service-c",
+        name: "Tjänst C",
+        url: "http://localhost:3300",
+        enabled: true,
+        serviceAudiences: ["service-a"],
+      },
       {
         clientId: "service-d",
         name: "Tjänst D",
@@ -109,6 +115,9 @@ describe.skipIf(ts === undefined)("seed:dev", () => {
     // Service A may ask for the SITHS claims; the others get no extra scopes.
     expect(serviceA.allowedExtraScopes).toEqual(["hsa"]);
     expect(serviceC.allowedExtraScopes).toEqual([]);
+    // Only service-c may request service tokens, and only for service-a (the Java tests).
+    expect(serviceC.serviceAudiences).toEqual(["service-a"]);
+    expect(serviceA.serviceAudiences).toEqual([]);
 
     const methods = await repos.loginMethods.list(tenantId);
     expect(methods.map((method) => `${method.protocol}:${method.kind}`).sort()).toEqual([

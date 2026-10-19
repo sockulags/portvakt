@@ -8,6 +8,46 @@
  * cannot exhaust memory, it only forgets the oldest buckets (which then start full again).
  */
 
+/**
+ * The rate-limit key of a client IP: an IPv4 address as it is (also when it arrives IPv4-mapped,
+ * `::ffff:192.0.2.1`), an IPv6 address by its /64 prefix (`2001:db8:1:2::/64`). One subscriber
+ * or host usually holds a whole /64, so keying single IPv6 addresses would give it billions of
+ * buckets. Anything that is not an IP address is returned unchanged.
+ */
+export function ipRateLimitKey(ip: string): string {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
+  if (mapped !== null) return mapped[1]!;
+  if (!ip.includes(":")) return ip;
+  const hextets = expandIpv6(ip);
+  if (hextets === undefined) return ip;
+  return `${hextets.slice(0, 4).join(":")}::/64`;
+}
+
+/** The eight hextets of an IPv6 address (lowercase, no leading zeros), or undefined. */
+function expandIpv6(input: string): string[] | undefined {
+  let address = input.toLowerCase();
+  const zone = address.indexOf("%");
+  if (zone >= 0) address = address.slice(0, zone);
+  if (address.startsWith("[") && address.endsWith("]")) address = address.slice(1, -1);
+  // An embedded IPv4 tail (`::1.2.3.4`) counts as two hextets.
+  const v4 = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address);
+  if (v4 !== null) {
+    const bytes = v4.slice(1).map(Number);
+    if (bytes.some((byte) => byte > 255)) return undefined;
+    const [a, b, c, d] = bytes as [number, number, number, number];
+    address = `${address.slice(0, v4.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = address.split("::");
+  if (halves.length > 2) return undefined;
+  const head = halves[0] === "" ? [] : halves[0]!.split(":");
+  const tail = halves.length === 2 && halves[1] !== "" ? halves[1]!.split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 1 ? missing !== 0 : missing < 1) return undefined;
+  const hextets = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  if (hextets.some((part) => !/^[0-9a-f]{1,4}$/.test(part))) return undefined;
+  return hextets.map((part) => Number.parseInt(part, 16).toString(16));
+}
+
 export interface RateLimit {
   /** Burst size: tokens a full bucket holds. */
   readonly capacity: number;

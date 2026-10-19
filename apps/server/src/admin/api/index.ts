@@ -65,6 +65,8 @@ export function adminApiRouter(deps: AdminDeps): Router {
         publicUrl: deps.config.publicUrl,
         keyCache: deps.keyCache,
         repos: deps.repos,
+        minAcr: deps.config.admin.minAcr,
+        acrRanking: deps.config.acrRanking,
       }),
       logger: deps.logger,
       limits: deps.limits,

@@ -71,7 +71,8 @@ public class PortvaktAuthorizedClientRepository implements OAuth2AuthorizedClien
       request.setAttribute(NEW_GRANT_ATTRIBUTE, grantId);
       return;
     }
-    store.save(state.grantId(), tokens, state.endsAt());
+    PortvaktTokenStore.StoredTokens previous = store.load(state.grantId());
+    store.save(state.grantId(), tokens.withIdToken(previous == null ? null : previous.idToken()), state.endsAt());
   }
 
   @Override

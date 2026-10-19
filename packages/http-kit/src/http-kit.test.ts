@@ -5,6 +5,7 @@ import {
   contextFor,
   currentRequest,
   httpMetricsMiddleware,
+  ipRateLimitKey,
   logIds,
   MAX_SERIES,
   MetricRegistry,
@@ -88,6 +89,19 @@ describe("MetricRegistry", () => {
 });
 
 describe("rate limits", () => {
+  it("keys IPv6 addresses by /64 and IPv4 (also IPv4-mapped) by the address", () => {
+    expect(ipRateLimitKey("192.0.2.7")).toBe("192.0.2.7");
+    expect(ipRateLimitKey("::ffff:192.0.2.7")).toBe("192.0.2.7");
+    expect(ipRateLimitKey("2001:db8:1:2:3:4:5:6")).toBe("2001:db8:1:2::/64");
+    expect(ipRateLimitKey("2001:DB8:0001:0002::9")).toBe("2001:db8:1:2::/64");
+    expect(ipRateLimitKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(ipRateLimitKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+    expect(ipRateLimitKey("::1")).toBe("0:0:0:0::/64");
+    expect(ipRateLimitKey("64:ff9b::192.0.2.1")).toBe("64:ff9b:0:0::/64");
+    expect(ipRateLimitKey("unknown")).toBe("unknown");
+    expect(ipRateLimitKey("1::2::3")).toBe("1::2::3");
+  });
+
   it("parses limit specifications", () => {
     expect(parseRateLimit("60/1m")).toEqual({ capacity: 60, periodSeconds: 60 });
     expect(parseRateLimit("10/30s")).toEqual({ capacity: 10, periodSeconds: 30 });

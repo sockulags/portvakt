@@ -208,6 +208,11 @@ export interface Config {
     readonly publicUrl: string | undefined;
     /** ADMIN_CLIENT_SECRET: the `portvakt-admin` client secret the bootstrap registers. */
     readonly clientSecret: string | undefined;
+    /**
+     * ADMIN_MIN_ACR: a ranked acr; the admin API refuses tokens whose acr ranks lower (unranked
+     * values included). Unset: any login method of a tenant may administer it.
+     */
+    readonly minAcr: string | undefined;
   };
   /**
    * Assurance levels from lowest to highest (ACR_RANKING). A login method whose asserted acr
@@ -447,6 +452,7 @@ const envSchema = z.object({
   BOOTSTRAP_ADMIN_PIN: optionalString,
   ADMIN_PUBLIC_URL: optionalString,
   ADMIN_CLIENT_SECRET: optionalString,
+  ADMIN_MIN_ACR: optionalString,
   ACR_RANKING: z.preprocess(
     emptyToUndefined,
     z
@@ -494,14 +500,17 @@ function isLocalHostname(hostname: string): boolean {
   );
 }
 
-/** Hosts a test-mode server may use: loopback addresses and the reserved test domains. */
-function isLoopbackOrTestHost(hostname: string): boolean {
+/**
+ * Hosts a development or test-mode server may use: loopback addresses and `*.localhost` (which
+ * resolves to loopback). `.test` is not among them: anyone can point a `.test` name at any
+ * address, and test mode mounts a login route that needs no authentication.
+ */
+export function isLoopbackHost(hostname: string): boolean {
   return (
     hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
+    /^127(?:\.\d{1,3}){3}$/.test(hostname) ||
     hostname === "[::1]" ||
-    hostname.endsWith(".localhost") ||
-    hostname.endsWith(".test")
+    hostname.endsWith(".localhost")
   );
 }
 
@@ -699,6 +708,11 @@ function productionWarnings(env: Env): string[] {
       "METRICS_TOKEN: not set; keep METRICS_PORT reachable from the metrics scraper only",
     );
   }
+  if (env.ADMIN_MIN_ACR === undefined) {
+    warnings.push(
+      "ADMIN_MIN_ACR: not set; any login method of a tenant can sign in its administrators (recommended: a ranked level such as loa3)",
+    );
+  }
   if (env.MIGRATE_ON_START === true) {
     warnings.push(
       "MIGRATE_ON_START: the runtime replicas need the owner role; prefer a separate migration job",
@@ -834,7 +848,10 @@ function adminConfig(env: Env, isProduction: boolean, issues: string[]): Config[
   if (env.ADMIN_CLIENT_SECRET !== undefined && env.ADMIN_CLIENT_SECRET.length < 32) {
     issues.push("ADMIN_CLIENT_SECRET: at least 32 characters");
   }
-  return { publicUrl, clientSecret: env.ADMIN_CLIENT_SECRET };
+  if (env.ADMIN_MIN_ACR !== undefined && !env.ACR_RANKING.includes(env.ADMIN_MIN_ACR)) {
+    issues.push("ADMIN_MIN_ACR: must be one of the values of ACR_RANKING");
+  }
+  return { publicUrl, clientSecret: env.ADMIN_CLIENT_SECRET, minAcr: env.ADMIN_MIN_ACR };
 }
 
 function commaOrSpaceList(value: string): string[] {
@@ -909,14 +926,12 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
   if (publicUrl !== undefined && publicUrl.pathname !== "/") {
     issues.push("PUBLIC_URL: must be an origin without a path (issuers are {PUBLIC_URL}/t/{slug})");
   }
-  if (
-    env.NODE_ENV === "test" &&
-    publicUrl !== undefined &&
-    !isLoopbackOrTestHost(publicUrl.hostname)
-  ) {
-    // NODE_ENV=test mounts a login route that needs no authentication: never on a real host.
+  if (!isProduction && publicUrl !== undefined && !isLoopbackHost(publicUrl.hostname)) {
+    // Development and test mode relax the production refusals (dev keys, http, one database
+    // role), and test mode mounts a login route that needs no authentication: never on a host
+    // other people can reach. A real deployment sets NODE_ENV=production.
     issues.push(
-      "NODE_ENV: test mode is only allowed with a loopback, .localhost or .test PUBLIC_URL",
+      `NODE_ENV: ${env.NODE_ENV} mode is only allowed with a loopback or .localhost PUBLIC_URL; set NODE_ENV=production for any other host`,
     );
   }
 

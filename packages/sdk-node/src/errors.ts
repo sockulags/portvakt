@@ -22,10 +22,20 @@ export class PortvaktConfigError extends PortvaktError {
   }
 }
 
-/** Portvakt could not be reached (network error, timeout or a 5xx answer). */
+/**
+ * Portvakt could not be reached (network error, timeout or a 5xx answer), or asked to retry
+ * later (429, or the OAuth error `temporarily_unavailable`).
+ */
 export class PortvaktUnavailableError extends PortvaktError {
-  constructor(message = "Portvakt is unavailable", options?: ErrorOptions) {
+  /** Portvakt's `Retry-After` in seconds, when it sent one (the SDK's 503 passes it on). */
+  readonly retryAfterSeconds: number | undefined;
+
+  constructor(
+    message = "Portvakt is unavailable",
+    options?: ErrorOptions & { readonly retryAfterSeconds?: number | undefined },
+  ) {
     super("portvakt_unavailable", message, 503, options);
+    this.retryAfterSeconds = options?.retryAfterSeconds;
   }
 }
 

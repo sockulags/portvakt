@@ -134,6 +134,8 @@ const sv = {
     saml_minimum_comparison: "Jämförelsen minimum används; ramverket tillåter bara exact.",
     saml_missing_logo: "Ingen logotyp i SP-metadatan (krävs av Deployment Profile).",
     saml_missing_description: "Ingen svensk beskrivning i SP-metadatan (rekommenderas).",
+    pin_login_hint_without_par:
+      "Leverantören stöder inte PAR (pushed authorization requests): personnumret skickas aldrig som inloggningstips vid stegvis höjning.",
     purposes: { signing: "signering", encryption: "kryptering" },
   } satisfies Record<WarningCode, string> &
     Record<"purposes", Record<"signing" | "encryption", string>>,
@@ -190,6 +192,9 @@ const sv = {
     attributeKeys: "Attributnycklar",
     attributeKeysHint: "En nyckel per rad, till exempel enhet.",
     extraScopes: "Tillåtna extra scopes",
+    serviceAudiences: "Får hämta tjänstetoken för",
+    serviceAudiencesHint:
+      "Klient-id för de applikationer som den här får anropa med egna tjänstetoken (client credentials), ett per rad. Tomt: inga.",
     extraScopeNames: { pin: "Personnummer (pin)", hsa: "HSA-id (hsa)" },
     title: "Applikationer",
     description: "Tjänster som loggar in via Portvakt.",
@@ -343,6 +348,11 @@ const sv = {
     noRoles: "Applikationen har inga roller",
   },
   persons: {
+    endSessions: "Logga ut överallt",
+    endSessionsTitle: "Logga ut {name} överallt?",
+    endSessionsBody:
+      "Alla personens inloggningar i organisationen avslutas direkt och tjänsterna kan inte förnya dem. Redan utfärdade åtkomsttoken gäller tills de löper ut (några minuter). Personen kan logga in igen.",
+    endSessionsDone: "Utloggad: {sessions} sessioner och {grants} tjänstebehörigheter avslutades.",
     deletePerson: "Ta bort person",
     deleteTitle: "Ta bort {name}?",
     deleteBody:
@@ -426,7 +436,7 @@ const sv = {
     reasonHint: "Skriv inga personuppgifter. Anledningen sparas i granskningsloggen.",
     emergency: "Nödrotation (nyckeln är röjd)",
     emergencyHint:
-      "Den nya nyckeln börjar signera direkt och den gamla pensioneras: alla token den signerat slutar fungera.",
+      "En helt ny nyckel börjar signera direkt och alla andra nycklar pensioneras: alla utfärdade token slutar fungera. Rotera även MASTER_KEY om orsaken är en läckt databas eller nyckel.",
     rotated: "Nycklarna är roterade.",
     scheduled: "Ny nyckel publicerad, aktiveras {time}",
     activatesAt: "Aktiveras",
@@ -578,6 +588,8 @@ const en: Messages = {
     saml_minimum_comparison: "Comparison minimum is used; the framework allows only exact.",
     saml_missing_logo: "No logo in the SP metadata (required by the Deployment Profile).",
     saml_missing_description: "No Swedish description in the SP metadata (recommended).",
+    pin_login_hint_without_par:
+      "The provider does not support PAR (pushed authorization requests): the personal identity number is never sent as a login hint at step-up.",
     purposes: { signing: "signing", encryption: "encryption" },
   },
   tenants: {
@@ -629,6 +641,9 @@ const en: Messages = {
     attributeKeys: "Attribute keys",
     attributeKeysHint: "One key per line, for example unit.",
     extraScopes: "Allowed extra scopes",
+    serviceAudiences: "May request service tokens for",
+    serviceAudiencesHint:
+      "Client IDs of the applications this one may call with service tokens of its own (client credentials), one per line. Empty: none.",
     extraScopeNames: { pin: "Personal identity number (pin)", hsa: "HSA ID (hsa)" },
     title: "Applications",
     description: "Services that sign in through Portvakt.",
@@ -782,6 +797,11 @@ const en: Messages = {
     noRoles: "The application has no roles",
   },
   persons: {
+    endSessions: "Sign out everywhere",
+    endSessionsTitle: "Sign {name} out everywhere?",
+    endSessionsBody:
+      "Every sign-in of the person in the organisation ends at once and services cannot refresh it. Access tokens already issued stay valid until they expire (a few minutes). The person can sign in again.",
+    endSessionsDone: "Signed out: {sessions} sessions and {grants} service grants ended.",
     deletePerson: "Delete person",
     deleteTitle: "Delete {name}?",
     deleteBody:
@@ -860,7 +880,7 @@ const en: Messages = {
     reasonHint: "Write no personal data. The reason is kept in the audit log.",
     emergency: "Emergency rotation (the key is compromised)",
     emergencyHint:
-      "The new key starts signing at once and the old key is retired: every token it signed stops working.",
+      "A brand-new key starts signing at once and every other key is retired: every issued token stops working. Rotate MASTER_KEY too when the cause is a leaked database or key.",
     rotated: "The keys are rotated.",
     scheduled: "New key published, activates at {time}",
     activatesAt: "Activates",

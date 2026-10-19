@@ -135,11 +135,15 @@ describe.skipIf(ts === undefined)("step-up (acr_values, max_age)", () => {
     advance(30);
     // A asks for loa4: only the loa4 method qualifies, so the browser goes straight upstream,
     // with prompt=login and the person's number as login_hint (the mock signs that person in).
+    // The number travels in a pushed authorization request, never in the browser's URL.
+    const pushedBefore = idp!.idp.oidc("bankid").pushedAuthorizationRequests().length;
     const stepUp = await authorize(driver, w.a, { params: { acr_values: LOA4 } });
     const upstream = new URL(driver.visited.findLast((url) => url.includes("/bankid/auth?"))!);
-    expect(upstream.searchParams.get("prompt")).toBe("login");
-    expect(upstream.searchParams.get("login_hint")).toBe(MAJA_PIN);
-    expect(upstream.searchParams.get("acr_values")).toBe(LOA4);
+    expect(upstream.searchParams.get("login_hint")).toBeNull();
+    expect(upstream.searchParams.get("request_uri")).toMatch(/^urn:ietf:params:oauth:request_uri:/);
+    expect(driver.visited.some((url) => url.includes(MAJA_PIN))).toBe(false);
+    const pushed = idp!.idp.oidc("bankid").pushedAuthorizationRequests().slice(pushedBefore);
+    expect(pushed).toEqual([{ clientId: w.loa4.clientId, loginHint: MAJA_PIN }]);
     const stepped = await redeem(w.a.config, stepUp.request, stepUp.landing);
     const id = stepped.claims()!;
     expect(id).toMatchObject({ sub, acr: LOA4, idp: w.loa4.id });
@@ -447,6 +451,45 @@ describe.skipIf(ts === undefined)("step-up (acr_values, max_age)", () => {
       idp: loa4.id,
       acr: LOA4,
     });
+  });
+
+  it("leaves the pin hint out when the upstream has no PAR, and still requires the same person", async () => {
+    const bankid = idp!.idp.oidc("bankid");
+    bankid.advertisePushedAuthorizationRequests(false);
+    try {
+      // The methods discover the upstream now, without pushed_authorization_request_endpoint.
+      const w = await oidcWorld("stepup-no-par", { pinLoginHint: true });
+      const driver = new FlowDriver(ts!, idp!);
+      const first = await authorize(driver, w.a, { methodId: w.loa3.id, persona: "maja-loa4" });
+      const sub = (await redeem(w.a.config, first.request, first.landing)).claims()!.sub;
+      const pushedBefore = bankid.pushedAuthorizationRequests().length;
+      // No hint: the mock shows its persona page instead of signing Maja in by the number.
+      const stepUp = await authorize(driver, w.a, { params: { acr_values: LOA4 } });
+      expect(stepUp.landing.kind).toBe("idp_page");
+      const upstream = new URL(driver.visited.findLast((url) => url.includes("/bankid/auth?"))!);
+      expect(upstream.searchParams.get("login_hint")).toBeNull();
+      expect(driver.visited.some((url) => url.includes(MAJA_PIN))).toBe(false);
+      expect(bankid.pushedAuthorizationRequests().length).toBe(pushedBefore);
+      const landing = await driver.persona(stepUp.landing, "maja-loa4");
+      expect((await redeem(w.a.config, stepUp.request, landing)).claims()).toMatchObject({
+        sub,
+        acr: LOA4,
+      });
+      // Someone else at the IdP is still refused as another person (a fresher login of the
+      // loa3 method, which takes the hint too: without PAR it is left out there as well).
+      await repos.loginMethods.update(w.tenant.id, w.loa3.id, { pinLoginHint: true });
+      const advance = useClock();
+      advance(10);
+      const other = await authorize(driver, w.a, {
+        params: { max_age: "5" },
+        methodId: w.loa3.id,
+        persona: "sven-medborgare",
+      });
+      expect(other.landing).toMatchObject({ bootstrap: { error: "step_up_person_mismatch" } });
+      expect(driver.visited.some((url) => url.includes(MAJA_PIN))).toBe(false);
+    } finally {
+      bankid.advertisePushedAuthorizationRequests(true);
+    }
   });
 
   it("records only known acr values of a failed step-up, once per interaction", async () => {

@@ -51,10 +51,14 @@ async function getJson<T>(path: string): Promise<T> {
 export const loadConfig = () => getJson<AppConfig>("/app/config");
 export const loadSession = () => getJson<Session>("/auth/session");
 
-/** Calls the demo's own API through the BFF; `null` when the session has ended. */
-export async function callApi(): Promise<ApiCallResult | null> {
+/**
+ * Calls the demo's own API through the BFF; `null` when the session has ended. A POST: the BFF's
+ * `requireLogin` checks the session's CSRF token (header) and that the request is same-origin.
+ */
+export async function callApi(csrfToken: string): Promise<ApiCallResult | null> {
   const response = await fetch("/app/api-call", {
-    headers: { accept: "application/json" },
+    method: "POST",
+    headers: { accept: "application/json", "x-csrf-token": csrfToken },
     credentials: "same-origin",
   });
   if (response.status === 401) return null;

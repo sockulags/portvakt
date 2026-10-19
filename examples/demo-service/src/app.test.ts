@@ -103,7 +103,7 @@ describe("demo app", () => {
 
   it("reports signed out, protects its routes and serves the SPA", async () => {
     expect((await request(app).get("/auth/session")).body).toEqual({ authenticated: false });
-    const call = await request(app).get("/app/api-call").set("accept", "application/json");
+    const call = await request(app).post("/app/api-call").set("accept", "application/json");
     expect(call.status).toBe(401);
     expect(call.body).toEqual({ error: "login_required", loginUrl: "/auth/login?returnTo=%2F" });
     const api = await request(app).get("/api/whoami");

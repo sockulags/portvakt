@@ -148,8 +148,11 @@ export class FederationService {
    * A step-up of a known person (`interaction.stepUp`) names that person upstream when Portvakt
    * knows their personal identity number: SAML PrincipalSelection (`options.principalPin`, sent
    * when the IdP advertises it; the returned number must match either way), or for OIDC the
-   * number as `login_hint` when the method accepts one (`pinLoginHint`). The completion then
-   * verifies that the login is the session's person.
+   * number as `login_hint` when the method accepts one (`pinLoginHint`), only through a pushed
+   * authorization request (PAR, RFC 9126) when the upstream advertises
+   * `pushed_authorization_request_endpoint`: the number then travels in the back channel, never
+   * in the browser's URL or history. Without PAR the hint is left out. The completion verifies
+   * that the login is the session's person either way.
    */
   async begin(
     tenantProvider: TenantProvider,
@@ -206,10 +209,47 @@ export class FederationService {
     }
     if (maxAge !== undefined) params.max_age = String(maxAge);
     if (method.claimMapping.acr !== undefined) params.acr_values = method.assertedAcr;
-    if (stepUpPin !== null) params.login_hint = stepUpPin;
-    else if (loginHint !== undefined) params.login_hint = loginHint;
     if (uiLocales !== undefined) params.ui_locales = uiLocales;
+    const par = setup.metadata.pushed_authorization_request_endpoint;
+    if (stepUpPin !== null && typeof par === "string") {
+      // The personal identity number goes upstream in the back channel only (PAR).
+      return this.#pushedAuthorization(
+        method,
+        setup.config,
+        { ...params, login_hint: stepUpPin },
+        failure,
+      );
+    }
+    // Without PAR the pin is never put into a URL: the step-up still enforces the same person.
+    if (loginHint !== undefined) params.login_hint = loginHint;
     return client.buildAuthorizationUrl(setup.config, params).href;
+  }
+
+  /** A pushed authorization request (client-authenticated, outbound guard); its request_uri URL. */
+  async #pushedAuthorization(
+    method: OidcLoginMethod,
+    config: client.Configuration,
+    params: Record<string, string>,
+    failure: FailureContext,
+  ): Promise<string> {
+    try {
+      const url = await withOutboundContext({ loginMethodId: method.id, purpose: "oidc_par" }, () =>
+        client.buildAuthorizationUrlWithPAR(config, params),
+      );
+      return url.href;
+    } catch (error) {
+      this.#log.warn(
+        {
+          loginMethodId: method.id,
+          reason: classifyUpstreamError(error),
+          error: error instanceof Error ? error.name : "unknown",
+        },
+        "upstream pushed authorization request failed",
+      );
+      this.#options.upstream.forget(method.id);
+      await this.#auditFailure("upstream_unavailable", failure);
+      throw new FederationError("upstream_unavailable", "Upstream IdP unavailable");
+    }
   }
 
   /**

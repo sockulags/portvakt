@@ -6,8 +6,11 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.List;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 import se.portvakt.sdk.PortvaktConfig;
@@ -24,13 +27,11 @@ import se.portvakt.sdk.PortvaktClient;
 class DemoSecurityHeaders extends OncePerRequestFilter {
   private final String policy;
 
-  DemoSecurityHeaders(PortvaktClient portvakt, DemoProperties properties) {
+  DemoSecurityHeaders(PortvaktClient portvakt, DemoProperties properties, Environment environment) {
     PortvaktConfig config = portvakt.config();
     if (properties.production()) {
-      if (!config.issuer().startsWith("https://")) throw new IllegalStateException("demo.production: the issuer must be https");
-      if (DemoProperties.DEV_CLIENT_SECRET.equals(clientSecret(config))) {
-        throw new IllegalStateException("demo.production: the development client secret is refused");
-      }
+      List<String> issues = productionIssues(config, environment);
+      if (!issues.isEmpty()) throw new IllegalStateException("demo.production: " + String.join("; ", issues));
     }
     URI issuer = URI.create(config.issuer());
     String origin = issuer.getScheme() + "://" + issuer.getHost() + (issuer.getPort() < 0 ? "" : ":" + issuer.getPort());
@@ -43,6 +44,24 @@ class DemoSecurityHeaders extends OncePerRequestFilter {
             "base-uri 'none'",
             "frame-ancestors 'none'",
             "form-action 'self' " + origin);
+  }
+
+  /** What {@code demo.production=true} refuses: development values and insecure transport. */
+  static List<String> productionIssues(PortvaktConfig config, Environment environment) {
+    List<String> issues = new ArrayList<>();
+    if (!config.issuer().startsWith("https://")) issues.add("the issuer must be https");
+    if (config.allowInsecureRequests()) issues.add("portvakt.allow-insecure-requests must be false");
+    if (DemoProperties.DEV_CLIENT_SECRET.equals(clientSecret(config))) {
+      issues.add("the development client secret is refused");
+    }
+    if (!environment.getProperty("server.servlet.session.cookie.secure", Boolean.class, false)) {
+      issues.add("the session cookie must be Secure (server.servlet.session.cookie.secure)");
+    }
+    String sameSite = environment.getProperty("server.servlet.session.cookie.same-site");
+    if (sameSite == null || sameSite.isBlank() || sameSite.equalsIgnoreCase("none")) {
+      issues.add("the session cookie needs SameSite lax or strict");
+    }
+    return issues;
   }
 
   private static String clientSecret(PortvaktConfig config) {

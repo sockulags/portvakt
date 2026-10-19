@@ -7,7 +7,9 @@ import { MockIdp } from "../../src/pages/mock-idp";
 /**
  * Scenario 7: step-up. Maja signs in with mock BankID (loa3); "Kräv högre säkerhetsnivå" asks for
  * loa4, which only "Mock BankID hög (OIDC)" provides, so Portvakt sends her straight there (no
- * chooser), naming her by personal identity number (`pinLoginHint`); the demo then shows loa4.
+ * chooser), naming her by personal identity number (`pinLoginHint`, sent only in a pushed
+ * authorization request: the number never appears in a browser URL); the mock signs her in by it
+ * without its persona page, and the demo then shows loa4.
  */
 const MAJA_PIN = "197811234561";
 
@@ -29,17 +31,22 @@ for (const { demo: which, title } of cases) {
     await demo.expectSignedIn();
     await expect(demo.field("user-acr")).toHaveText("Tillitsnivå 3");
 
-    // The upstream authorization request of the step-up: the loa4 method, for Maja.
+    // The upstream authorization request of the step-up: the loa4 method, for Maja, by PAR.
+    const visited: string[] = [];
+    page.on("request", (request) => {
+      if (request.isNavigationRequest()) visited.push(request.url());
+    });
     const upstream = page.waitForRequest(
       (request) =>
         request.isNavigationRequest() &&
-        request.url().startsWith(`${URLS.mockIdp}/bankid/`) &&
-        new URL(request.url()).searchParams.get("login_hint") === MAJA_PIN,
+        request.url().startsWith(`${URLS.mockIdp}/bankid/auth`) &&
+        new URL(request.url()).searchParams.has("request_uri"),
     );
     await demo.stepUp();
     const request = await upstream;
-    expect(new URL(request.url()).searchParams.get("acr_values")).toBe(LOA4);
+    expect(new URL(request.url()).searchParams.get("login_hint")).toBeNull();
     await demo.expectSignedIn();
+    expect(visited.filter((url) => url.includes(MAJA_PIN))).toEqual([]);
     await expect(login.view).toHaveCount(0);
     await expect(demo.field("user-acr")).toHaveText("Tillitsnivå 4");
     await expect(demo.field("user-name")).toHaveText("Maja Högnivå");

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   httpMetricsMiddleware,
+  ipRateLimitKey,
   metricsHandler,
   MetricRegistry,
   requestContextMiddleware,
@@ -20,7 +21,11 @@ import express, { type Express, type RequestHandler } from "express";
 import type { AdminConfig } from "./config.js";
 import { adminRouteTemplate } from "./observability.js";
 import { apiProxy } from "./proxy.js";
-import { SLUG, TenantClients, TenantLookupError } from "./tenants.js";
+import { SLUG, TenantClients, TenantLookupError, TenantLookupLimitedError } from "./tenants.js";
+
+/** The rate-limit key of the client IP (trust proxy decides it; IPv6 by its /64). */
+const clientKey = (req: express.Request): string =>
+  ipRateLimitKey(req.ip ?? req.socket.remoteAddress ?? "unknown");
 
 export interface AdminAppOptions {
   /** Default: a MemoryStore (development; production configures Postgres in main.ts). */
@@ -144,7 +149,7 @@ export function createAdminApp(config: AdminConfig, options: AdminAppOptions = {
       next();
       return;
     }
-    const decision = loginLimit.take(req.ip ?? req.socket.remoteAddress ?? "unknown");
+    const decision = loginLimit.take(clientKey(req));
     if (decision.allowed) {
       next();
       return;
@@ -161,12 +166,28 @@ export function createAdminApp(config: AdminConfig, options: AdminAppOptions = {
   };
   app.use(limitLogins);
 
-  const bffOf = async (path: string) => {
-    const slug = TENANT_PATH.exec(path)?.[1];
-    return slug === undefined ? undefined : clients.get(slug);
+  const bffOf = async (req: express.Request) => {
+    const slug = TENANT_PATH.exec(req.path)?.[1];
+    return slug === undefined ? undefined : clients.get(slug, clientKey(req));
   };
   const unavailable = (res: express.Response): void => {
     res.status(503).set("Retry-After", "5").json({ error: "unavailable" });
+  };
+  /** A failed tenant lookup: 429 when the caller looked up too many slugs, else 503. */
+  const lookupFailed = (res: express.Response, error: unknown): boolean => {
+    if (error instanceof TenantLookupLimitedError) {
+      refused.inc({ limit: "tenant_lookup" });
+      res
+        .status(429)
+        .set({ "Retry-After": String(error.retryAfterSeconds), "Cache-Control": "no-store" })
+        .json({ error: "rate_limited" });
+      return true;
+    }
+    if (error instanceof TenantLookupError) {
+      unavailable(res);
+      return true;
+    }
+    return false;
   };
 
   // The tenant's BFF routes (its mount path is /t/{slug}/auth); unknown tenants get 404.
@@ -175,21 +196,20 @@ export function createAdminApp(config: AdminConfig, options: AdminAppOptions = {
       next();
       return;
     }
-    bffOf(req.path).then(
+    bffOf(req).then(
       (bff) => {
         if (bff === undefined) next();
         else bff(req, res, next);
       },
       (error: unknown) => {
-        if (error instanceof TenantLookupError) unavailable(res);
-        else next(error);
+        if (!lookupFailed(res, error)) next(error);
       },
     );
   });
 
   app.all(
     "/t/:slug/api/*rest",
-    apiProxy(config, (req) => bffOf(req.path), logger),
+    apiProxy(config, (req) => bffOf(req), logger),
   );
 
   const webDir = config.webDir;
@@ -220,10 +240,9 @@ export function createAdminApp(config: AdminConfig, options: AdminAppOptions = {
   app.get("/t/:slug/{*page}", async (req, res) => {
     let bff;
     try {
-      bff = await clients.get(req.params.slug);
+      bff = await clients.get(req.params.slug, clientKey(req));
     } catch (error) {
-      if (!(error instanceof TenantLookupError)) throw error;
-      unavailable(res);
+      if (!lookupFailed(res, error)) throw error;
       return;
     }
     if (bff === undefined) {

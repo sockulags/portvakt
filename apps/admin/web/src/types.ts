@@ -42,7 +42,8 @@ export type WarningCode =
   | "saml_unsigned_response"
   | "saml_minimum_comparison"
   | "saml_missing_logo"
-  | "saml_missing_description";
+  | "saml_missing_description"
+  | "pin_login_hint_without_par";
 
 export interface Warning {
   readonly code: WarningCode;
@@ -99,6 +100,7 @@ export interface Application {
   readonly roles: readonly DeclaredRole[];
   readonly attributeKeys: readonly DeclaredKey[];
   readonly allowedExtraScopes: readonly ("pin" | "hsa")[];
+  readonly serviceAudiences: readonly string[];
   readonly representationMode: RepresentationMode;
   readonly etag: string;
 }

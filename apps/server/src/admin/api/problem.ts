@@ -25,6 +25,10 @@ export const PROBLEM_CODES = {
   invalid_token: { status: 401, title: "The access token is invalid" },
   forbidden: { status: 403, title: "Not allowed" },
   service_token_not_allowed: { status: 403, title: "Service tokens cannot administer" },
+  acr_too_low: {
+    status: 403,
+    title: "The sign-in's level of assurance is below what administration requires",
+  },
   representation_not_allowed: {
     status: 403,
     title: "Tokens issued when representing cannot administer",

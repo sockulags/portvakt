@@ -10,11 +10,13 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
 /** The demo without a Portvakt: it starts (Portvakt is contacted lazily) and serves its pages. */
 @SpringBootTest(properties = "portvakt.issuer=http://localhost:9/t/demo")
 @AutoConfigureMockMvc
+@ActiveProfiles("local")
 class DemoApplicationTest {
   @Autowired MockMvc mvc;
 

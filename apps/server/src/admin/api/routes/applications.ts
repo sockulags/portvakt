@@ -6,6 +6,7 @@ import {
   redirectUriSchema,
   REPRESENTATION_MODES,
   SECRET_AUTH_METHODS,
+  serviceAudiencesSchema,
   TENANT_PLACEHOLDER,
   type Application,
   type ClientAuthInput,
@@ -23,6 +24,7 @@ import type { Caller } from "../auth.js";
 import {
   actorOf,
   assertPlatformReachable,
+  endLogins,
   inTransaction,
   lockRow,
   targetTenant,
@@ -59,6 +61,9 @@ export const applicationSchema = z
     roles: z.array(declaredSchema),
     attributeKeys: z.array(declaredKeySchema),
     allowedExtraScopes: z.array(z.enum(EXTRA_SCOPES)),
+    serviceAudiences: z
+      .array(z.string())
+      .describe("client_ids this application may request client_credentials tokens for."),
     representationMode: z.enum(REPRESENTATION_MODES),
     createdAt: isoDateTime,
     updatedAt: isoDateTime,
@@ -89,6 +94,7 @@ export const applicationView = (application: Application): ApplicationView =>
     roles: application.roles.map((role) => ({ ...role })),
     attributeKeys: application.attributeKeys.map((key) => ({ ...key })),
     allowedExtraScopes: [...application.allowedExtraScopes],
+    serviceAudiences: [...application.serviceAudiences],
     representationMode: application.representationMode,
     createdAt: iso(application.createdAt),
     updatedAt: iso(application.updatedAt),
@@ -106,6 +112,7 @@ const audited = (application: Application, secretChanged = false) => ({
   redirectUris: [...application.redirectUris],
   postLogoutRedirectUris: [...application.postLogoutRedirectUris],
   allowedExtraScopes: [...application.allowedExtraScopes],
+  serviceAudiences: [...application.serviceAudiences],
   representationMode: application.representationMode,
   roles: application.roles.map((role) => role.role),
   attributeKeys: application.attributeKeys.map((key) => key.key),
@@ -158,6 +165,11 @@ const clientAuthInput = z.union([
   z.object({ method: z.literal("private_key_jwt"), jwks: clientJwksSchema }).strict(),
 ]);
 
+const SERVICE_AUDIENCES_DESCRIPTION =
+  "The client_ids this application may request client_credentials (service) tokens for, with " +
+  "`resource=urn:portvakt:app:{client_id}`; the target must also be enabled in the tenant. " +
+  "Empty (the default): no service tokens for other applications.";
+
 const createBody = strictBody({
   clientId: clientIdSchema,
   name: displayNameSchema,
@@ -182,6 +194,7 @@ const createBody = strictBody({
     .default([])
     .refine((keys) => unique(keys, (k) => k.key), "attribute keys must be unique"),
   allowedExtraScopes: z.array(z.enum(EXTRA_SCOPES)).default([]),
+  serviceAudiences: serviceAudiencesSchema.default([]).describe(SERVICE_AUDIENCES_DESCRIPTION),
   representationMode: z.enum(REPRESENTATION_MODES).default("none"),
 });
 
@@ -206,6 +219,7 @@ const updateBody = strictBody({
     .optional()
     .describe("The whole list: a removed key is removed with every assignment of it."),
   allowedExtraScopes: z.array(z.enum(EXTRA_SCOPES)).optional(),
+  serviceAudiences: serviceAudiencesSchema.optional().describe(SERVICE_AUDIENCES_DESCRIPTION),
   representationMode: z.enum(REPRESENTATION_MODES).optional(),
 });
 
@@ -567,7 +581,21 @@ export function applicationRoutes(deps: AdminDeps): AdminRoute[] {
           if (current.enabled === body.enabled) return current;
           if (body.enabled)
             await tx.repos.applications.enableForTenant(tenant.id, params.applicationId);
-          else await tx.repos.applications.disableForTenant(tenant.id, params.applicationId);
+          else {
+            await tx.repos.applications.disableForTenant(tenant.id, params.applicationId);
+            // The application's grants in the tenant end now; enabling it again starts afresh.
+            await endLogins(
+              tx,
+              caller,
+              tenant.id,
+              { clientId: current.application.clientId },
+              {
+                reason: "application_disabled",
+                subject: { type: "application", id: params.applicationId },
+                clientId: current.application.clientId,
+              },
+            );
+          }
           await assertPlatformReachable(tx, tenant);
           await tx.record({
             action: "admin.tenant_application.update",
@@ -681,6 +709,17 @@ export function applicationRoutes(deps: AdminDeps): AdminRoute[] {
           });
           await tx.repos.applications.removeFromTenant(tenant.id, params.applicationId);
           await assertPlatformReachable(tx, tenant);
+          await endLogins(
+            tx,
+            caller,
+            tenant.id,
+            { clientId: current.application.clientId },
+            {
+              reason: "application_detached",
+              subject: { type: "application", id: params.applicationId },
+              clientId: current.application.clientId,
+            },
+          );
           await tx.record({
             action: "admin.tenant_application.detach",
             tenantId: tenant.id,

@@ -58,7 +58,10 @@ export interface PortvaktClientConfig {
     readonly cooldownSeconds?: number;
     /**
      * While refetches fail, the last keys stay in use until `cacheMaxAgeSeconds` plus this long
-     * after their last successful fetch; then validation fails as unavailable. Default 86400 s.
+     * after their last successful fetch; then validation fails as unavailable. Default 3600 s:
+     * longer keeps APIs answering through a longer Portvakt outage, but also keeps a key that
+     * an emergency rotation retired trusted for longer while this application cannot reach
+     * Portvakt.
      */
     readonly staleMaxAgeSeconds?: number;
   };
@@ -162,10 +165,10 @@ function configSchema(allowInsecure: () => boolean) {
         .object({
           cacheMaxAgeSeconds: secondsSchema(86_400).default(300),
           cooldownSeconds: secondsSchema(3600).default(30),
-          staleMaxAgeSeconds: secondsSchema(7 * 86_400).default(86_400),
+          staleMaxAgeSeconds: secondsSchema(7 * 86_400).default(3600),
         })
         .strict()
-        .default({ cacheMaxAgeSeconds: 300, cooldownSeconds: 30, staleMaxAgeSeconds: 86_400 }),
+        .default({ cacheMaxAgeSeconds: 300, cooldownSeconds: 30, staleMaxAgeSeconds: 3600 }),
       outageGraceSeconds: secondsSchema(7 * 86_400).default(0),
       acrRanking: z
         .array(z.string().min(1).max(255))

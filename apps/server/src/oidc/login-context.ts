@@ -25,6 +25,13 @@ import { OidcPayloadRepository } from "../repositories/oidc-payloads.js";
  */
 
 const acrSchema = z.string().min(1).max(255);
+
+/** An upstream SAML session of a broker session, with the login method it belongs to. */
+export const sessionUpstreamSchema = upstreamSessionSchema.extend({ loginMethodId: z.uuid() });
+export type SessionUpstream = z.infer<typeof sessionUpstreamSchema>;
+
+/** At most this many upstream sessions are remembered per broker session (newest first). */
+export const MAX_SESSION_UPSTREAMS = 8;
 const amrSchema = z.array(z.string().min(1).max(64)).max(16);
 const epochSchema = z.number().int().positive();
 
@@ -53,10 +60,11 @@ export const sessionRecordSchema = z
     /** Epoch seconds of the last authorization or refresh in this session. */
     lastActivityAt: epochSchema,
     /**
-     * The upstream SAML session of the latest login (NameID, SessionIndex): single logout
-     * towards the IdP, and IdP-initiated logout finds the session by it.
+     * Every upstream SAML session of this broker session's logins (NameID, SessionIndex), newest
+     * first: an RP-initiated logout sends single logout to each IdP, and an IdP-initiated logout
+     * from any of them finds (and ends) the broker session.
      */
-    upstream: upstreamSessionSchema.optional(),
+    upstreams: z.array(sessionUpstreamSchema).max(MAX_SESSION_UPSTREAMS).optional(),
   })
   .strict();
 export type SessionRecord = z.infer<typeof sessionRecordSchema>;
@@ -107,6 +115,33 @@ export const REPRESENTATION_RESULT_KEY = "portvakt_representation";
 /** oidc_payloads kinds; distinct from every oidc-provider model name. */
 export const SESSION_RECORD_KIND = "PortvaktSession";
 export const GRANT_LOGIN_KIND = "PortvaktGrantLogin";
+/**
+ * One row per upstream session of a broker session (`uid` = {@link upstreamSessionKey}, payload
+ * `{ sessionUid }`): `oidc_payloads.uid` holds one key per row, and a session can have several.
+ */
+export const UPSTREAM_INDEX_KIND = "PortvaktUpstreamSession";
+
+const upstreamIndexSchema = z.object({ sessionUid: z.string().min(1).max(512) }).strict();
+
+/**
+ * The upstream sessions of a broker session after a login: the new one first, earlier ones of
+ * the same person kept (one per login method and NameID), at most {@link MAX_SESSION_UPSTREAMS}.
+ */
+export function mergeUpstreams(
+  earlier: readonly SessionUpstream[],
+  latest: SessionUpstream | undefined,
+): SessionUpstream[] | undefined {
+  const merged = [
+    ...(latest === undefined ? [] : [latest]),
+    ...earlier.filter(
+      (item) =>
+        latest === undefined ||
+        item.loginMethodId !== latest.loginMethodId ||
+        item.nameIdIndex !== latest.nameIdIndex,
+    ),
+  ].slice(0, MAX_SESSION_UPSTREAMS);
+  return merged.length === 0 ? undefined : merged;
+}
 
 const MAX_ID_LENGTH = 512;
 
@@ -137,56 +172,68 @@ export class LoginStateStore {
   }
 
   /**
-   * Stores the session record until `retainUntil` (at least a second, never immortal). A record
-   * with an upstream SAML session is indexed by it (`uid` column), for IdP-initiated logout.
+   * Stores the session record until `retainUntil` (at least a second, never immortal), and one
+   * index row per upstream SAML session (for IdP-initiated logout), in one transaction.
    */
   async saveSession(sessionUid: string, record: SessionRecord): Promise<void> {
     const parsed = sessionRecordSchema.parse(record);
-    await this.#payloads.upsert(
-      this.#tenantId,
-      SESSION_RECORD_KIND,
-      sessionUid,
-      parsed,
-      ttlUntil(record.retainUntil),
-      parsed.upstream === undefined
-        ? {}
-        : { uid: upstreamSessionKey(parsed.loginMethodId, parsed.upstream.nameIdIndex) },
-    );
+    const ttl = ttlUntil(record.retainUntil);
+    const write = async (payloads: OidcPayloadRepository): Promise<void> => {
+      await payloads.upsert(this.#tenantId, SESSION_RECORD_KIND, sessionUid, parsed, ttl);
+      for (const upstream of parsed.upstreams ?? []) {
+        const key = upstreamSessionKey(upstream.loginMethodId, upstream.nameIdIndex);
+        await payloads.upsert(
+          this.#tenantId,
+          UPSTREAM_INDEX_KIND,
+          `${sessionUid}|${key}`,
+          { sessionUid },
+          ttl,
+          { uid: key },
+        );
+      }
+    };
+    if (parsed.upstreams === undefined) await write(this.#payloads);
+    else await this.#db.transaction((tx) => write(new OidcPayloadRepository(tx)));
   }
 
   /**
-   * Ends every broker session whose latest login came through `loginMethodId` with this upstream
-   * NameID (and, when given, one of the SessionIndexes): IdP-initiated single logout. The NameID
-   * and SessionIndexes arrive as their blind indexes under every configured master key. The
-   * oidc-provider session and its grants (with their tokens) are deleted, so the next
-   * authorization needs a login and refresh tokens stop working. Returns how many ended.
+   * Ends every broker session with an upstream session of `loginMethodId` with this upstream
+   * NameID (and, when given, one of the SessionIndexes), whichever of the session's logins it
+   * was: IdP-initiated single logout. The NameID and SessionIndexes arrive as their blind
+   * indexes under every configured master key. The oidc-provider session and its grants (with
+   * their tokens) are deleted, so the next authorization needs a login and refresh tokens stop
+   * working. Returns how many ended.
    */
   async endSessionsOfUpstream(
     loginMethodId: string,
     nameIdIndexes: readonly string[],
     sessionIndexIndexes: readonly string[] | undefined,
   ): Promise<number> {
-    let ended = 0;
+    const sessionUids = new Set<string>();
     for (const nameIdIndex of nameIdIndexes) {
-      for (const { id, payload } of await this.#payloads.listByUid(
+      for (const { payload } of await this.#payloads.listByUid(
         this.#tenantId,
-        SESSION_RECORD_KIND,
+        UPSTREAM_INDEX_KIND,
         upstreamSessionKey(loginMethodId, nameIdIndex),
       )) {
-        const record = sessionRecordSchema.safeParse(payload);
-        if (!record.success || record.data.loginMethodId !== loginMethodId) continue;
-        const upstream = record.data.upstream;
-        if (upstream === undefined || !nameIdIndexes.includes(upstream.nameIdIndex)) continue;
-        if (
-          sessionIndexIndexes !== undefined &&
-          (upstream.sessionIndexIndex === undefined ||
-            !sessionIndexIndexes.includes(upstream.sessionIndexIndex))
-        ) {
-          continue;
-        }
-        await this.endSession(id);
-        ended += 1;
+        const index = upstreamIndexSchema.safeParse(payload);
+        if (index.success) sessionUids.add(index.data.sessionUid);
       }
+    }
+    let ended = 0;
+    for (const sessionUid of sessionUids) {
+      const record = await this.findSession(sessionUid);
+      const matches = record?.upstreams?.some(
+        (upstream) =>
+          upstream.loginMethodId === loginMethodId &&
+          nameIdIndexes.includes(upstream.nameIdIndex) &&
+          (sessionIndexIndexes === undefined ||
+            (upstream.sessionIndexIndex !== undefined &&
+              sessionIndexIndexes.includes(upstream.sessionIndexIndex))),
+      );
+      if (matches !== true) continue;
+      await this.endSession(sessionUid);
+      ended += 1;
     }
     return ended;
   }
@@ -202,6 +249,11 @@ export class LoginStateStore {
       for (const { grantId } of Object.values(authorizations.data)) {
         if (grantId !== undefined) await this.#payloads.revokeGrant(this.#tenantId, grantId);
       }
+    }
+    const record = await this.findSession(sessionUid);
+    for (const upstream of record?.upstreams ?? []) {
+      const key = upstreamSessionKey(upstream.loginMethodId, upstream.nameIdIndex);
+      await this.#payloads.destroy(this.#tenantId, UPSTREAM_INDEX_KIND, `${sessionUid}|${key}`);
     }
     await this.#payloads.destroyByUid(this.#tenantId, "Session", sessionUid);
     await this.#payloads.destroy(this.#tenantId, SESSION_RECORD_KIND, sessionUid);

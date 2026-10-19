@@ -273,4 +273,23 @@ class PortvaktAutoConfigurationTest {
               assertThat(context).doesNotHaveBean("portvaktLoginFilterChain");
             });
   }
+
+  @Test
+  void warnsAboutAnInsecureSessionCookieInAProductionProfile() {
+    org.springframework.mock.env.MockEnvironment production = new org.springframework.mock.env.MockEnvironment();
+    production.setActiveProfiles("prod");
+    assertThat(se.portvakt.spring.login.PortvaktCookieCheck.warnings(production))
+        .hasSize(2)
+        .anySatisfy(warning -> assertThat(warning).startsWith("server.servlet.session.cookie.secure is not true"))
+        .anySatisfy(warning -> assertThat(warning).startsWith("server.servlet.session.cookie.same-site is not set"));
+    production.setProperty("server.servlet.session.cookie.secure", "true");
+    production.setProperty("server.servlet.session.cookie.same-site", "lax");
+    assertThat(se.portvakt.spring.login.PortvaktCookieCheck.warnings(production)).isEmpty();
+    // Outside a production profile nothing is said (local http development).
+    assertThat(se.portvakt.spring.login.PortvaktCookieCheck.warnings(new org.springframework.mock.env.MockEnvironment()))
+        .isEmpty();
+    runner
+        .withPropertyValues("portvakt.client-secret=" + SECRET, "portvakt.login.enabled=true")
+        .run(context -> assertThat(context).hasNotFailed().hasBean("portvaktCookieCheck"));
+  }
 }

@@ -135,7 +135,7 @@ function SignedIn({
   const call = async () => {
     setApi({ kind: "busy" });
     try {
-      const result = await callApi();
+      const result = await callApi(csrfToken);
       if (result === null) {
         onSessionEnded();
         return;

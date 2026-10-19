@@ -331,6 +331,7 @@ export class LoginMethodRepository {
       claimMapping: data.claimMapping ?? current.claimMapping,
       trustPinForRepresentation:
         data.trustPinForRepresentation ?? current.trustPinForRepresentation,
+      linkByPin: data.linkByPin ?? current.linkByPin,
     });
     const secretChanged = data.clientSecret !== undefined;
     const encryptedSecret =
@@ -415,7 +416,10 @@ export class LoginMethodRepository {
     requireUuids({ tenantId });
     const data = parseInput(createSamlLoginMethodInputSchema, input);
     this.#checkMaxAge(data.sessionPolicy.maxAgeSeconds);
-    this.#checkSamlRules(data.saml, data.assertedAcr, data.trustPinForRepresentation);
+    this.#checkSamlRules(data.saml, data.assertedAcr, {
+      trustPinForRepresentation: data.trustPinForRepresentation,
+      linkByPin: data.linkByPin,
+    });
     const id = randomUUID();
     await this.#db.transaction(async (tx) => {
       await mapDbErrors(() =>
@@ -468,11 +472,11 @@ export class LoginMethodRepository {
     const current = await this.#requireSaml(tenantId, id);
     const settings = mergeSamlSettings(current.saml, data.saml ?? {});
     const assertedAcr = data.assertedAcr ?? current.assertedAcr;
-    this.#checkSamlRules(
-      settings,
-      assertedAcr,
-      data.trustPinForRepresentation ?? current.trustPinForRepresentation,
-    );
+    this.#checkSamlRules(settings, assertedAcr, {
+      trustPinForRepresentation:
+        data.trustPinForRepresentation ?? current.trustPinForRepresentation,
+      linkByPin: data.linkByPin ?? current.linkByPin,
+    });
     await this.#db.transaction(async (tx) => {
       const rows = await mapDbErrors(() =>
         tx.query(
@@ -677,6 +681,7 @@ export class LoginMethodRepository {
   #checkRules(
     method: Parameters<typeof loginMethodRuleViolations>[0] & {
       readonly trustPinForRepresentation: boolean;
+      readonly linkByPin: boolean;
     },
   ): void {
     const issues = [
@@ -692,15 +697,12 @@ export class LoginMethodRepository {
   #checkSamlRules(
     settings: ParsedSamlSettings,
     assertedAcr: string,
-    trustPinForRepresentation: boolean,
+    pinFlags: { readonly trustPinForRepresentation: boolean; readonly linkByPin: boolean },
   ): void {
     const issues = [
       ...samlSettingsViolations(settings, assertedAcr, this.#acrRanking),
       // SAML methods always map personalIdentityNumber (the attribute name is required).
-      ...pinTrustViolations(
-        { trustPinForRepresentation, assertedAcr, mapsPin: true },
-        this.#pinTrustRanking,
-      ),
+      ...pinTrustViolations({ ...pinFlags, assertedAcr, mapsPin: true }, this.#pinTrustRanking),
     ];
     if (issues.length > 0) throw new ValidationError(issues);
   }

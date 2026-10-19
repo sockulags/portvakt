@@ -20,6 +20,7 @@ export {
 } from "./http-metrics.js";
 export {
   formatRateLimit,
+  ipRateLimitKey,
   parseRateLimit,
   RateLimiterSet,
   TokenBucketLimiter,

@@ -339,10 +339,16 @@ describe.skipIf(ts === undefined)("admin API guards", () => {
       const { repos } = ts!.db;
       const a = await createLoginMethod(repos, x.tenant.id, {
         displayName: "Link A",
+        kind: "citizen",
+        assertedAcr: "http://id.elegnamnden.se/loa/1.0/loa3",
+        claimMapping: { subject: "sub", pin: "pin", acr: "acr" },
         linkByPin: true,
       });
       const b = await createLoginMethod(repos, x.tenant.id, {
         displayName: "Link B",
+        kind: "citizen",
+        assertedAcr: "http://id.elegnamnden.se/loa/1.0/loa3",
+        claimMapping: { subject: "sub", pin: "pin", acr: "acr" },
         linkByPin: true,
       });
       const first = await login(repos, x.tenant.id, a, "subject-a", { pin: "199001012385" });

@@ -57,6 +57,9 @@ for (const [network, prefix] of [
 for (const [network, prefix] of [
   ["::", 128],
   ["::1", 128],
+  // IPv4-compatible addresses (deprecated, RFC 4291 2.5.5.1): ::127.0.0.1 is ::7f00:1, which
+  // some stacks still route to the embedded IPv4 address.
+  ["::", 96],
   ["64:ff9b::", 96],
   ["64:ff9b:1::", 48],
   ["2002::", 16],

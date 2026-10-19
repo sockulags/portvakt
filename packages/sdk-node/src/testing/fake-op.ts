@@ -40,6 +40,12 @@ export interface FakeOp {
   down: boolean;
   /** Token, JWKS and discovery requests answer this 5xx with an HTML page (a proxy's error). */
   serverError: number | undefined;
+  /**
+   * Code and refresh token grants answer this instead (a rate limit, `temporarily_unavailable`):
+   * the status, the body (JSON when an object, else text/html) and an optional Retry-After.
+   */
+  tokenError:
+    { readonly status: number; readonly body: unknown; readonly retryAfter?: string } | undefined;
   readonly counters: {
     refresh: number;
     jwks: number;
@@ -118,6 +124,7 @@ export async function startFakeOp(): Promise<FakeOp> {
     unpublished: new Set(),
     down: false,
     serverError: undefined,
+    tokenError: undefined,
     counters: { refresh: 0, jwks: 0, discovery: 0, token: 0, failed: 0 },
     authorizations: [],
     presentedRefreshTokens: [],
@@ -278,6 +285,27 @@ export async function startFakeOp(): Promise<FakeOp> {
         return;
       }
       const grantType = body.get("grant_type");
+      const refused = op.tokenError;
+      if (refused !== undefined && grantType !== "client_credentials") {
+        if (grantType === "refresh_token") {
+          op.counters.refresh += 1;
+          op.presentedRefreshTokens.push(body.get("refresh_token") ?? "");
+        }
+        const isJson = typeof refused.body === "object" && refused.body !== null;
+        res.writeHead(refused.status, {
+          "content-type": isJson ? "application/json" : "text/html",
+          "cache-control": "no-store",
+          ...(refused.retryAfter === undefined ? {} : { "retry-after": refused.retryAfter }),
+        });
+        res.end(
+          isJson
+            ? JSON.stringify(refused.body)
+            : typeof refused.body === "string"
+              ? refused.body
+              : "",
+        );
+        return;
+      }
       if (grantType === "authorization_code") {
         const entry = codes.get(body.get("code") ?? "");
         codes.delete(body.get("code") ?? "");

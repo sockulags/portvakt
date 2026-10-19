@@ -41,7 +41,9 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: docker
-    # Dockerfiles (M9) and the images the scripts use live in deploy/.
+    # Dockerfiles (M9) and deploy/images.Dockerfile, the pinned images of the tooling (maven for
+    # the Java builds, postgres). Copy a new postgres reference into docker-compose.dev.yml and
+    # ci.yml as well: npm run images:check fails until they match.
     directory: /deploy
     schedule:
       interval: weekly

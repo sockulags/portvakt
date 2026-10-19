@@ -43,6 +43,13 @@ export interface AdminAuthOptions {
   readonly publicUrl: string;
   readonly keyCache: SigningKeyCache;
   readonly repos: Repositories;
+  /**
+   * ADMIN_MIN_ACR: tokens whose `acr` ranks lower in `acrRanking` (or is unranked) are refused
+   * (`acr_too_low`). Undefined: no minimum.
+   */
+  readonly minAcr?: string | undefined;
+  /** ACR_RANKING, lowest first. */
+  readonly acrRanking?: readonly string[];
 }
 
 /**
@@ -50,7 +57,8 @@ export interface AdminAuthOptions {
  * `iss` must be exactly `{PUBLIC_URL}/t/{tid}` (Portvakt signs every tenant's tokens with the same
  * keys, so a token's tenant is only proven by the issuer it names), the audience exactly
  * `portvakt-admin`, `typ` `at+jwt` and the algorithm ES256. The tenant must be active and still
- * have `portvakt-admin` enabled. Service tokens and representation tokens are refused. The
+ * have `portvakt-admin` enabled. Service tokens and representation tokens are refused, and so
+ * are tokens below ADMIN_MIN_ACR when it is set. The
  * token's roles are intersected with the roles the person holds right now (direct assignments
  * and rules against the groups stored on the identity used to sign in), so a removed role stops
  * working at the next request.
@@ -107,6 +115,13 @@ export class AdminAuthenticator {
     if (!claims.success) throw new ApiError("invalid_token");
     // The token's tenant claim must name the issuer's tenant.
     if (claims.data.tid !== slug) throw new ApiError("invalid_token");
+    const { minAcr, acrRanking = [] } = this.#options;
+    if (minAcr !== undefined) {
+      const minimum = acrRanking.indexOf(minAcr);
+      if (minimum < 0 || acrRanking.indexOf(claims.data.acr) < minimum) {
+        throw new ApiError("acr_too_low");
+      }
+    }
 
     const { repos } = this.#options;
     const tenant = await repos.tenants.findActiveBySlug(slug);

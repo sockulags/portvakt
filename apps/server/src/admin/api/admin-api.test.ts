@@ -337,6 +337,53 @@ describe.skipIf(ts === undefined)("admin API", () => {
       });
     });
 
+    it("sets serviceAudiences (default empty), validated and audited", async () => {
+      const clientId = `svc-${Date.now()}`;
+      const created = await call<{ application: Record<string, unknown> }>(
+        tokens.platform,
+        "POST",
+        "/applications",
+        {
+          body: {
+            clientId,
+            name: "Service caller",
+            clientAuth: { method: "client_secret_basic" },
+            redirectUris: ["https://svc.example.test/cb"],
+          },
+        },
+      );
+      expect(created.status).toBe(201);
+      const application = created.body.application;
+      expect(application.serviceAudiences).toEqual([]);
+      const changed = await call<{ application: Record<string, unknown> }>(
+        tokens.platform,
+        "PATCH",
+        `/applications/${application.id as string}`,
+        { body: { serviceAudiences: ["archive-service"] }, ifMatch: application.etag as string },
+      );
+      expect(changed.status).toBe(200);
+      expect(changed.body.application.serviceAudiences).toEqual(["archive-service"]);
+      const invalid = await call(
+        tokens.platform,
+        "PATCH",
+        `/applications/${application.id as string}`,
+        {
+          body: { serviceAudiences: ["a b", "archive-service", "archive-service"] },
+          ifMatch: changed.body.application.etag as string,
+        },
+      );
+      expect(invalid.status).toBe(400);
+      const [update] = (
+        await ts!.db.repos.audit.query(
+          { allTenants: true, tenantId: null },
+          { subjectId: application.id as string, actions: ["admin.application.update"] },
+        )
+      ).events;
+      expect(update?.details.changes).toMatchObject({
+        serviceAudiences: { from: [], to: ["archive-service"] },
+      });
+    });
+
     it("validates redirect URIs and protects portvakt-admin", async () => {
       const bad = await call(tokens.platform, "POST", "/applications", {
         body: {

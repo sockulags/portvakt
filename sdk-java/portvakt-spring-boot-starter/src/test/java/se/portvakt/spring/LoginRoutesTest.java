@@ -28,10 +28,6 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.mock.web.MockHttpSession;
-import org.springframework.security.core.context.SecurityContext;
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
-import org.springframework.security.oauth2.core.oidc.OidcIdToken;
 import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -44,7 +40,6 @@ import org.springframework.web.util.UriComponentsBuilder;
 import se.portvakt.sdk.AcrRanking;
 import se.portvakt.spring.login.PortvaktAccessTokens;
 import se.portvakt.spring.login.PortvaktAuthorizedClientRepository;
-import se.portvakt.spring.login.PortvaktOidcUser;
 import se.portvakt.spring.login.PortvaktSessionState;
 import se.portvakt.spring.login.PortvaktTokenStore;
 
@@ -85,7 +80,9 @@ class LoginRoutesTest {
   @AfterEach
   void reset() {
     PROVIDER.tokenErrorStatus = 0;
+    PROVIDER.tokenRetryAfter = null;
     PROVIDER.tokenDelayMillis = 0;
+    PROVIDER.extraClaims = Map.of();
   }
 
   @DynamicPropertySource
@@ -130,6 +127,8 @@ class LoginRoutesTest {
 
   @Autowired MockMvc mvc;
   @Autowired PortvaktTokenStore store;
+  /** The ID token of the last {@link #session} (to check it never reaches a response). */
+  String lastIdToken;
 
   /** The decoded query parameters of a URL. */
   static Map<String, List<String>> query(String location) {
@@ -296,6 +295,14 @@ class LoginRoutesTest {
   }
 
   MockHttpSession session(String acr, Instant endsAt, Instant lastSeenAt) {
+    try {
+      return signedSession(acr, endsAt, lastSeenAt);
+    } catch (Exception exception) {
+      throw new IllegalStateException(exception);
+    }
+  }
+
+  MockHttpSession signedSession(String acr, Instant endsAt, Instant lastSeenAt) throws Exception {
     long now = Instant.now().getEpochSecond();
     Map<String, Object> claims =
         Map.ofEntries(
@@ -311,19 +318,21 @@ class LoginRoutesTest {
             Map.entry("roles", List.of("handlaggare")),
             Map.entry("attrs", Map.of()),
             Map.entry("name", "Sven Medborgare"),
-            Map.entry("pin", "191212121212"));
-    OidcIdToken idToken = new OidcIdToken("id-token", Instant.ofEpochSecond(now), Instant.ofEpochSecond(now + 300), claims);
-    PortvaktOidcUser user = PortvaktOidcUser.of(idToken);
-    SecurityContext context = SecurityContextHolder.createEmptyContext();
-    context.setAuthentication(new OAuth2AuthenticationToken(user, user.getAuthorities(), "portvakt"));
+            Map.entry("pin", "191212121212"),
+            Map.entry("iat", now),
+            Map.entry("exp", now + 300));
+    // As the login leaves it: the signed ID token next to the tokens in the store, the session
+    // holds the state (grant id, timestamps) only.
+    String idToken = PROVIDER.sign(new java.util.HashMap<>(claims), null);
+    lastIdToken = idToken;
     MockHttpSession session = new MockHttpSession();
-    session.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, context);
     String grantId = PortvaktAuthorizedClientRepository.newGrantId();
     String refresh = "refresh-" + grantId;
     PROVIDER.currentRefreshToken = refresh;
     store.save(
         grantId,
-        new PortvaktTokenStore.StoredTokens("access-1", Instant.now().minusSeconds(5), Instant.now().plusSeconds(300), java.util.Set.of(), refresh),
+        new PortvaktTokenStore.StoredTokens(
+            "access-1", Instant.now().minusSeconds(5), Instant.now().plusSeconds(300), java.util.Set.of(), refresh, idToken),
         endsAt);
     new PortvaktSessionState(Instant.now(), endsAt, null, lastSeenAt, grantId).storeIn(session);
     return session;
@@ -338,7 +347,7 @@ class LoginRoutesTest {
     assertThat((Boolean) JsonPath.read(json, "$.authenticated")).isTrue();
     assertThat((String) JsonPath.read(json, "$.principal.name")).isEqualTo("Sven Medborgare");
     assertThat((List<String>) JsonPath.read(json, "$.principal.roles")).containsExactly("handlaggare");
-    assertThat(json).doesNotContain("191212121212").doesNotContain("id-token").doesNotContain("access-1");
+    assertThat(json).doesNotContain("191212121212").doesNotContain(lastIdToken).doesNotContain("access-1");
     assertThat((String) JsonPath.read(json, "$.csrfToken")).isNotBlank();
     mvc.perform(get("/private").session(session)).andExpect(status().isOk());
 
@@ -376,7 +385,7 @@ class LoginRoutesTest {
         .andExpect(jsonPath("$.error").value("step_up_required"))
         .andExpect(jsonPath("$.acr").value(AcrRanking.LOA4))
         .andExpect(jsonPath("$.stepUpUrl").value("/auth/step-up?acr=http%3A%2F%2Fid.elegnamnden.se%2Floa%2F1.0%2Floa4&returnTo=%2F"));
-    mvc.perform(get("/sensitive").session(loa3).header("Sec-Fetch-Mode", "navigate"))
+    mvc.perform(get("/sensitive").session(loa3).header("Sec-Fetch-Mode", "navigate").header("Sec-Fetch-Site", "same-origin"))
         .andExpect(status().isFound())
         .andExpect(
             result ->
@@ -398,6 +407,129 @@ class LoginRoutesTest {
     mvc.perform(get("/token").session(session).accept("application/json"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.token").value(org.hamcrest.Matchers.startsWith("access-")));
+  }
+
+  /** The interstitial page: its button's GET (path and fields). */
+  static String interstitialTarget(MvcResult result) throws Exception {
+    assertThat(result.getResponse().getStatus()).isEqualTo(200);
+    assertThat(result.getResponse().getHeader("Content-Security-Policy"))
+        .isEqualTo("default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    assertThat(result.getResponse().getHeader("Referrer-Policy")).isEqualTo("same-origin");
+    String page = result.getResponse().getContentAsString();
+    assertThat(page).contains("Fortsätt till inloggning").doesNotContain("<script").doesNotContain("<style");
+    java.util.regex.Matcher action = java.util.regex.Pattern.compile("<form method=\"get\" action=\"([^\"]+)\">").matcher(page);
+    assertThat(action.find()).isTrue();
+    UriComponentsBuilder target = UriComponentsBuilder.fromPath(action.group(1));
+    java.util.regex.Matcher field = java.util.regex.Pattern.compile("name=\"([^\"]+)\" value=\"([^\"]*)\"").matcher(page);
+    while (field.find()) target.queryParam(field.group(1), field.group(2).replace("&#38;", "&"));
+    return target.build().toUriString();
+  }
+
+  @Test
+  void answersCrossSiteNavigationsThatWouldReplaceTheLoginWithAPageThatStartsThemHere() throws Exception {
+    MockHttpSession session = session(AcrRanking.LOA3, Instant.now().plusSeconds(3600));
+    for (String url :
+        List.of(
+            "/auth/step-up?acr=" + AcrRanking.LOA4 + "&returnTo=/cases",
+            "/auth/select-representation?returnTo=/",
+            "/auth/login?prompt=login")) {
+      for (Map<String, String> headers :
+          List.of(
+              Map.of("Sec-Fetch-Site", "cross-site"),
+              Map.of("Sec-Fetch-Site", "same-site"),
+              Map.<String, String>of(),
+              Map.of("Referer", "https://evil.example/"))) {
+        var request = get(url).session(session).header("Sec-Fetch-Mode", "navigate");
+        headers.forEach(request::header);
+        String target = interstitialTarget(mvc.perform(request).andReturn());
+        assertThat(query(target)).isEqualTo(query(url));
+        assertThat(URI.create(target).getPath()).isEqualTo(URI.create(url).getPath());
+        // The button sends the same GET from this page: the flow starts.
+        mvc.perform(get(target).session(session).header("Sec-Fetch-Site", "same-origin")).andExpect(status().isFound());
+      }
+    }
+    // The session's CSRF token as a query parameter no longer counts.
+    MvcResult csrf =
+        mvc.perform(
+                get("/auth/step-up?acr=" + AcrRanking.LOA4 + "&csrf=anything")
+                    .session(session)
+                    .header("Sec-Fetch-Mode", "navigate"))
+            .andReturn();
+    interstitialTarget(csrf);
+    // A deep link behind @RequireAcr from another site: the interstitial instead of a redirect.
+    String deepLink =
+        interstitialTarget(
+            mvc.perform(get("/sensitive").session(session).header("Sec-Fetch-Mode", "navigate").header("Sec-Fetch-Site", "cross-site"))
+                .andReturn());
+    assertThat(URI.create(deepLink).getPath()).isEqualTo("/auth/step-up");
+    assertThat(query(deepLink).get("returnTo")).containsExactly("/sensitive");
+  }
+
+  @Test
+  void keepsTheIdTokenAndPersonalDataOutOfTheSerialisedHttpSession() throws Exception {
+    PROVIDER.extraClaims = Map.of("pin", "191212121212", "email", "sven@example.org");
+    MvcResult start = mvc.perform(get("/auth/login").param("returnTo", "/private")).andExpect(status().isFound()).andReturn();
+    Map<String, List<String>> query = query(start.getResponse().getRedirectedUrl());
+    PROVIDER.nonce = query.get("nonce").get(0);
+    MockHttpSession session = (MockHttpSession) start.getRequest().getSession(false);
+    MvcResult callback =
+        mvc.perform(get("/auth/callback").param("code", "fresh-code").param("state", query.get("state").get(0)).session(session))
+            .andExpect(status().isSeeOther())
+            .andReturn();
+    MockHttpSession signedIn = (MockHttpSession) callback.getRequest().getSession(false);
+    mvc.perform(get("/private").session(signedIn)).andExpect(status().isOk());
+    mvc.perform(get("/auth/session").session(signedIn)).andExpect(jsonPath("$.principal.name").value("Sven Medborgare"));
+    String idToken = store.load(PortvaktSessionState.of(signedIn).grantId()).idToken();
+    assertThat(idToken).isNotBlank();
+    // Serialise the session as Spring Session or a servlet container would.
+    java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+    try (java.io.ObjectOutputStream out = new java.io.ObjectOutputStream(bytes)) {
+      for (String name : java.util.Collections.list(signedIn.getAttributeNames())) {
+        out.writeObject(name);
+        out.writeObject(signedIn.getAttribute(name));
+      }
+    }
+    String serialised = bytes.toString(java.nio.charset.StandardCharsets.ISO_8859_1);
+    assertThat(serialised)
+        .doesNotContain(idToken)
+        .doesNotContain(idToken.split("\\.")[1])
+        .doesNotContain("191212121212")
+        .doesNotContain("Sven Medborgare")
+        .doesNotContain("sven@example.org")
+        .doesNotContain(FakeProvider.SUB);
+    assertThat(signedIn.getAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY)).isNull();
+  }
+
+  @Test
+  void answersTheCodeExchangesRetryLaterWithTheUnavailablePage() throws Exception {
+    MvcResult start = mvc.perform(get("/auth/login")).andExpect(status().isFound()).andReturn();
+    Map<String, List<String>> query = query(start.getResponse().getRedirectedUrl());
+    PROVIDER.nonce = query.get("nonce").get(0);
+    PROVIDER.tokenErrorStatus = 429;
+    PROVIDER.tokenError = "temporarily_unavailable";
+    PROVIDER.tokenRetryAfter = "11";
+    MvcResult callback =
+        mvc.perform(
+                get("/auth/callback")
+                    .param("code", "fresh-code")
+                    .param("state", query.get("state").get(0))
+                    .session((MockHttpSession) start.getRequest().getSession(false))
+                    .accept("text/html"))
+            .andExpect(status().isServiceUnavailable())
+            .andReturn();
+    assertThat(callback.getResponse().getHeader("Retry-After")).isEqualTo("11");
+    assertThat(callback.getResponse().getContentAsString()).contains("portvakt_unavailable");
+  }
+
+  @Test
+  void logsOutAtPortvaktAlsoWithoutALocalSession() throws Exception {
+    // No session, no CSRF token to present: the browser still goes through Portvakt's logout.
+    MvcResult logout = mvc.perform(post("/auth/logout")).andExpect(status().isSeeOther()).andReturn();
+    String location = logout.getResponse().getHeader("Location");
+    assertThat(location).startsWith(PROVIDER.issuer + "/session/end?");
+    assertThat(query(location).get("client_id")).containsExactly("case-service");
+    assertThat(query(location).get("post_logout_redirect_uri")).containsExactly("http://localhost/");
+    assertThat(query(location)).doesNotContainKey("id_token_hint");
   }
 
   @Test

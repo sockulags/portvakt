@@ -23,12 +23,17 @@ export class MiniBrowser {
   /**
    * A top-level GET navigation (`Sec-Fetch-Mode: navigate`, which fetch cannot send: it always
    * sends `cors`), with extra headers such as `Sec-Fetch-Site` (default `same-origin`) or
-   * `Referer`. Returns the status and the Location header.
+   * `Referer`. Returns the status, the Location header, the other headers and the body.
    */
   navigate(
     url: string,
     headers: Readonly<Record<string, string>> = { "sec-fetch-site": "same-origin" },
-  ): Promise<{ readonly status: number; readonly location: string | null }> {
+  ): Promise<{
+    readonly status: number;
+    readonly location: string | null;
+    readonly headers: Readonly<Record<string, string | string[] | undefined>>;
+    readonly body: string;
+  }> {
     const target = new URL(url);
     const cookie = this.#cookieHeader(target);
     return new Promise((resolve, reject) => {
@@ -45,9 +50,15 @@ export class MiniBrowser {
         },
         (res) => {
           for (const header of res.headers["set-cookie"] ?? []) this.#store(header, target);
-          res.resume();
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
           res.on("end", () => {
-            resolve({ status: res.statusCode ?? 0, location: res.headers.location ?? null });
+            resolve({
+              status: res.statusCode ?? 0,
+              location: res.headers.location ?? null,
+              headers: res.headers,
+              body: Buffer.concat(chunks).toString("utf8"),
+            });
           });
         },
       );

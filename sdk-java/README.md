@@ -86,32 +86,39 @@ authorization manager for `authorizeHttpRequests`.
 
 ### Routes
 
-| Route                                  | What it does                                                                                                                                                                                            |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /auth/login`                      | Starts a login (authorization code, PKCE, state, nonce). Query: `returnTo` (same-origin path, else `default-return-to`), `acr`, `prompt` (`login`, `select_account`, `none`), `loginHint`, `uiLocales`. |
-| `GET /auth/callback`                   | Spring's code exchange; the ID token is validated by the core. A login below the requested `acr` answers 403 `acr_not_met` and keeps the existing session.                                              |
-| `POST /auth/logout`                    | CSRF-protected (Spring Security: `_csrf` field or `X-CSRF-TOKEN` header). Ends the session and redirects to Portvakt's end-session endpoint with `id_token_hint` (JSON for fetch).                      |
-| `GET /auth/session`                    | JSON for scripts: `authenticated`, `principal` (without `pin`), `expiresAt`, `sessionEndsAt`, `csrfToken`. Never tokens.                                                                                |
-| `GET /auth/select-representation`      | A new authorization with `prompt=select_account`: the representation chooser, without a new upstream login.                                                                                             |
-| `GET /auth/step-up?acr=...&returnTo=/` | A new authorization with `acr_values`.                                                                                                                                                                  |
+| Route                                  | What it does                                                                                                                                                                                                                                                                                                                   |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /auth/login`                      | Starts a login (authorization code, PKCE, state, nonce). Query: `returnTo` (same-origin path, else `default-return-to`), `acr`, `prompt` (`login`, `select_account`, `none`), `loginHint`, `uiLocales`.                                                                                                                        |
+| `GET /auth/callback`                   | Spring's code exchange; the ID token is validated by the core. A login below the requested `acr` answers 403 `acr_not_met` and keeps the existing session.                                                                                                                                                                     |
+| `POST /auth/logout`                    | CSRF-protected while a session exists (Spring Security: `_csrf` field or `X-CSRF-TOKEN` header). Ends the session and redirects to Portvakt's end-session endpoint with `id_token_hint` (JSON for fetch); without a local session also, with `client_id` and `post_logout_redirect_uri` (Portvakt asks the person to confirm). |
+| `GET /auth/session`                    | JSON for scripts: `authenticated`, `principal` (without `pin`), `expiresAt`, `sessionEndsAt`, `csrfToken`. Never tokens.                                                                                                                                                                                                       |
+| `GET /auth/select-representation`      | A new authorization with `prompt=select_account`: the representation chooser, without a new upstream login.                                                                                                                                                                                                                    |
+| `GET /auth/step-up?acr=...&returnTo=/` | A new authorization with `acr_values`.                                                                                                                                                                                                                                                                                         |
 
 Step-up and the representation switch replace the session's login, so another site must not be
 able to start them; the same holds for `/auth/login` with `acr` or `prompt`, and for any login
 while a session exists. When the browser sends `Sec-Fetch-Site`, it must be `same-origin` or
-`none` (otherwise 403 `cross_site_request`); without it, a same-origin `Referer` or the session's
-CSRF token as `csrf` query parameter is required. Plain links from your own pages work, and a
-plain login without a session may be linked from anywhere.
+`none`; without it, a same-origin `Referer` is required. A browser navigation from another site
+gets a minimal page of your application instead ("Fortsätt till inloggning", no styles or
+scripts, strict CSP) whose button starts the same flow from here; XHR and other
+non-navigations get 403 `cross_site_request`. Plain links from your own pages work, and a plain
+login without a session may be linked from anywhere.
 
-`@RequireAcr` and `portvakt.requireAcr` redirect browser navigations to the step-up and answer
-XHR with `401 {"error": "step_up_required", "acr", "stepUpUrl"}`.
+`@RequireAcr` and `portvakt.requireAcr` redirect browser navigations to the step-up (a deep link
+from another site gets the same interstitial page) and answer XHR with `401 {"error":
+"step_up_required", "acr", "stepUpUrl"}`.
 
 ### Session semantics
 
-- The HTTP session holds Spring Security's context and a small state: the login time, the
-  session's end, the last activity and a random **grant id**. The tokens (and the pending logins
-  with their PKCE verifiers) live in the **token store**, keyed by the grant id, never in the
-  HTTP session; neither does the client registration with its secret. Spring Security changes the
-  session id at every login; the grant id stays.
+- The HTTP session holds only a small state: the login time, the session's end, the last
+  activity and a random **grant id** (plus Spring Security's CSRF token). The tokens, the
+  signed-in person's ID token (name, email, personal identity number) and the pending logins
+  with their PKCE verifiers live in the **token store**, keyed by the grant id; Spring Security's
+  context is rebuilt from the stored ID token on every request
+  (`PortvaktSecurityContextRepository`) and never stored in the HTTP session, so a serialised
+  session (Spring Session, a session store) carries no personal data. The client registration
+  with its secret is not in the session either. Spring Security changes the session id at every
+  login; the grant id stays.
 - Token stores (`portvakt.login.token-store`): `memory` (default; one instance only, warned
   about in a `prod`/`production` profile) and `jdbc` (a `DataSource`; several instances and
   Spring Session). The JDBC store keeps one row per grant in `portvakt_grant` (schema in
@@ -134,6 +141,11 @@ XHR with `401 {"error": "step_up_required", "acr", "stepUpUrl"}`.
   requests, stale Spring Session snapshots and several instances: Portvakt rotates refresh
   tokens and treats a replay as theft. A refreshed ID token replaces the principal; the
   session's end only ever moves earlier.
+- Portvakt asks to retry later (HTTP 429, or the OAuth error `temporarily_unavailable` with any
+  status), at a refresh or at the login callback: transient. `getAccessToken` throws
+  `PortvaktRetryLaterException` (a `PortvaktUnavailableException`: 503 with Portvakt's
+  `Retry-After`); the session keeps its unchanged refresh token and no outage starts (the grace
+  is not involved); the callback answers the unavailable page.
 - A refused refresh (`invalid_grant`: grant revoked, representation no longer valid, broker
   session ended) ends the session: `LoginRequiredException` (a login redirect or 401
   `login_required` through the starter's exception resolver). `invalid_client` (Portvakt answers
@@ -187,7 +199,9 @@ Method security (`@EnableMethodSecurity`): `@PreAuthorize("@portvakt.hasRole('ha
 `@portvakt.hasAnyRole(...)`, `@portvakt.acrAtLeast(...)`, `@portvakt.isService()`,
 `@portvakt.isRepresenting()`. Roles are also authorities `PORTVAKT_ROLE_<role>` (plus
 `PORTVAKT_PERSON` or `PORTVAKT_SERVICE`). The principal is
-`PortvaktSecurity.currentPrincipal()`.
+`PortvaktSecurity.currentPrincipal()`: empty for a restricted token (one the defaults refuse)
+unless the route accepted it with `portvakt.accessToken(r -> ...)`, so an open route never
+mistakes a service or representation token for a person.
 
 Failures answer with RFC 6750 errors and `WWW-Authenticate: Bearer realm="portvakt", error=...`:
 400 `invalid_request` (malformed header), 401 without error (no token), 401 `invalid_token`,
@@ -211,7 +225,8 @@ String token = clientCredentials.forAudience("archive-service").getToken();
 Tokens (`resource=urn:portvakt:app:{audience}`) are cached until shortly before they expire (10%
 of the lifetime, at least 30 s) and fetched once at a time. A network error, timeout or 5xx is
 `PortvaktUnavailableException`; a refusal is a `PortvaktException` with Portvakt's OAuth error
-code. The target must be enabled in the same tenant.
+code. The target must be enabled in the same tenant and listed in the calling application's
+`serviceAudiences` in Portvakt (empty by default: no service tokens for other applications).
 
 ## Core without Spring
 
@@ -255,7 +270,7 @@ values outside the ranking only match themselves.
 | `portvakt.failure-cache`                                         | `5s`                      | With nothing cached, a failed discovery or JWKS fetch is retried after this.                                                                                                                       |
 | `portvakt.jwks.cache-max-age`                                    | `5m`                      | Keys are refetched after this. Keep it below Portvakt's KEY_MANUAL_PUBLISH_AHEAD minus 90 s.                                                                                                       |
 | `portvakt.jwks.cooldown`                                         | `30s`                     | At most one JWKS fetch per this for access tokens; an unknown `kid` within it is refused. ID tokens from the token endpoint always refetch an unknown `kid` (a key rotation never ends a session). |
-| `portvakt.jwks.stale-max-age`                                    | `1d`                      | While refetches fail, keys stay in use until cache-max-age plus this; then 503.                                                                                                                    |
+| `portvakt.jwks.stale-max-age`                                    | `1h`                      | While refetches fail, keys stay in use until cache-max-age plus this; then 503. Longer survives longer outages, but trusts a key an emergency rotation retired that much longer.                   |
 | `portvakt.acr-ranking`                                           | loa2, loa3, loa4          | Must match Portvakt's `ACR_RANKING`.                                                                                                                                                               |
 | `portvakt.allow-insecure-requests`                               | `false`                   | Allows an `http:` issuer (local development only).                                                                                                                                                 |
 | `portvakt.login.enabled`                                         | `false`                   | Browser login.                                                                                                                                                                                     |
@@ -300,8 +315,9 @@ completion comes from the generated `spring-configuration-metadata.json`. The be
   `rep.sub` with your own rules.** APIs that must not be used on someone's behalf set
   `allow-representation: false` (or `r.allowRepresentation(false)` per route).
 - No tokens, cookies, session ids or personal data are logged; log lines carry error codes only.
-- Use `same-site: lax` for the session cookie. `strict` drops it on the first navigation after
-  the login redirect.
+- Use `same-site: lax` and `secure: true` for the session cookie (`strict` drops it on the first
+  navigation after the login redirect). In a `prod`/`production` profile the starter warns at
+  start when the cookie is not Secure or has no SameSite.
 - Keep Spring Security's default session fixation protection (`changeSessionId`):
   `newSession()` drops the session's tokens right after the login.
 - Several instances or Spring Session: use `token-store: jdbc`. The tokens never sit in the HTTP
@@ -317,7 +333,9 @@ There is no local JDK requirement: Maven runs in Docker.
 npm run test:java                 # whole build plus integration tests against a real Portvakt
 npm run test:java -- -pl portvakt-sdk-core   # other arguments go to Maven
 docker run --rm -v "$PWD:/workspace" -v portvakt-m2:/root/.m2 -w /workspace/sdk-java \
-  maven:3.9-eclipse-temurin-21 mvn -B -ntp verify   # unit tests only (integration tests skip)
+  maven:3.9-eclipse-temurin-21 mvn -B -ntp -C verify   # unit tests only (integration tests skip)
 ```
 
 On Windows with Git Bash prefix the `docker run` with `MSYS_NO_PATHCONV=1`, or use PowerShell.
+The scripts run the image pinned by digest in `deploy/images.Dockerfile`, and Maven with strict
+checksums (`-C`: a mismatching download fails the build).

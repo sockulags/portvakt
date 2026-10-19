@@ -8,7 +8,8 @@
  * 3. the mock IdP on :4900 and the dev seed (tenant `demo` with service-c, the Java demo, plus
  *    the isolation tenant `demo-isolation`, and service-d with private_key_jwt and a key made for
  *    this run), then Portvakt on :3900;
- * 4. `mvn verify` in the `maven:3.9-eclipse-temurin-21` container (dependencies cached in the
+ * 4. `mvn -C verify` (strict checksums) in the `maven` container of deploy/images.Dockerfile
+ *    (maven:3.9-eclipse-temurin-21, pinned by digest; dependencies cached in the
  *    named volume `portvakt-m2`, or in the host directory PORTVAKT_M2_DIR when set, as in CI),
  *    with the URLs as system properties;
  * 5. everything it started is stopped again (the database keeps running: `npm run db:down`).
@@ -33,6 +34,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
+import { image } from "./images.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const isWindows = process.platform === "win32";
@@ -45,7 +47,8 @@ const mavenArgs = args.filter((arg) => !OWN_OPTIONS.includes(arg));
 const forceBuild = args.includes("--build");
 const keep = args.includes("--keep");
 
-const IMAGE = "maven:3.9-eclipse-temurin-21";
+/** maven:3.9-eclipse-temurin-21, pinned by digest in deploy/images.Dockerfile. */
+const IMAGE = image("maven");
 const M2_VOLUME = "portvakt-m2";
 /** A host directory for the Maven repository instead of the named volume (CI caches it). */
 const M2_DIR = process.env.PORTVAKT_M2_DIR;
@@ -266,7 +269,10 @@ function runMaven() {
     `-Dportvakt.it.jdbc-url=jdbc:postgresql://localhost:${DB_PORT}/${DATABASE}`,
   ];
   const quote = (/** @type {string} */ value) => `'${value.replace(/'/g, "'\\''")}'`;
-  const mvn = ["mvn", "-B", "-ntp", "verify", ...properties, ...mavenArgs].map(quote).join(" ");
+  // -C: a download whose checksum does not match fails the build instead of a warning.
+  const mvn = ["mvn", "-B", "-ntp", "-C", "verify", ...properties, ...mavenArgs]
+    .map(quote)
+    .join(" ");
   const script = [
     "set -u",
     `java /workspace/scripts/java-test/PortForward.java host.docker.internal ${PORTS.portvakt} ${PORTS.mockIdp} ${DB_PORT} > /tmp/forward.log 2>&1 &`,

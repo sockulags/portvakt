@@ -62,6 +62,10 @@ describe("outbound guard", () => {
       "64:ff9b:1::1",
       "2002::1",
       "2002:7f00:1::1",
+      "::127.0.0.1",
+      "::7f00:1",
+      "::a9fe:a9fe",
+      "::8.8.8.8",
       "not-an-ip",
     ]) {
       expect(isSpecialUseAddress(address), address).toBe(true);

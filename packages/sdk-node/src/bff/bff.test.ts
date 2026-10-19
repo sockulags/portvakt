@@ -4,7 +4,7 @@ import express, { type Express } from "express";
 import express4 from "express4";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPortvaktClient } from "../client.js";
-import { LoginRequiredError, PortvaktUnavailableError } from "../errors.js";
+import { LoginRequiredError, PortvaktConfigError, PortvaktUnavailableError } from "../errors.js";
 import { silentLogger } from "../logger.js";
 import { MemoryStore } from "../stores/memory.js";
 import { MiniBrowser } from "../testing/browser.js";
@@ -48,6 +48,7 @@ beforeEach(() => {
   op.signingKid = undefined;
   op.down = false;
   op.serverError = undefined;
+  op.tokenError = undefined;
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -90,6 +91,18 @@ async function harness(
   });
   app.get("/sensitive", bff.requireAcr(LOA4), (_req, res) => {
     res.send("sensitive");
+  });
+  app.post("/private", bff.requireLogin(), (_req, res) => {
+    res.json({ done: true });
+  });
+  app.post("/form", express.urlencoded({ extended: false }), bff.requireAcr(LOA3), (_req, res) => {
+    res.json({ done: true });
+  });
+  app.post("/own-protection", bff.requireLogin({ csrf: false }), (_req, res) => {
+    res.json({ done: true });
+  });
+  app.delete("/checked", bff.requireCsrf(), (_req, res) => {
+    res.json({ done: true });
   });
   app.get("/token", bff.requireLogin(), (req, res, next) => {
     const min = typeof req.query.min === "string" ? Number(req.query.min) : undefined;
@@ -216,7 +229,7 @@ describe("BFF login", () => {
     expect((await browser.request(`${h.base}/auth/step-up`)).status).toBe(400);
   });
 
-  it("verifies the pending login: no cookie, wrong state and replays are refused", async () => {
+  it("verifies the pending login: no cookie and wrong state are refused, a forged state consumes nothing", async () => {
     const browser = new MiniBrowser();
     const start = await browser.request(`${h.base}/auth/login`);
     const toCallback = await browser.request(start.headers.get("location")!);
@@ -235,12 +248,15 @@ describe("BFF login", () => {
       headers: { accept: "application/json" },
     });
     expect(await wrongState.json()).toEqual({ error: "state_mismatch" });
-    // The pending login was consumed by the failed attempt: the real callback is refused too.
+    // A callback with another state (a forged one in the victim's browser) consumes nothing:
+    // the real callback still completes the login, once.
+    const real = await browser.request(callback.href, { headers: { accept: "application/json" } });
+    expect(real.status).toBe(303);
+    expect((await sessionOf(h, browser)).authenticated).toBe(true);
     const replay = await browser.request(callback.href, {
       headers: { accept: "application/json" },
     });
     expect(await replay.json()).toEqual({ error: "login_expired" });
-    expect((await sessionOf(h, browser)).authenticated).toBe(false);
   });
 
   it("shows Portvakt's error (access_denied) as a page", async () => {
@@ -718,39 +734,72 @@ describe("review regressions", () => {
     }
   });
 
-  it("refuses step-up and representation switches started from another site", async () => {
+  /** The interstitial page: its button's GET (path and fields) and its headers. */
+  function interstitialOf(page: Awaited<ReturnType<MiniBrowser["navigate"]>>) {
+    expect(page.status).toBe(200);
+    expect(page.headers["content-security-policy"]).toBe(
+      "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    );
+    expect(page.headers["referrer-policy"]).toBe("same-origin");
+    expect(page.body).toContain("Fortsätt till inloggning");
+    expect(page.body).not.toMatch(/<script|<style| style=/);
+    const action = /<form method="get" action="([^"]+)">/.exec(page.body)?.[1];
+    const fields = [...page.body.matchAll(/name="([^"]+)" value="([^"]*)"/g)].map(
+      ([, name, value]): [string, string] => [name!, value!.replace(/&#38;/g, "&")],
+    );
+    return { action: action!, query: new URLSearchParams(fields).toString() };
+  }
+
+  it("answers step-up and representation switches started from another site with a page that starts them here", async () => {
     const h = await harness();
     try {
       const browser = new MiniBrowser();
       await login(h, browser);
       const { csrfToken } = (await sessionOf(h, browser)) as { csrfToken: string };
-      const stepUp = `${h.base}/auth/step-up?acr=${encodeURIComponent(LOA4)}`;
+      const stepUp = `${h.base}/auth/step-up?acr=${encodeURIComponent(LOA4)}&returnTo=%2Fcases`;
       const select = `${h.base}/auth/select-representation?returnTo=%2F`;
       for (const url of [stepUp, select]) {
         const status = async (target: string, headers: Record<string, string>) =>
           (await browser.navigate(target, headers)).status;
-        expect(await status(url, { "sec-fetch-site": "cross-site" })).toBe(403);
-        expect(await status(url, { "sec-fetch-site": "same-site" })).toBe(403);
+        const elsewhere: Record<string, string>[] = [
+          { "sec-fetch-site": "cross-site" },
+          { "sec-fetch-site": "same-site" },
+          {},
+          { referer: "https://evil.example/" },
+        ];
+        for (const headers of elsewhere) {
+          const page = interstitialOf(await browser.navigate(url, headers));
+          // The button repeats the same request, now from this application's own page.
+          expect(`${h.base}${page.action}?${page.query}`).toBe(url);
+          expect(
+            await status(`${h.base}${page.action}?${page.query}`, {
+              "sec-fetch-site": "same-origin",
+            }),
+          ).toBe(302);
+        }
         expect(await status(url, { "sec-fetch-site": "same-origin" })).toBe(302);
         expect(await status(url, { "sec-fetch-site": "none" })).toBe(302);
-        // Without Sec-Fetch-Site: a same-origin Referer or the session's CSRF token.
-        expect(await status(url, {})).toBe(403);
-        expect(await status(url, { referer: "https://evil.example/" })).toBe(403);
         expect(await status(url, { referer: `${h.base}/page` })).toBe(302);
-        expect(await status(`${url}&csrf=wrong`, {})).toBe(403);
-        expect(await status(`${url}&csrf=${encodeURIComponent(csrfToken)}`, {})).toBe(302);
+        // The session's CSRF token as a query parameter no longer counts.
+        expect(await status(`${url}&csrf=${encodeURIComponent(csrfToken)}`, {})).toBe(200);
+        // Not a navigation (fetch, an image): refused outright.
+        const fetched = await browser.request(url, {
+          headers: { "sec-fetch-site": "cross-site", accept: "application/json" },
+        });
+        expect(fetched.status).toBe(403);
+        expect(await fetched.json()).toEqual({ error: "cross_site_request" });
       }
       // A plain login without a session may be linked from anywhere; with one it may not.
       expect((await new MiniBrowser().navigate(`${h.base}/auth/login`, {})).status).toBe(302);
-      expect(
-        (await browser.navigate(`${h.base}/auth/login`, { "sec-fetch-site": "cross-site" })).status,
-      ).toBe(403);
+      interstitialOf(
+        await browser.navigate(`${h.base}/auth/login`, { "sec-fetch-site": "cross-site" }),
+      );
     } finally {
       await h.close();
     }
   });
 
-  it("refuses logins with prompt or acr, or over a session, started from another site", async () => {
+  it("does not start logins with prompt or acr, or over a session, from another site", async () => {
     const h = await harness();
     try {
       const stranger = new MiniBrowser();
@@ -759,13 +808,13 @@ describe("review regressions", () => {
         (await browser.navigate(`${h.base}${path}`, headers)).status;
       // Without a session a plain login is fine from anywhere ...
       expect(await status(stranger, "/auth/login", crossSite)).toBe(302);
-      // ... but not one that asks for the chooser, a prompt or an acr.
-      expect(await status(stranger, "/auth/login?prompt=select_account", crossSite)).toBe(403);
-      expect(await status(stranger, "/auth/login?prompt=login", crossSite)).toBe(403);
+      // ... but not one that asks for the chooser, a prompt or an acr (the interstitial page).
+      expect(await status(stranger, "/auth/login?prompt=select_account", crossSite)).toBe(200);
+      expect(await status(stranger, "/auth/login?prompt=login", crossSite)).toBe(200);
       expect(await status(stranger, `/auth/login?acr=${encodeURIComponent(LOA4)}`, crossSite)).toBe(
-        403,
+        200,
       );
-      expect(await status(stranger, "/auth/login?prompt=select_account", {})).toBe(403);
+      expect(await status(stranger, "/auth/login?prompt=select_account", {})).toBe(200);
       expect(
         await status(stranger, "/auth/login?prompt=select_account", {
           "sec-fetch-site": "same-origin",
@@ -774,7 +823,7 @@ describe("review regressions", () => {
       // With a session even a plain login must come from the application itself.
       const signedIn = new MiniBrowser();
       await login(h, signedIn);
-      expect(await status(signedIn, "/auth/login", crossSite)).toBe(403);
+      expect(await status(signedIn, "/auth/login", crossSite)).toBe(200);
       expect(await status(signedIn, "/auth/login", { referer: `${h.base}/page` })).toBe(302);
     } finally {
       await h.close();
@@ -819,6 +868,220 @@ describe("review regressions", () => {
     } finally {
       await h.close();
     }
+  });
+});
+
+describe("security review fixes", () => {
+  let h: Harness;
+  beforeAll(async () => {
+    h = await harness();
+  });
+  afterAll(async () => {
+    await h.close();
+  });
+
+  it("keeps the session and its refresh token when Portvakt answers 429 or temporarily_unavailable", async () => {
+    const browser = new MiniBrowser();
+    await login(h, browser);
+    for (const refusal of [
+      { status: 429, body: { error: "temporarily_unavailable" }, retryAfter: "7" },
+      { status: 400, body: { error: "temporarily_unavailable" } },
+      { status: 503, body: { error: "temporarily_unavailable" }, retryAfter: "12" },
+      { status: 429, body: "<html>Too many requests</html>", retryAfter: "3" },
+    ]) {
+      op.tokenError = refusal;
+      const presented = op.presentedRefreshTokens.length;
+      // Grace 0 (this harness): an outage would end the session at once; this must not.
+      const response = await browser.request(`${h.base}/token?min=3600`, {
+        headers: { accept: "application/json" },
+      });
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe(refusal.retryAfter ?? "5");
+      expect(await response.json()).toEqual({ error: "portvakt_unavailable" });
+      expect((await sessionOf(h, browser)).authenticated).toBe(true);
+      expect(op.presentedRefreshTokens.length).toBe(presented + 1);
+    }
+    // The next refresh presents the same, unrotated refresh token and succeeds.
+    op.tokenError = undefined;
+    const tried = new Set(op.presentedRefreshTokens.slice(-4));
+    expect(tried.size).toBe(1);
+    expect((await browser.request(`${h.base}/token?min=3600`)).status).toBe(200);
+    expect(op.presentedRefreshTokens.at(-1)).toBe([...tried][0]);
+  });
+
+  it("shows the unavailable page when the code exchange is answered with 429", async () => {
+    const browser = new MiniBrowser();
+    op.tokenError = { status: 429, body: { error: "temporarily_unavailable" }, retryAfter: "9" };
+    const { done } = await login(h, browser);
+    expect(done.status).toBe(503);
+    expect(done.headers.get("retry-after")).toBe("9");
+    expect(await done.text()).toContain('data-testid="portvakt-error-code">portvakt_unavailable<');
+    expect((await sessionOf(h, browser)).authenticated).toBe(false);
+  });
+
+  it("requires the CSRF token and a same-origin request for unsafe methods behind requireLogin and requireAcr", async () => {
+    const browser = new MiniBrowser();
+    await login(h, browser);
+    const { csrfToken } = (await sessionOf(h, browser)) as { csrfToken: string };
+    const call = (method: string, path: string, headers: Record<string, string>, body?: string) =>
+      browser.request(`${h.base}${path}`, {
+        method,
+        headers: { accept: "application/json", ...headers },
+        ...(body === undefined ? {} : { body }),
+      });
+    const refused = async (response: Response, error: string) => {
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error });
+    };
+    await refused(await call("POST", "/private", {}), "invalid_csrf_token");
+    await refused(
+      await call("POST", "/private", { "x-csrf-token": "wrong" }),
+      "invalid_csrf_token",
+    );
+    expect((await call("POST", "/private", { "x-csrf-token": csrfToken })).status).toBe(200);
+    // A same-origin form with the token field (the app parses the body first).
+    const form = { "content-type": "application/x-www-form-urlencoded" };
+    await refused(await call("POST", "/form", form, "x=1"), "invalid_csrf_token");
+    expect(
+      (await call("POST", "/form", form, `_csrf=${encodeURIComponent(csrfToken)}`)).status,
+    ).toBe(200);
+    // The token alone is not enough when the browser says the request came from elsewhere.
+    const elsewhere: Record<string, string>[] = [
+      { "sec-fetch-site": "cross-site" },
+      { "sec-fetch-site": "same-site" },
+      { origin: "https://evil.example" },
+    ];
+    for (const headers of elsewhere) {
+      await refused(
+        await call("POST", "/private", { ...headers, "x-csrf-token": csrfToken }),
+        "cross_site_request",
+      );
+    }
+    expect(
+      (
+        await call("POST", "/private", {
+          "sec-fetch-site": "same-origin",
+          origin: h.base,
+          "x-csrf-token": csrfToken,
+        })
+      ).status,
+    ).toBe(200);
+    // Opted out: the route protects itself.
+    expect((await call("POST", "/own-protection", {})).status).toBe(200);
+    // requireCsrf on its own; without a session it refuses.
+    await refused(await call("DELETE", "/checked", {}), "invalid_csrf_token");
+    expect((await call("DELETE", "/checked", { "x-csrf-token": csrfToken })).status).toBe(200);
+    const anonymous = await new MiniBrowser().request(`${h.base}/checked`, {
+      method: "DELETE",
+      headers: { accept: "application/json", "x-csrf-token": csrfToken },
+    });
+    await refused(anonymous, "invalid_csrf_token");
+    // Safe methods are not checked.
+    expect((await call("GET", "/private", {})).status).toBe(200);
+  });
+
+  it("answers a cross-site deep link behind requireAcr with the interstitial, not a redirect", async () => {
+    const browser = new MiniBrowser();
+    await login(h, browser);
+    const page = await browser.navigate(`${h.base}/sensitive`, { "sec-fetch-site": "cross-site" });
+    expect(page.status).toBe(200);
+    expect(page.headers["content-security-policy"]).toContain("default-src 'none'");
+    const action = /<form method="get" action="([^"]+)">/.exec(page.body)?.[1];
+    expect(action).toBe("/auth/step-up");
+    expect(page.body).toContain(`name="acr" value="${LOA4}"`);
+    expect(page.body).toContain('name="returnTo" value="/sensitive"');
+    // From the application itself the deep link redirects to the step-up as before.
+    const own = await browser.navigate(`${h.base}/sensitive`, { "sec-fetch-site": "same-origin" });
+    expect(own.status).toBe(302);
+    expect(own.location).toContain("/auth/step-up?");
+  });
+
+  it("logs out at Portvakt also without a local session", async () => {
+    const response = await new MiniBrowser().request(`${h.base}/auth/logout`, { method: "POST" });
+    expect(response.status).toBe(303);
+    const target = new URL(response.headers.get("location")!);
+    expect(target.origin + target.pathname).toBe(`${op.issuer}/session/end`);
+    expect(target.searchParams.get("client_id")).toBe(op.clientId);
+    expect(target.searchParams.get("post_logout_redirect_uri")).toBe(`${h.base}/`);
+    expect(target.searchParams.get("id_token_hint")).toBeNull();
+  });
+
+  it("never moves the session's end later at a refresh", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+    const now = Math.floor(Date.now() / 1000);
+    op.claims = { session_exp: now + 600 };
+    const browser = new MiniBrowser();
+    await login(h, browser);
+    const before = ((await sessionOf(h, browser)) as { sessionEndsAt: string }).sessionEndsAt;
+    // The broker reports a later session end at the refresh: the BFF keeps the earlier one.
+    op.claims = { session_exp: now + 6000 };
+    expect((await browser.request(`${h.base}/token?min=3600`)).status).toBe(200);
+    const after = ((await sessionOf(h, browser)) as { sessionEndsAt: string }).sessionEndsAt;
+    expect(after).toBe(before);
+    vi.setSystemTime(Date.now() + 700_000);
+    expect((await sessionOf(h, browser)).authenticated).toBe(false);
+  });
+
+  it("puts the pending-login cookie at the session cookie's path and supports __Host- names", async () => {
+    const browser = new MiniBrowser();
+    const start = await browser.request(`${h.base}/auth/login`, {
+      headers: { "sec-fetch-site": "same-origin" },
+    });
+    const tx = start.headers.getSetCookie().find((cookie) => cookie.startsWith(`${COOKIE}_tx=`));
+    expect(tx).toMatch(/; Path=\/;/);
+
+    const config = {
+      issuer: op.issuer,
+      allowInsecureRequests: true,
+      clientId: op.clientId,
+      clientAuth: { method: "client_secret_basic" as const, clientSecret: op.clientSecret },
+      redirectUri: "https://app.example/auth/callback",
+    };
+    const bffWith = (cookie: Partial<BffOptions["cookie"]>, extra: Partial<BffOptions> = {}) =>
+      createPortvaktClient(config).bff({
+        sessionStore: new MemoryStore(),
+        encryptionKey: ENCRYPTION_KEY,
+        cookie: { name: "__Host-case", secrets: ["s".repeat(32)], ...cookie },
+        ...extra,
+      });
+    expect(() => bffWith({})).not.toThrow();
+    const issues = (fn: () => unknown): string[] => {
+      try {
+        fn();
+      } catch (error) {
+        if (error instanceof PortvaktConfigError) return [...error.issues];
+        throw error;
+      }
+      return [];
+    };
+    expect(issues(() => bffWith({ secure: false }))).toContain(
+      "bff.cookie.secure: a __Host- cookie must be Secure",
+    );
+    expect(issues(() => bffWith({ path: "/app" }))).toContain(
+      "bff.cookie.path: a __Host- cookie must have path /",
+    );
+    expect(issues(() => bffWith({ domain: "example.org" }))).toContain(
+      "bff.cookie.domain: a __Host- cookie must not set a domain",
+    );
+    expect(issues(() => bffWith({ name: "__Secure-case", secure: false }))).toContain(
+      "bff.cookie.secure: a __Secure- cookie must be Secure",
+    );
+    expect(issues(() => bffWith({ name: "case", path: "/app" }))).toContain(
+      "bff.mountPath: must be below bff.cookie.path (the cookies must reach it)",
+    );
+    expect(
+      issues(() =>
+        createPortvaktClient({
+          ...config,
+          redirectUri: "https://app.example/app/auth/callback",
+        }).bff({
+          sessionStore: new MemoryStore(),
+          encryptionKey: ENCRYPTION_KEY,
+          cookie: { name: "case", secrets: ["s".repeat(32)], path: "/app" },
+          mountPath: "/app/auth",
+        }),
+      ),
+    ).toEqual([]);
   });
 });
 

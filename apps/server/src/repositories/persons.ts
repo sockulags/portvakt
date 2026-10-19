@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { KeyRing } from "../crypto/keyring.js";
+import { DEFAULT_ACR_RANKING } from "../config/index.js";
 import type { Db } from "../db/database.js";
+import { pinTrustedAcrs } from "../domain/login-method.js";
 import { personnummerSchema } from "../domain/personnummer.js";
 import {
   type Identity,
@@ -135,10 +137,36 @@ function storableAttributes(attributes: IdentityAttributes): IdentityAttributes 
 export class PersonRepository {
   readonly #db: Db;
   readonly #keys: KeyRing;
+  /** The acr values trusted to link identities by personal identity number (loa3 and above). */
+  readonly #linkingAcrs: readonly string[];
 
-  constructor(db: Db, keys: KeyRing) {
+  constructor(db: Db, keys: KeyRing, options: { readonly acrRanking?: readonly string[] } = {}) {
     this.#db = db;
     this.#keys = keys;
+    const ranking =
+      options.acrRanking !== undefined && options.acrRanking.length > 0
+        ? options.acrRanking
+        : DEFAULT_ACR_RANKING;
+    this.#linkingAcrs = pinTrustedAcrs(ranking);
+  }
+
+  /**
+   * Whether a login of `personId` through `loginMethodId` may still be used (the kill switches):
+   * the tenant is active, the login method exists and is enabled, and the person still has an
+   * identity through it. Checked at every refresh and every authorization that reuses a session.
+   */
+  async loginAllowed(tenantId: string, personId: string, loginMethodId: string): Promise<boolean> {
+    requireUuids({ tenantId, personId, loginMethodId });
+    const [row] = await this.#db.query<{ allowed: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM tenants t
+           JOIN login_methods lm ON lm.tenant_id = t.id AND lm.id = $3 AND lm.enabled
+           JOIN identities i ON i.tenant_id = t.id AND i.login_method_id = lm.id
+                            AND i.person_id = $2
+          WHERE t.id = $1 AND t.status = 'active') AS allowed`,
+      [tenantId, personId, loginMethodId],
+    );
+    return row?.allowed === true;
   }
 
   async findById(tenantId: string, id: string): Promise<Person | null> {
@@ -292,9 +320,10 @@ export class PersonRepository {
   /**
    * Just-in-time provisioning at login, in one transaction: finds the identity for (login
    * method, upstream subject) and refreshes its attributes, or creates the identity. A new
-   * identity joins an existing person when the login method links by pin, the login reached the
-   * method's asserted acr, and another linking login method of the tenant already has an identity
-   * with the same personal identity number; otherwise a new person is created.
+   * identity joins an existing person when the login method links by pin, asserts an acr ranked
+   * at least loa3 (checked again here for rows saved before the rule), the login reached that
+   * acr, and another linking login method of the tenant that also asserts at least loa3 already
+   * has an identity with the same personal identity number; otherwise a new person is created.
    *
    * Safe under concurrent first logins of the same subject (exactly one identity and person are
    * created) and of the same pin through different linking methods (serialised by an advisory
@@ -361,7 +390,12 @@ export class PersonRepository {
       let linked = false;
       if (identity === undefined) {
         let personId: string | undefined;
-        if (pin !== null && method.link_by_pin && data.acr === method.asserted_acr) {
+        if (
+          pin !== null &&
+          method.link_by_pin &&
+          data.acr === method.asserted_acr &&
+          this.#linkingAcrs.includes(method.asserted_acr)
+        ) {
           await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
             `portvakt:pin-link:${tenantId}:${pin.stored.index}`,
           ]);
@@ -371,9 +405,10 @@ export class PersonRepository {
                JOIN login_methods lm ON lm.tenant_id = i.tenant_id AND lm.id = i.login_method_id
               WHERE i.tenant_id = $1 AND i.pin_index = ANY ($2::text[])
                 AND i.login_method_id <> $3 AND lm.link_by_pin
+                AND lm.asserted_acr = ANY ($4::text[])
               ORDER BY i.created_at, i.id
               LIMIT 1`,
-            [tenantId, pin.candidates, data.loginMethodId],
+            [tenantId, pin.candidates, data.loginMethodId, [...this.#linkingAcrs]],
           );
           personId = match?.person_id;
           linked = personId !== undefined;

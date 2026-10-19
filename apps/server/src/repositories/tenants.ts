@@ -47,13 +47,18 @@ export class TenantRepository {
 
   async create(input: CreateTenantInput): Promise<Tenant> {
     const data = parseInput(createTenantInputSchema, input);
-    const rows = await mapDbErrors(() =>
-      this.#db.query<TenantRow>(
-        `INSERT INTO tenants (slug, name, status, representation_sources) VALUES ($1, $2, $3, $4)
-         RETURNING ${COLUMNS}`,
-        [data.slug, data.name, data.status, data.representationSources],
-      ),
-    );
+    const rows = await this.#db.transaction(async (tx) => {
+      const inserted = await mapDbErrors(() =>
+        tx.query<TenantRow>(
+          `INSERT INTO tenants (slug, name, status, representation_sources) VALUES ($1, $2, $3, $4)
+           RETURNING ${COLUMNS}`,
+          [data.slug, data.name, data.status, data.representationSources],
+        ),
+      );
+      // Replicas that remembered the slug as unknown (negative cache) look it up again.
+      await emitChange(tx, { type: "tenant", tenantId: requireRow(inserted).id });
+      return inserted;
+    });
     return toTenant(requireRow(rows));
   }
 

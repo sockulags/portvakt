@@ -10,7 +10,7 @@ import { compactVerify } from "jose";
 import * as client from "openid-client";
 import { z } from "zod";
 import { formatIssues, type ResolvedConfig } from "../config.js";
-import { isUnavailable, type DiscoveryCache } from "../discovery.js";
+import { isUnavailable, transientRefusal, type DiscoveryCache } from "../discovery.js";
 import type { JwksCache } from "../jwks.js";
 import {
   LoginFailedError,
@@ -59,7 +59,11 @@ export interface BffOptions {
    */
   readonly encryptionKey: string | readonly string[];
   readonly cookie: {
-    /** Must differ between applications sharing a host (cookies ignore ports). */
+    /**
+     * Must differ between applications sharing a host (cookies ignore ports). `__Host-` names
+     * (recommended) need `secure`, path `/` and no domain; `__Secure-` names need `secure`. The
+     * pending-login cookie is `{name}_tx`, with the same path.
+     */
     readonly name: string;
     /** HMAC secrets (at least 32 characters each); the first signs, all verify. */
     readonly secrets: readonly string[];
@@ -104,6 +108,17 @@ export interface SessionInfo {
   readonly csrfToken: string;
 }
 
+/** Options of {@link BffHelpers.requireLogin} and {@link BffHelpers.requireAcr}. */
+export interface RequireOptions {
+  /**
+   * CSRF protection of unsafe methods (anything but GET, HEAD and OPTIONS), on by default: the
+   * session's CSRF token as `X-CSRF-Token` header or `_csrf` body field (parse the body before
+   * this middleware), and a same-origin `Sec-Fetch-Site` or `Origin` when the browser sends
+   * one. `false` turns it off for routes that protect themselves another way.
+   */
+  readonly csrf?: boolean;
+}
+
 export interface GetAccessTokenOptions {
   /**
    * The token must stay valid at least this long, or it is refreshed first. Default: the clock
@@ -132,13 +147,24 @@ export function refreshThreshold(
 /** The BFF helpers, on the Express router that serves the BFF routes. */
 export interface BffHelpers {
   readonly mountPath: string;
-  /** Requires a session: browser navigations are redirected to the login, XHR gets 401 JSON. */
-  requireLogin(): RequestHandler;
+  /**
+   * Requires a session: browser navigations are redirected to the login, XHR gets 401 JSON.
+   * Unsafe methods also need the CSRF token (see {@link RequireOptions}; 403
+   * `invalid_csrf_token` or `cross_site_request`).
+   */
+  requireLogin(options?: RequireOptions): RequestHandler;
   /**
    * Requires a session whose acr is at least `acr`: browser navigations are sent to the step-up
-   * (`{mountPath}/step-up?acr=...`), XHR gets 401 `{ error: "step_up_required", ... }`.
+   * (`{mountPath}/step-up?acr=...`; a navigation from another site gets a page of this
+   * application with a button that starts it), XHR gets 401 `{ error: "step_up_required", ... }`.
+   * Unsafe methods also need the CSRF token, as for {@link requireLogin}.
    */
-  requireAcr(acr: string): RequestHandler;
+  requireAcr(acr: string, options?: RequireOptions): RequestHandler;
+  /**
+   * The CSRF check of {@link requireLogin} on its own (a session is required: without one the
+   * answer is 403 `invalid_csrf_token`), for routes that load the session another way.
+   */
+  requireCsrf(): RequestHandler;
   /**
    * A fresh access token of the request's session, refreshed (with rotation) when it is about
    * to expire. Refreshes of one session never run concurrently (per-session lock, across
@@ -240,7 +266,6 @@ const loginQuerySchema = z.object({
     (value) => value === undefined || !hasControlCharacters(value),
     "control characters",
   ),
-  csrf: optionalString(128),
   uiLocales: optionalString(
     100,
     /^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*( [A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*)*$/,
@@ -253,6 +278,9 @@ const callbackQuerySchema = z.object({
 });
 
 const OAUTH_ERROR = /^[a-z_]{1,64}$/;
+
+/** Methods without side effects: no CSRF check. */
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 interface Loaded {
   readonly key: string;
@@ -282,6 +310,21 @@ export function createBff(
   }
   if (safeReturnTo(options.defaultReturnTo) === undefined) {
     issues.push("bff.defaultReturnTo: must be a same-origin path");
+  }
+  const cookie = options.cookie;
+  if (cookie.name.startsWith("__Host-")) {
+    if (!cookie.secure) issues.push("bff.cookie.secure: a __Host- cookie must be Secure");
+    if (cookie.path !== "/") issues.push("bff.cookie.path: a __Host- cookie must have path /");
+    if (cookie.domain !== undefined) {
+      issues.push("bff.cookie.domain: a __Host- cookie must not set a domain");
+    }
+  } else if (cookie.name.startsWith("__Secure-") && !cookie.secure) {
+    issues.push("bff.cookie.secure: a __Secure- cookie must be Secure");
+  }
+  const cookiePath = cookie.path.endsWith("/") ? cookie.path : `${cookie.path}/`;
+  if (cookie.path !== "/" && !`${options.mountPath}/`.startsWith(cookiePath)) {
+    // The pending-login cookie lives at cookie.path and must reach the callback.
+    issues.push("bff.mountPath: must be below bff.cookie.path (the cookies must reach it)");
   }
   const keys =
     typeof options.encryptionKey === "string" ? [options.encryptionKey] : options.encryptionKey;
@@ -366,8 +409,17 @@ class BffEngine {
 
     const helpers: BffHelpers = {
       mountPath: mount,
-      requireLogin: () => this.#requireLogin(),
-      requireAcr: (acr) => this.#requireAcr(acr),
+      requireLogin: (requireOptions) => this.#requireLogin(requireOptions ?? {}),
+      requireAcr: (acr, requireOptions) => this.#requireAcr(acr, requireOptions ?? {}),
+      requireCsrf: () =>
+        this.#middleware(async (req, _res, next) => {
+          const loaded = await this.#load(req, undefined, false);
+          if (loaded === null) {
+            throw new PortvaktError("invalid_csrf_token", "no session to check against", 403);
+          }
+          this.#checkCsrf(req, loaded);
+          next();
+        }),
       getAccessToken: (req, getOptions) => this.#getAccessToken(req, getOptions ?? {}),
       principal: (req) => this.#loaded.get(req)?.principal,
       loadSession: async (req) => {
@@ -386,7 +438,7 @@ class BffEngine {
         if (error instanceof PortvaktUnavailableError) {
           res
             .status(503)
-            .set("Retry-After", "5")
+            .set("Retry-After", String(error.retryAfterSeconds ?? 5))
             .set("Cache-Control", "no-store")
             .json({ error: error.code });
           return;
@@ -429,7 +481,15 @@ class BffEngine {
       acr !== undefined ||
       prompt !== undefined ||
       (await this.#load(req, undefined, false)) !== null;
-    if (steersOrReplaces) await this.#requireSameSiteInitiation(req, query.data.csrf);
+    if (steersOrReplaces && !this.#startedHere(req)) {
+      // A navigation from another site: a page of this application whose button starts the same
+      // login from here. Anything else (fetch, a form post) is refused.
+      if (!isBrowserNavigation(req)) {
+        throw new PortvaktError("cross_site_request", "started from another site", 403);
+      }
+      this.#interstitial(res, req.originalUrl);
+      return;
+    }
     const returnTo = safeReturnTo(query.data.returnTo) ?? this.#options.defaultReturnTo;
     const configuration = await this.#discovery.get();
 
@@ -455,10 +515,10 @@ class BffEngine {
       this.#sealer.seal(JSON.stringify(transaction), txKey),
       new Date(Date.now() + timeout * 1000),
     );
-    // Lax: the cookie must arrive on the top-level redirect back from Portvakt.
+    // Lax: the cookie must arrive on the top-level redirect back from Portvakt. Same path as the
+    // session cookie (which the mount path is below), so `__Host-` names work for both.
     setCookie(res, this.#txCookie, this.#signer.sign(txId), {
       ...this.#cookieBase(),
-      path: this.#mount,
       sameSite: "lax",
       maxAge: timeout,
     });
@@ -483,54 +543,118 @@ class BffEngine {
   /**
    * A step-up or representation switch replaces the session's login, so another site must not be
    * able to start one: `Sec-Fetch-Site` must be same-origin (or none: typed or bookmarked) when
-   * the browser sends it; otherwise a same-origin Referer or the session's CSRF token (`csrf`
-   * query parameter) is required.
+   * the browser sends it; otherwise the Referer must be of this origin.
    */
-  async #requireSameSiteInitiation(req: Request, csrf: string | undefined): Promise<void> {
+  #startedHere(req: Request): boolean {
     const site = req.get("sec-fetch-site");
-    if (site !== undefined && site !== "") {
-      if (site === "same-origin" || site === "none") return;
-      throw new PortvaktError("cross_site_request", "started from another site", 403);
-    }
+    if (site !== undefined && site !== "") return site === "same-origin" || site === "none";
     const referer = req.get("referer");
-    if (referer !== undefined) {
-      try {
-        if (new URL(referer).origin === this.#origin) return;
-      } catch {
-        // Not a URL: fall through to the CSRF token.
-      }
+    if (referer === undefined) return false;
+    try {
+      return new URL(referer).origin === this.#origin;
+    } catch {
+      return false;
     }
-    const loaded = await this.#load(req, undefined, false);
-    if (csrf !== undefined && loaded !== null && safeEqual(csrf, loaded.data.csrfToken)) return;
-    throw new PortvaktError("cross_site_request", "started from another site", 403);
+  }
+
+  /**
+   * The page a navigation from another site gets instead of a step-up or representation switch
+   * it would start: minimal HTML of this application (no styles, no script, strict CSP) with a
+   * button that sends the same GET from here, so the flow starts same-site. `target` is a
+   * same-origin path of this application.
+   */
+  #interstitial(res: Response, target: string): void {
+    const url = new URL(safeReturnTo(target) ?? this.#loginUrl(), "http://interstitial.invalid");
+    const fields = [...url.searchParams]
+      .map(
+        ([name, value]) =>
+          `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`,
+      )
+      .join("");
+    res
+      .status(200)
+      .set({
+        "Cache-Control": "no-store",
+        "Content-Security-Policy":
+          "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+        // The button's request must carry this origin when the browser has no Sec-Fetch-Site.
+        "Referrer-Policy": "same-origin",
+        "X-Frame-Options": "DENY",
+      })
+      .type("html")
+      .send(
+        [
+          "<!doctype html>",
+          '<html lang="sv"><head><meta charset="utf-8">',
+          '<meta name="viewport" content="width=device-width, initial-scale=1">',
+          '<meta name="robots" content="noindex">',
+          "<title>Fortsätt till inloggning</title></head><body>",
+          "<h1>Fortsätt till inloggning</h1>",
+          "<p>Du kom hit från en annan webbplats. Fortsätt för att logga in här.</p>",
+          '<p lang="en">You came here from another site. Continue to sign in here.</p>',
+          `<form method="get" action="${escapeHtml(url.pathname)}">${fields}`,
+          '<button type="submit" data-testid="portvakt-continue">Fortsätt till inloggning</button>',
+          "</form>",
+          "</body></html>",
+        ].join("\n"),
+      );
+  }
+
+  /**
+   * CSRF protection of an unsafe request: the session's token (`X-CSRF-Token` or the parsed
+   * body's `_csrf`), and, when the browser says where the request came from, this origin.
+   */
+  #checkCsrf(req: Request, loaded: Loaded): void {
+    if (SAFE_METHODS.has(req.method)) return;
+    const site = req.get("sec-fetch-site");
+    const origin = req.get("origin");
+    if (
+      (site !== undefined && site !== "" && site !== "same-origin") ||
+      (origin !== undefined && origin !== this.#origin)
+    ) {
+      throw new PortvaktError("cross_site_request", "the request came from another site", 403);
+    }
+    const bodyToken = (req.body as { _csrf?: unknown } | undefined)?._csrf;
+    const presented = req.get("x-csrf-token") ?? (typeof bodyToken === "string" ? bodyToken : "");
+    if (!safeEqual(presented, loaded.data.csrfToken)) {
+      throw new PortvaktError("invalid_csrf_token", "the CSRF token is missing or wrong", 403);
+    }
   }
 
   async #callback(req: Request, res: Response): Promise<void> {
     res.set("Cache-Control", "no-store");
     const txId = this.#signedCookie(req, this.#txCookie);
-    setCookie(res, this.#txCookie, "", { ...this.#cookieBase(), path: this.#mount, maxAge: 0 });
     if (txId === undefined) throw new LoginFailedError("login_expired", "no pending login");
+    const query = callbackQuerySchema.safeParse(req.query);
+    if (!query.success) throw new LoginFailedError("invalid_request", "invalid callback");
+    const state = query.data.state;
     const txKey = storeKey("t", txId);
-    // Single use, atomically: of two callbacks with the same cookie only one gets the login.
-    const transaction = await this.#locked(txKey, async () => {
+    // Single use, atomically: of two callbacks with the same cookie only one gets the login. A
+    // callback whose state is not the pending login's consumes nothing, so a forged one cannot
+    // end the real login in progress.
+    const taken = await this.#locked(txKey, async () => {
       const pending = await this.#readSealed(txKey, loginTransactionSchema);
-      if (pending !== undefined) await this.#store.destroy(txKey);
-      return pending;
+      if (pending === undefined) return { kind: "none" } as const;
+      if (state === undefined || !safeEqual(state, pending.state)) {
+        return { kind: "state_mismatch" } as const;
+      }
+      await this.#store.destroy(txKey);
+      return { kind: "taken", transaction: pending } as const;
     });
+    if (taken.kind === "state_mismatch") {
+      throw new LoginFailedError("state_mismatch", "the login does not belong to this browser");
+    }
+    setCookie(res, this.#txCookie, "", { ...this.#cookieBase(), maxAge: 0 });
+    const transaction = taken.kind === "taken" ? taken.transaction : undefined;
     if (
       transaction === undefined ||
       epochNow() - transaction.createdAt > this.#options.loginTimeoutSeconds
     ) {
       throw new LoginFailedError("login_expired", "the pending login expired");
     }
-    const query = callbackQuerySchema.safeParse(req.query);
-    if (!query.success) throw new LoginFailedError("invalid_request", "invalid callback");
     if (query.data.error !== undefined) {
       const code = OAUTH_ERROR.test(query.data.error) ? query.data.error : "login_failed";
       throw new LoginFailedError(code, "Portvakt refused the login", 400);
-    }
-    if (query.data.state === undefined || !safeEqual(query.data.state, transaction.state)) {
-      throw new LoginFailedError("state_mismatch", "the login does not belong to this browser");
     }
 
     const configuration = await this.#discovery.get();
@@ -546,6 +670,13 @@ class BffEngine {
       });
     } catch (error) {
       this.#config.logger.warn(errorDetails(error), "login callback failed");
+      const transient = await transientRefusal(error);
+      if (transient !== undefined) {
+        throw new PortvaktUnavailableError("Portvakt asked to retry later", {
+          cause: error,
+          retryAfterSeconds: transient.retryAfterSeconds,
+        });
+      }
       if (isUnavailable(error)) throw new PortvaktUnavailableError(undefined, { cause: error });
       throw new LoginFailedError("login_failed", "the code exchange failed", 400, { cause: error });
     }
@@ -607,24 +738,25 @@ class BffEngine {
     res.set("Cache-Control", "no-store");
     const loaded = await this.#load(req, res, false);
     const local = this.#config.postLogoutRedirectUri ?? this.#options.defaultReturnTo;
-    if (loaded === null) {
-      this.#redirectOrJson(req, res, local);
-      return;
+    if (loaded !== null) {
+      const bodyToken = (req.body as { _csrf?: unknown } | undefined)?._csrf;
+      const presented = typeof bodyToken === "string" ? bodyToken : req.get("x-csrf-token");
+      if (presented === undefined || !safeEqual(presented, loaded.data.csrfToken)) {
+        throw new PortvaktError("invalid_csrf_token", "the CSRF token is missing or wrong", 403);
+      }
+      await this.#locked(loaded.key, () => this.#store.destroy(loaded.key));
+      this.#loaded.set(req, null);
+      this.#clearSessionCookie(res);
     }
-    const bodyToken = (req.body as { _csrf?: unknown } | undefined)?._csrf;
-    const presented = typeof bodyToken === "string" ? bodyToken : req.get("x-csrf-token");
-    if (presented === undefined || !safeEqual(presented, loaded.data.csrfToken)) {
-      throw new PortvaktError("invalid_csrf_token", "the CSRF token is missing or wrong", 403);
-    }
-    await this.#locked(loaded.key, () => this.#store.destroy(loaded.key));
-    this.#loaded.set(req, null);
-    this.#clearSessionCookie(res);
+    // Also without a local session (it ended here first, or another tab signed out): Portvakt's
+    // session may still be alive, so the browser goes through its end-session endpoint, which
+    // asks the person to confirm when there is no id_token_hint.
     let target = local;
     try {
       const configuration = await this.#discovery.get();
       if (configuration.serverMetadata().end_session_endpoint !== undefined) {
         target = client.buildEndSessionUrl(configuration, {
-          id_token_hint: loaded.data.idToken,
+          ...(loaded === null ? {} : { id_token_hint: loaded.data.idToken }),
           client_id: this.#config.clientId,
           ...(this.#config.postLogoutRedirectUri === undefined
             ? {}
@@ -664,32 +796,38 @@ class BffEngine {
 
   // Middleware -----------------------------------------------------------------------------------
 
-  #requireLogin(): RequestHandler {
+  #requireLogin(options: RequireOptions): RequestHandler {
+    const csrf = options.csrf ?? true;
     return this.#middleware(async (req, res, next) => {
       const loaded = await this.#load(req, res, true);
       if (loaded === null) {
         this.#unauthenticated(req, res);
         return;
       }
+      if (csrf) this.#checkCsrf(req, loaded);
       next();
     });
   }
 
-  #requireAcr(acr: string): RequestHandler {
+  #requireAcr(acr: string, options: RequireOptions): RequestHandler {
     if (!ACR_VALUE.test(acr)) throw new PortvaktConfigError(["requireAcr: invalid acr value"]);
+    const csrf = options.csrf ?? true;
     return this.#middleware(async (req, res, next) => {
       const loaded = await this.#load(req, res, true);
       if (loaded === null) {
         this.#unauthenticated(req, res);
         return;
       }
+      if (csrf) this.#checkCsrf(req, loaded);
       if (acrAtLeast(loaded.principal.acr, acr, this.#config.acrRanking)) {
         next();
         return;
       }
       const stepUpUrl = this.#stepUpUrl(acr, this.#returnToOf(req));
       if (isBrowserNavigation(req)) {
-        res.set("Cache-Control", "no-store").redirect(302, stepUpUrl);
+        // A deep link from another site: the step-up starts from a page of this application.
+        if (!this.#startedHere(req)) this.#interstitial(res, stepUpUrl);
+        else res.set("Cache-Control", "no-store").redirect(302, stepUpUrl);
         return;
       }
       res
@@ -705,6 +843,9 @@ class BffEngine {
     return (req, res, next) => {
       fn(req, res, next).catch((error: unknown) => {
         if (error instanceof PortvaktError && !res.headersSent) {
+          if (error instanceof PortvaktUnavailableError) {
+            res.set("Retry-After", String(error.retryAfterSeconds ?? 5));
+          }
           res.status(error.status).set("Cache-Control", "no-store").json({ error: error.code });
           return;
         }
@@ -881,6 +1022,16 @@ class BffEngine {
       const configuration = await this.#discovery.get();
       response = await client.refreshTokenGrant(configuration, current.refreshToken);
     } catch (error) {
+      // 429 or temporarily_unavailable: Portvakt refused nothing and rotated nothing. The session
+      // keeps its refresh token unchanged, no outage starts, and the request answers 503.
+      const transient = await transientRefusal(error);
+      if (transient !== undefined) {
+        this.#config.logger.warn(errorDetails(error), "refresh deferred: Portvakt asked to retry");
+        throw new PortvaktUnavailableError("Portvakt asked to retry later", {
+          cause: error,
+          retryAfterSeconds: transient.retryAfterSeconds,
+        });
+      }
       if (isUnavailable(error)) return this.#outage(key, current, error);
       if (error instanceof client.ResponseBodyError && error.error === "invalid_client") {
         // The application's own credentials are wrong: a configuration problem, not the
@@ -911,7 +1062,9 @@ class BffEngine {
       claims = parsed.data;
       idToken = response.id_token;
     }
+    // The session's end only ever moves earlier: a refreshed session_exp never extends it.
     const endsAt = Math.min(
+      current.endsAt,
       current.createdAt + this.#options.maxAgeSeconds,
       claims.session_exp ?? current.endsAt,
     );
@@ -1022,6 +1175,9 @@ class BffEngine {
       return;
     }
     res.status(error.status).set("Cache-Control", "no-store");
+    if (error instanceof PortvaktUnavailableError) {
+      res.set("Retry-After", String(error.retryAfterSeconds ?? 5));
+    }
     if (wantsJson(req)) {
       res.json({ error: error.code });
       return;

@@ -13,6 +13,30 @@ export interface PayloadIndexes {
 const payloadSchema = z.record(z.string(), z.unknown());
 export type StoredPayload = z.infer<typeof payloadSchema>;
 
+/**
+ * Which logins a kill switch ends (`revokeLogins`): every login state of the tenant, or the
+ * grants and sessions of one application, one person, one login method, or one person's logins
+ * through one login method. Every field given must match.
+ */
+export type LoginRevocationScope =
+  | { readonly all: true }
+  | {
+      readonly all?: false;
+      readonly clientId?: string;
+      readonly personId?: string;
+      readonly loginMethodId?: string;
+    };
+
+export interface LoginRevocationResult {
+  /** Broker sessions ended (oidc-provider Session plus the session record). */
+  readonly sessions: number;
+  /** Grants revoked with their codes and tokens. */
+  readonly grants: number;
+}
+
+/** Kinds a tenant-wide revocation keeps: single-use markers, never login state. */
+const KEPT_ON_REVOCATION = ["ReplayDetection", "PortvaktAuditOnce"];
+
 /** Rows deleted per statement by the cleanup job. */
 const DEFAULT_CLEANUP_BATCH = 5000;
 
@@ -202,6 +226,94 @@ export class OidcPayloadRepository {
       params,
     );
     return rows.length > 0;
+  }
+
+  /**
+   * Kill switch: ends the logins of `scope` at once, in the caller's transaction. Grants (with
+   * their codes and refresh tokens) are revoked when their grant login or the Grant itself
+   * matches; broker sessions (oidc-provider's Session and the session record, with every grant
+   * issued in them) end when the session's login matches by person or login method. Nothing is
+   * kept to bring back: re-enabling what was switched off never revives a refresh token.
+   * Access tokens are self-contained JWTs and live until they expire (ACCESS_TOKEN_TTL).
+   */
+  async revokeLogins(
+    tenantId: string,
+    scope: LoginRevocationScope,
+  ): Promise<LoginRevocationResult> {
+    requireUuids({ tenantId });
+    if (scope.all === true) {
+      const rows = await this.#db.query<{ kind: string }>(
+        `DELETE FROM oidc_payloads WHERE tenant_id = $1 AND kind <> ALL ($2::text[])
+         RETURNING kind`,
+        [tenantId, KEPT_ON_REVOCATION],
+      );
+      return {
+        sessions: rows.filter((row) => row.kind === "Session").length,
+        grants: rows.filter((row) => row.kind === "Grant").length,
+      };
+    }
+    const { clientId = null, personId = null, loginMethodId = null } = scope;
+    if (clientId === null && personId === null && loginMethodId === null) {
+      throw new TypeError("revokeLogins needs a scope");
+    }
+    if (personId !== null) requireUuids({ personId });
+    if (loginMethodId !== null) requireUuids({ loginMethodId });
+    // Sessions are matched by their latest login (person, login method), never by application.
+    const sessions =
+      personId === null && loginMethodId === null
+        ? []
+        : (
+            await this.#db.query<{ id: string }>(
+              `SELECT id FROM oidc_payloads
+                WHERE tenant_id = $1 AND kind = 'PortvaktSession'
+                  AND ($2::text IS NULL OR payload ->> 'personId' = $2)
+                  AND ($3::text IS NULL OR payload ->> 'loginMethodId' = $3
+                       OR payload -> 'upstreams' @> jsonb_build_array(
+                            jsonb_build_object('loginMethodId', $3::text)))`,
+              [tenantId, personId, loginMethodId],
+            )
+          ).map((row) => row.id);
+    const grants = await this.#db.query<{ id: string }>(
+      `SELECT id FROM oidc_payloads
+        WHERE tenant_id = $1 AND kind = 'PortvaktGrantLogin'
+          AND ($2::text IS NULL OR payload ->> 'clientId' = $2)
+          AND ($3::text IS NULL OR payload ->> 'personId' = $3)
+          AND ($4::text IS NULL OR payload ->> 'loginMethodId' = $4)
+       UNION
+       SELECT id FROM oidc_payloads
+        WHERE tenant_id = $1 AND kind = 'Grant' AND $4::text IS NULL
+          AND ($2::text IS NULL OR payload ->> 'clientId' = $2)
+          AND ($3::text IS NULL OR payload ->> 'accountId' = $3)
+       UNION
+       SELECT entry.value ->> 'grantId' FROM oidc_payloads s,
+              jsonb_each(CASE WHEN jsonb_typeof(s.payload -> 'authorizations') = 'object'
+                              THEN s.payload -> 'authorizations' ELSE '{}'::jsonb END)
+                AS entry
+        WHERE s.tenant_id = $1 AND s.kind = 'Session' AND s.uid = ANY ($5::text[])
+          AND entry.value ->> 'grantId' IS NOT NULL`,
+      [tenantId, clientId, personId, loginMethodId, sessions],
+    );
+    const grantIds = grants.map((row) => row.id);
+    const deletedGrants = await this.#db.query<{ kind: string }>(
+      `DELETE FROM oidc_payloads
+        WHERE tenant_id = $1
+          AND (grant_id = ANY ($2::text[])
+               OR (kind IN ('Grant', 'PortvaktGrantLogin') AND id = ANY ($2::text[])))
+       RETURNING kind`,
+      [tenantId, grantIds],
+    );
+    const deletedSessions = await this.#db.query<{ kind: string }>(
+      `DELETE FROM oidc_payloads
+        WHERE tenant_id = $1
+          AND ((kind = 'Session' AND uid = ANY ($2::text[]))
+               OR (kind = 'PortvaktSession' AND id = ANY ($2::text[])))
+       RETURNING kind`,
+      [tenantId, sessions],
+    );
+    return {
+      sessions: deletedSessions.filter((row) => row.kind === "PortvaktSession").length,
+      grants: deletedGrants.filter((row) => row.kind === "Grant").length,
+    };
   }
 
   /** Revokes a grant: deletes its grant-bound tokens and the Grant itself. */

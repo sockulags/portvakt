@@ -10,7 +10,7 @@ import {
 import express, { type Request, type RequestHandler, type Response } from "express";
 import type { AdminConfig } from "./config.js";
 import { requestIds } from "./observability.js";
-import { TenantLookupError } from "./tenants.js";
+import { TenantLookupError, TenantLookupLimitedError } from "./tenants.js";
 
 /** The admin API below Portvakt's origin. */
 export const ADMIN_API_PATH = "/admin/api/v1";
@@ -178,6 +178,11 @@ export function apiProxy(
       if (res.headersSent) return;
       if (error instanceof LoginRequiredError) {
         fail(res, 401, "login_required");
+        return;
+      }
+      if (error instanceof TenantLookupLimitedError) {
+        res.set("Retry-After", String(error.retryAfterSeconds));
+        fail(res, 429, "rate_limited");
         return;
       }
       if (

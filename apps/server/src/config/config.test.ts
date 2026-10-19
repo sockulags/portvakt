@@ -32,6 +32,7 @@ const productionEnv = {
   MASTER_KEY: strongKey(),
   COOKIE_KEYS: `${randomBytes(32).toString("base64url")},${randomBytes(32).toString("base64url")}`,
   METRICS_TOKEN: randomBytes(32).toString("base64url"),
+  ADMIN_MIN_ACR: "http://id.elegnamnden.se/loa/1.0/loa3",
 };
 
 function issuesOf(env: NodeJS.ProcessEnv): readonly string[] {
@@ -123,7 +124,7 @@ describe("loadConfig", () => {
   it("parses previous master keys, durations and strips a trailing slash", () => {
     const config = loadConfig({
       ...devEnv,
-      PUBLIC_URL: "https://auth.example.org/",
+      PUBLIC_URL: "https://auth.localhost/",
       MASTER_KEY_PREVIOUS: `${DEV_MASTER_KEYS[1]}, ${strongKey()}`,
       KEY_ROTATION_INTERVAL: "30d",
       KEY_PUBLISH_AHEAD: "1d",
@@ -131,7 +132,7 @@ describe("loadConfig", () => {
       LOG_LEVEL: "debug",
       PORT: "8080",
     });
-    expect(config.publicUrl).toBe("https://auth.example.org");
+    expect(config.publicUrl).toBe("https://auth.localhost");
     expect(config.masterKeys.previous).toHaveLength(2);
     expect(config.keyRotation.retireAfterSeconds).toBe(43_200);
     expect(config.port).toBe(8080);
@@ -289,7 +290,7 @@ describe("loadConfig: OIDC core settings", () => {
     [{ TRUST_PROXY: "loopback" }, "TRUST_PROXY"],
     [{ TRUST_PROXY: "1d" }, "TRUST_PROXY"],
     [{ TRUST_PROXY: "100" }, "TRUST_PROXY"],
-    [{ PUBLIC_URL: "https://auth.example.org/portvakt" }, "PUBLIC_URL"],
+    [{ PUBLIC_URL: "https://auth.localhost/portvakt" }, "PUBLIC_URL"],
     [{ NODE_ENV: "test", PUBLIC_URL: "https://login.example.org" }, "NODE_ENV"],
     [{ NODE_ENV: "test", PUBLIC_URL: "http://10.0.0.5:3000" }, "NODE_ENV"],
     [{ SESSION_TTL: "3d", REFRESH_TOKEN_TTL: "1h" }, "KEY_RETIRE_AFTER"],
@@ -310,10 +311,50 @@ describe("loadConfig: test mode", () => {
     "http://localhost:3000",
     "http://127.0.0.1:4000",
     "http://[::1]:4000",
-    "https://portvakt.test",
+    "http://127.0.0.2:4000",
     "http://app.localhost",
-  ])("allows NODE_ENV=test with PUBLIC_URL %s", (url) => {
+  ])("allows NODE_ENV=test and development with PUBLIC_URL %s", (url) => {
     expect(loadConfig({ ...devEnv, NODE_ENV: "test", PUBLIC_URL: url }).nodeEnv).toBe("test");
+    expect(loadConfig({ ...devEnv, NODE_ENV: "development", PUBLIC_URL: url }).nodeEnv).toBe(
+      "development",
+    );
+  });
+
+  it.each([
+    "https://portvakt.test",
+    "https://login.example.org",
+    "http://10.0.0.5:3000",
+    "http://localhost.example.org",
+    "http://0.0.0.0:3000",
+  ])("refuses development and test mode with PUBLIC_URL %s (config:check too)", (url) => {
+    for (const nodeEnv of ["test", "development", undefined]) {
+      const env = {
+        ...devEnv,
+        PUBLIC_URL: url,
+        ...(nodeEnv === undefined ? {} : { NODE_ENV: nodeEnv }),
+      };
+      expect(issuesOf(env)).toContainEqual(
+        expect.stringMatching(/^NODE_ENV: (test|development) mode is only allowed with a loopback/),
+      );
+      expect(checkConfig(env).issues).toContainEqual(expect.stringMatching(/^NODE_ENV: /));
+    }
+  });
+});
+
+describe("loadConfig: ADMIN_MIN_ACR", () => {
+  it("takes a ranked acr, refuses an unranked one, and warns in production when unset", () => {
+    const loa3 = "http://id.elegnamnden.se/loa/1.0/loa3";
+    expect(loadConfig({ ...devEnv, ADMIN_MIN_ACR: loa3 }).admin.minAcr).toBe(loa3);
+    expect(loadConfig(devEnv).admin.minAcr).toBeUndefined();
+    expect(issuesOf({ ...devEnv, ADMIN_MIN_ACR: "urn:portvakt:acr:employee" })).toContain(
+      "ADMIN_MIN_ACR: must be one of the values of ACR_RANKING",
+    );
+    const { ADMIN_MIN_ACR: _unset, ...withoutMinimum } = productionEnv;
+    void _unset;
+    expect(checkConfig(withoutMinimum).warnings).toContainEqual(
+      expect.stringMatching(/^ADMIN_MIN_ACR: not set/),
+    );
+    expect(checkConfig(productionEnv).warnings).toEqual([]);
   });
 });
 

@@ -204,6 +204,45 @@ describe.skipIf(ts === undefined)("admin sign-in through upstream IdPs", () => {
     ]);
   });
 
+  it("warns at save when pinLoginHint is set but the upstream has no PAR", async () => {
+    const methodBody = (displayName: string) => ({
+      protocol: "oidc",
+      kind: "citizen",
+      displayName,
+      issuer: idp!.issuer("bankid"),
+      clientId: "portvakt-dev",
+      clientSecret: "dev-secret-0123456789abcdef",
+      claimMapping: { subject: "sub", pin: "personal_identity_number", acr: "acr" },
+      assertedAcr: "http://id.elegnamnden.se/loa/1.0/loa3",
+      pinLoginHint: true,
+      sessionPolicy: { maxAgeSeconds: 3600, idleSeconds: 600, allowSso: true },
+    });
+    const create = (displayName: string) =>
+      adminCall<{ warnings: { code: string; field?: string }[] }>(
+        ts!,
+        platform,
+        "POST",
+        `/tenants/${tenant.id}/login-methods`,
+        { body: methodBody(displayName) },
+      );
+    const withPar = await create("BankID with PAR");
+    expect(withPar.status).toBe(201);
+    expect(withPar.body.warnings.map((warning) => warning.code)).not.toContain(
+      "pin_login_hint_without_par",
+    );
+    const bankidIdp = idp!.idp.oidc("bankid");
+    bankidIdp.advertisePushedAuthorizationRequests(false);
+    try {
+      const withoutPar = await create("BankID without PAR");
+      expect(withoutPar.status).toBe(201);
+      expect(withoutPar.body.warnings).toContainEqual(
+        expect.objectContaining({ code: "pin_login_hint_without_par", field: "pinLoginHint" }),
+      );
+    } finally {
+      bankidIdp.advertisePushedAuthorizationRequests(true);
+    }
+  });
+
   it("refuses an admin token issued while representing someone", async () => {
     const { repos } = ts!.db;
     await repos.applications.update(world.application.id, { representationMode: "optional" });

@@ -1,10 +1,6 @@
 package se.portvakt.spring.login;
 
 import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletRequestWrapper;
-import java.net.URI;
-import java.security.MessageDigest;
-import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -13,9 +9,6 @@ import org.springframework.security.oauth2.client.registration.ClientRegistratio
 import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizationRequestResolver;
 import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestResolver;
 import org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest;
-import org.springframework.security.web.csrf.CsrfToken;
-import org.springframework.security.web.csrf.DeferredCsrfToken;
-import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler;
 import se.portvakt.sdk.PortvaktException;
 import se.portvakt.spring.web.HttpRequests;
 
@@ -38,8 +31,10 @@ import se.portvakt.spring.web.HttpRequests;
  * session's login, so another site must not be able to start one; the same holds for a login with
  * {@code acr} or {@code prompt}, and for any login while a session exists: {@code Sec-Fetch-Site}
  * must be {@code same-origin} or {@code none} when the browser sends it; otherwise a same-origin
- * {@code Referer} or the session's CSRF token as {@code csrf} is required. A plain login without
- * a session may be started from anywhere (a link to "Logga in").
+ * {@code Referer} is required. A browser navigation from another site gets the interstitial page
+ * ({@link CrossSiteNavigationException}), whose button starts the route from here; anything else
+ * is refused ({@code cross_site_request}). A plain login without a session may be started from
+ * anywhere (a link to "Logga in").
  */
 public class PortvaktAuthorizationRequestResolver implements OAuth2AuthorizationRequestResolver {
   /** Authorization request attribute: {@code login}, {@code step_up}, {@code select_representation}. */
@@ -53,7 +48,7 @@ public class PortvaktAuthorizationRequestResolver implements OAuth2Authorization
   private static final Pattern UI_LOCALES =
       Pattern.compile("^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*( [A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*)*$");
   private static final Set<String> PROMPTS = Set.of("login", "select_account", "none");
-  private static final Set<String> PARAMETERS = Set.of("returnTo", "acr", "prompt", "loginHint", "csrf", "uiLocales");
+  private static final Set<String> PARAMETERS = Set.of("returnTo", "acr", "prompt", "loginHint", "uiLocales");
 
   private record Request(String kind, String returnTo, String acr, Map<String, Object> parameters) {}
 
@@ -116,8 +111,6 @@ public class PortvaktAuthorizationRequestResolver implements OAuth2Authorization
     }
     String uiLocales = query.get("uiLocales");
     if (uiLocales != null && (uiLocales.length() > 100 || !UI_LOCALES.matcher(uiLocales).matches())) throw invalid();
-    String csrf = query.get("csrf");
-    if (csrf != null && csrf.length() > 256) throw invalid();
     if (query.containsKey("returnTo") && query.get("returnTo").length() > 4096) throw invalid();
     if (kind.equals("step_up") && acr == null) {
       throw new PortvaktException("invalid_request", "acr is required for a step-up", 400);
@@ -129,7 +122,11 @@ public class PortvaktAuthorizationRequestResolver implements OAuth2Authorization
             || acr != null
             || prompt != null
             || PortvaktSessionState.of(request.getSession(false)) != null;
-    if (replacesOrSteers) requireSameSiteInitiation(request, csrf);
+    if (replacesOrSteers && !SameSiteStart.startedHere(request, settings)) {
+      if (!HttpRequests.isBrowserNavigation(request)) throw crossSite();
+      String queryString = request.getQueryString();
+      throw new CrossSiteNavigationException(request.getRequestURI() + (queryString == null ? "" : "?" + queryString));
+    }
 
     String returnTo = HttpRequests.safeReturnTo(query.get("returnTo"));
     if (returnTo == null) returnTo = settings.defaultReturnTo();
@@ -149,68 +146,6 @@ public class PortvaktAuthorizationRequestResolver implements OAuth2Authorization
     } finally {
       CURRENT.remove();
     }
-  }
-
-  private void requireSameSiteInitiation(HttpServletRequest request, String csrf) {
-    String site = request.getHeader("Sec-Fetch-Site");
-    if (site != null && !site.isEmpty()) {
-      if (site.equals("same-origin") || site.equals("none")) return;
-      throw crossSite();
-    }
-    String referer = request.getHeader("Referer");
-    if (referer != null) {
-      try {
-        URI uri = URI.create(referer);
-        String origin = uri.getScheme() + "://" + uri.getHost() + (uri.getPort() < 0 ? "" : ":" + uri.getPort());
-        if (sameOrigin(origin, request)) return;
-      } catch (IllegalArgumentException notAUrl) {
-        // Fall through to the CSRF token.
-      }
-    }
-    if (csrf != null && csrfMatches(request, csrf)) return;
-    throw crossSite();
-  }
-
-  private boolean sameOrigin(String origin, HttpServletRequest request) {
-    String own = HttpRequests.originOf(request);
-    String redirect = settings.redirectUri();
-    if (!redirect.startsWith("{")) {
-      URI uri = URI.create(redirect);
-      own = uri.getScheme() + "://" + uri.getHost() + (uri.getPort() < 0 ? "" : ":" + uri.getPort());
-    }
-    return normalise(own).equals(normalise(origin));
-  }
-
-  private static String normalise(String origin) {
-    return origin.toLowerCase(java.util.Locale.ROOT).replaceFirst("^http://([^/]+):80$", "http://$1")
-        .replaceFirst("^https://([^/]+):443$", "https://$1");
-  }
-
-  /** The session's CSRF token (Spring Security's), raw or in its masked (XOR) form. */
-  private static boolean csrfMatches(HttpServletRequest request, String presented) {
-    Object deferred = request.getAttribute(DeferredCsrfToken.class.getName());
-    if (!(deferred instanceof DeferredCsrfToken token) || token.isGenerated()) return false;
-    CsrfToken raw = token.get();
-    if (raw == null) return false;
-    if (constantTimeEquals(presented, raw.getToken())) return true;
-    HttpServletRequestWrapper wrapper =
-        new HttpServletRequestWrapper(request) {
-          @Override
-          public String getHeader(String name) {
-            return name.equalsIgnoreCase(raw.getHeaderName()) ? null : super.getHeader(name);
-          }
-
-          @Override
-          public String getParameter(String name) {
-            return name.equals(raw.getParameterName()) ? presented : super.getParameter(name);
-          }
-        };
-    String resolved = new XorCsrfTokenRequestAttributeHandler().resolveCsrfTokenValue(wrapper, raw);
-    return resolved != null && constantTimeEquals(resolved, raw.getToken());
-  }
-
-  private static boolean constantTimeEquals(String a, String b) {
-    return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
   }
 
   private static PortvaktException invalid() {

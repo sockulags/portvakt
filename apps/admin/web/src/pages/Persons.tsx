@@ -130,6 +130,8 @@ function PersonDetail({ id }: { readonly id: string }) {
   const [confirming, setConfirming] = useState(false);
   const [unlinking, setUnlinking] = useState<Person["identities"][number] | undefined>();
   const [deleting, setDeleting] = useState(false);
+  const [ending, setEnding] = useState(false);
+  const [ended, setEnded] = useState<{ sessions: number; grants: number } | undefined>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>();
 
@@ -170,6 +172,23 @@ function PersonDetail({ id }: { readonly id: string }) {
         ),
       );
       setUnlinking(undefined);
+    } catch (failure) {
+      setError(failure);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const endSessions = async () => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      setEnded(
+        await api.send<{ sessions: number; grants: number }>(
+          "POST",
+          `/tenants/${tenant.id}/persons/${id}/end-sessions`,
+        ),
+      );
+      setEnding(false);
     } catch (failure) {
       setError(failure);
     } finally {
@@ -217,6 +236,17 @@ function PersonDetail({ id }: { readonly id: string }) {
               </Button>
             )}
             <Button
+              variant="secondary"
+              data-testid="end-sessions"
+              onClick={() => {
+                setError(undefined);
+                setEnded(undefined);
+                setEnding(true);
+              }}
+            >
+              {t.persons.endSessions}
+            </Button>
+            <Button
               variant="danger"
               data-testid="delete-person"
               onClick={() => {
@@ -230,6 +260,14 @@ function PersonDetail({ id }: { readonly id: string }) {
         }
       />
       <ActionError error={error} onReload={person.reload} />
+      {ended !== undefined && (
+        <p className="pv-muted" role="status" data-testid="end-sessions-done">
+          {format(t.persons.endSessionsDone, {
+            sessions: String(ended.sessions),
+            grants: String(ended.grants),
+          })}
+        </p>
+      )}
       <section className="pv-section" aria-labelledby="identities-title">
         <h2 className="pv-section-title" id="identities-title">
           {t.persons.identities}
@@ -346,6 +384,19 @@ function PersonDetail({ id }: { readonly id: string }) {
             {unlinking.loginMethodName ?? "–"}: {unlinking.subject ?? t.persons.subjectHidden}
           </p>
         </ConfirmDialog>
+      )}
+      {ending && (
+        <ConfirmDialog
+          testId="end-sessions-dialog"
+          title={format(t.persons.endSessionsTitle, { name: title })}
+          body={t.persons.endSessionsBody}
+          confirmLabel={t.persons.endSessions}
+          danger
+          busy={busy}
+          error={error}
+          onCancel={() => setEnding(false)}
+          onConfirm={() => void endSessions()}
+        />
       )}
       {deleting && (
         <ConfirmDialog

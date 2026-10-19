@@ -1,0 +1,11 @@
+# Local development only (SPRING_PROFILES_ACTIVE=local, or --spring.profiles.active=local): the
+# demo on http://localhost with Portvakt on http. Without this profile the session cookie is
+# Secure and an http issuer is refused.
+server:
+  servlet:
+    session:
+      cookie:
+        secure: ${COOKIE_SECURE:false}
+
+portvakt:
+  allow-insecure-requests: ${ALLOW_INSECURE_REQUESTS:true}

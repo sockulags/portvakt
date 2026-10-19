@@ -136,7 +136,7 @@ public final class PortvaktConfig {
     private Duration failureCacheTtl = Duration.ofSeconds(5);
     private Duration jwksCacheMaxAge = Duration.ofMinutes(5);
     private Duration jwksCooldown = Duration.ofSeconds(30);
-    private Duration jwksStaleMaxAge = Duration.ofDays(1);
+    private Duration jwksStaleMaxAge = Duration.ofHours(1);
     private AcrRanking acrRanking = AcrRanking.DEFAULT;
     private boolean allowInsecureRequests;
     private Clock clock = Clock.systemUTC();
@@ -206,7 +206,9 @@ public final class PortvaktConfig {
 
     /**
      * While refetches fail, keys stay in use until the cache max age plus this after their last
-     * successful fetch; then validation fails as unavailable. Default 1 day.
+     * successful fetch; then validation fails as unavailable. Default 1 hour: longer keeps APIs
+     * answering through a longer Portvakt outage, but also keeps a key an emergency rotation
+     * retired trusted for longer while this application cannot reach Portvakt.
      */
     public Builder jwksStaleMaxAge(Duration jwksStaleMaxAge) {
       this.jwksStaleMaxAge = jwksStaleMaxAge;

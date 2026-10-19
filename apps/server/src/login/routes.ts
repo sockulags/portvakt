@@ -28,7 +28,7 @@ import {
 } from "../representation/registry.js";
 import type { Repositories } from "../repositories/index.js";
 import type { RateLimitName } from "../config/index.js";
-import { clientIp, tooManyRequests, type RequestLimits } from "../http/rate-limits.js";
+import { clientIpKey, tooManyRequests, type RequestLimits } from "../http/rate-limits.js";
 import { csrfGuard, csrfToken } from "./csrf.js";
 import { samlRoutes } from "./saml-routes.js";
 import {
@@ -260,7 +260,7 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
    */
   const limitApi = (name: RateLimitName) => {
     return (req: Request, res: Response, next: NextFunction): void => {
-      const outcome = options.limits?.check([[name, clientIp(req)]]) ?? { allowed: true };
+      const outcome = options.limits?.check([[name, clientIpKey(req)]]) ?? { allowed: true };
       if (outcome.allowed) {
         next();
         return;
@@ -274,7 +274,9 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
   const limitInteraction = limitApi("interactionIp");
   /** Per-IP limit of the upstream callbacks (browser navigations): the login UI's error page. */
   const limitFederation = (req: Request, res: Response, next: NextFunction): void => {
-    const outcome = options.limits?.check([["federationIp", clientIp(req)]]) ?? { allowed: true };
+    const outcome = options.limits?.check([["federationIp", clientIpKey(req)]]) ?? {
+      allowed: true,
+    };
     if (outcome.allowed) {
       next();
       return;

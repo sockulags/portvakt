@@ -85,7 +85,10 @@ export interface SamlRoutesOptions {
   readonly federation: FederationService;
   readonly shell: LoginUiShell;
   readonly tenantOf: (res: Response) => TenantProvider;
-  /** Rate limit of the ACS and SLO endpoints (per IP; answers with the login UI's page). */
+  /**
+   * Rate limit of every SP endpoint (per IP; answers with the login UI's page): the metadata,
+   * the HTTP-POST pages, the ACS and SLO.
+   */
   readonly limit?: (req: Request, res: Response, next: NextFunction) => void;
 }
 
@@ -167,6 +170,7 @@ export function samlRoutes(options: SamlRoutesOptions): Router {
 
   router.get(
     "/saml/:loginMethodId/metadata",
+    limit,
     run(async (req, res) => {
       const xml = await saml.spMetadata(tenantOf(res), methodId(req));
       if (xml === null) {
@@ -185,6 +189,7 @@ export function samlRoutes(options: SamlRoutesOptions): Router {
 
   router.get(
     "/saml/:loginMethodId/post",
+    limit,
     run(async (req, res) => {
       const relayState = typeof req.query.RelayState === "string" ? req.query.RelayState : "";
       const message = await saml.postForm(tenantOf(res), methodId(req), relayState);
@@ -199,6 +204,7 @@ export function samlRoutes(options: SamlRoutesOptions): Router {
   // The HTTP-POST page of an SP-initiated LogoutRequest (rendered once).
   router.get(
     "/saml/:loginMethodId/logout",
+    limit,
     run(async (req, res) => {
       const relayState = typeof req.query.RelayState === "string" ? req.query.RelayState : "";
       const message = await saml.logoutForm(tenantOf(res), relayState);

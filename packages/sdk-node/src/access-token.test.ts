@@ -234,15 +234,17 @@ describe("access token validation", () => {
     const portvakt = client({ cooldownSeconds: 30 });
     await portvakt.verifyAccessToken(await op.signAccessToken(person()), op.clientId);
     vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
-    // A day (cache age plus stale limit) is fine while Portvakt answers nothing...
+    // Within the cache age plus the stale limit (10 min here + 1 h by default) the keys stay in use
+    // while Portvakt answers nothing...
     op.down = true;
-    vi.setSystemTime(Date.now() + 80_000_000);
+    vi.setSystemTime(Date.now() + 4_000_000);
     await expect(
       portvakt.verifyAccessToken(await op.signAccessToken(person()), op.clientId),
     ).resolves.toMatchObject({ sub: PERSON });
-    // ...a month is not: the refetch fails, and the next request (within the cooldown, so no
-    // refetch) must not fall back to the month-old keys either.
-    vi.setSystemTime(Date.now() + 30 * 86_400_000);
+    // ...past it they do not (the default was a day: a retired key stayed trusted that long):
+    // the refetch fails, and the next request (within the cooldown, so no refetch) must not
+    // fall back to the old keys either.
+    vi.setSystemTime(Date.now() + 300_000);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const token = await op.signAccessToken(person());
       expect(await refusal(portvakt, token)).toMatchObject({ code: "portvakt_unavailable" });

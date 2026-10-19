@@ -32,6 +32,7 @@ interface ApplicationRow {
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
   allowed_extra_scopes: string[];
+  service_audiences: string[];
   representation_mode: RepresentationMode;
   roles: unknown;
   attribute_keys: unknown;
@@ -56,7 +57,7 @@ const extraScopesColumnSchema = z.array(z.enum(EXTRA_SCOPES));
 const SELECT_APPLICATION = `
   SELECT a.id, a.client_id, a.name, a.enabled, a.token_endpoint_auth_method,
          a.jwks_uri, a.jwks, a.redirect_uris, a.post_logout_redirect_uris, a.allowed_extra_scopes,
-         a.representation_mode, a.created_at, a.updated_at,
+         a.service_audiences, a.representation_mode, a.created_at, a.updated_at,
          COALESCE((SELECT json_agg(json_build_object('role', r.role, 'description', r.description)
                                    ORDER BY r.role)
                      FROM application_roles r WHERE r.application_id = a.id), '[]'::json) AS roles,
@@ -96,6 +97,7 @@ function toApplication(row: ApplicationRow): Application {
     roles: rolesColumnSchema.parse(row.roles),
     attributeKeys: attributeKeysColumnSchema.parse(row.attribute_keys),
     allowedExtraScopes: extraScopesColumnSchema.parse(row.allowed_extra_scopes),
+    serviceAudiences: row.service_audiences,
     representationMode: row.representation_mode,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -143,8 +145,8 @@ export class ApplicationRepository {
           `INSERT INTO applications
              (id, client_id, name, enabled, token_endpoint_auth_method, client_secret_encrypted,
               jwks_uri, jwks, redirect_uris, post_logout_redirect_uris, allowed_extra_scopes,
-              representation_mode)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12)`,
+              representation_mode, service_audiences)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13)`,
           [
             id,
             data.clientId,
@@ -158,6 +160,7 @@ export class ApplicationRepository {
             data.postLogoutRedirectUris,
             data.allowedExtraScopes,
             data.representationMode,
+            data.serviceAudiences,
           ],
         ),
       );
@@ -232,7 +235,8 @@ export class ApplicationRepository {
            redirect_uris = COALESCE($9, redirect_uris),
            post_logout_redirect_uris = COALESCE($10, post_logout_redirect_uris),
            allowed_extra_scopes = COALESCE($11, allowed_extra_scopes),
-           representation_mode = COALESCE($12, representation_mode)
+           representation_mode = COALESCE($12, representation_mode),
+           service_audiences = COALESCE($13, service_audiences)
          WHERE id = $1
          RETURNING id`,
           [
@@ -248,6 +252,7 @@ export class ApplicationRepository {
             data.postLogoutRedirectUris ?? null,
             data.allowedExtraScopes ?? null,
             data.representationMode ?? null,
+            data.serviceAudiences ?? null,
           ],
         ),
       );

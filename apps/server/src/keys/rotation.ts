@@ -39,8 +39,8 @@ export const rotateNowInputSchema = z
     /** Short reason for the audit log. No personal data. */
     reason: z.string().trim().min(1).max(500),
     /**
-     * Key compromise: a new key signs at once and the previous active key is retired immediately
-     * instead of retiring after KEY_RETIRE_AFTER, so tokens it signed stop verifying at once.
+     * Key compromise: a freshly generated key signs at once and every other key (next, active,
+     * retiring) is retired immediately, so every outstanding token stops verifying at once.
      * Otherwise the new key is published now and signs after KEY_MANUAL_PUBLISH_AHEAD.
      */
     emergency: z.boolean(),
@@ -56,7 +56,7 @@ export type RotationResult =
       readonly activatedKid: string;
       /** The previous active key, now `retiring` (published, no longer signing), if any. */
       readonly retiringKid: string | null;
-      /** Keys retired by this call (the previous active key in an emergency). */
+      /** Keys retired by this call (an emergency: every key but the new one). */
       readonly retiredKids: readonly string[];
     }
   | {
@@ -204,9 +204,10 @@ export class KeyRotationService {
    * (or a new one) gets an activation time KEY_MANUAL_PUBLISH_AHEAD after it was published, and
    * the rotation job activates it then (`scheduled`), so every verifier has fetched the new key
    * before anything is signed with it. A `next` key published at least that long ago is
-   * activated at once (`activated`). With `emergency` (key compromise) a new key signs at once
-   * (forced, no wait) and the previous active key is retired immediately: tokens it signed stop
-   * verifying. Every rotation is audited with the actor and reason (`key.rotate`).
+   * activated at once (`activated`). With `emergency` (key compromise) a freshly generated key
+   * signs at once (forced, no wait) and every other key (a pending `next`, the previous active
+   * key and every retiring key) is retired in the same transaction, so JWKS publishes only the
+   * new key and every outstanding token stops verifying. Every rotation is audited with the actor and reason (`key.rotate`).
    */
   async rotateNow(input: RotateNowInput, hooks: RotateNowHooks = {}): Promise<RotationResult> {
     const parsed = rotateNowInputSchema.safeParse(input);
@@ -218,19 +219,27 @@ export class KeyRotationService {
     const { manualPublishAheadSeconds } = this.#options.policy;
     const result = await this.#exclusive(true, async (repos): Promise<RotationResult> => {
       await hooks.check?.(repos);
-      const next = (await repos.signingKeys.list(["next"]))[0] ?? (await this.#createNext(repos));
       let rotated: RotationResult;
       if (emergency) {
-        const activation = await repos.signingKeys.activate(next.kid, forced);
+        // Every key that could have been exposed with the compromised one goes: a pending `next`
+        // key (its private part sat in the same database) and every retiring key. A fresh key
+        // signs at once, and JWKS publishes nothing else, so every outstanding token stops
+        // verifying.
         const retiredKids: string[] = [];
-        if (activation.retiring !== null) {
-          await repos.signingKeys.retire(activation.retiring.kid, forced);
-          retiredKids.push(activation.retiring.kid);
+        for (const pending of await repos.signingKeys.list(["next"])) {
+          await repos.signingKeys.discardNext(pending.kid);
+          retiredKids.push(pending.kid);
         }
-        await this.#appendRotate(repos, actor, next.kid, {
+        const fresh = await this.#createNext(repos);
+        const activation = await repos.signingKeys.activate(fresh.kid, forced);
+        for (const retiring of await repos.signingKeys.list(["retiring"])) {
+          await repos.signingKeys.retire(retiring.kid, forced);
+          retiredKids.push(retiring.kid);
+        }
+        await this.#appendRotate(repos, actor, fresh.kid, {
           reason,
           emergency,
-          retiringKid: activation.retiring?.kid ?? null,
+          retiringKid: null,
           retiredKids,
         });
         rotated = {
@@ -240,6 +249,7 @@ export class KeyRotationService {
           retiredKids,
         };
       } else {
+        const next = (await repos.signingKeys.list(["next"]))[0] ?? (await this.#createNext(repos));
         const scheduled = await repos.signingKeys.scheduleActivation(
           next.kid,
           manualPublishAheadSeconds,

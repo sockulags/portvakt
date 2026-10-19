@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTenant, uniqueSuffix } from "../testing/fixtures.js";
 import { startTestServer } from "../testing/test-server.js";
 
@@ -12,6 +12,34 @@ describe.skipIf(ts === undefined)("discovery and JWKS per tenant", () => {
     const response = await fetch(`${baseUrl}${path}`);
     return { status: response.status, body: (await response.json()) as Record<string, unknown> };
   }
+
+  it("remembers a slug no tenant has briefly, and finds a tenant created with it at once", async () => {
+    const slug = `ghost-${uniqueSuffix()}`;
+    const lookups = vi.spyOn(portvakt.repos.tenants, "findActiveBySlug");
+    try {
+      const path = `/t/${slug}/.well-known/openid-configuration`;
+      for (let i = 0; i < 5; i += 1) expect((await getJson(path)).status).toBe(404);
+      for (let i = 0; i < 3; i += 1) {
+        expect((await fetch(`${baseUrl}/t/${slug}/jwks`)).status).toBe(404);
+      }
+      // One database lookup for all eight requests.
+      expect(lookups.mock.calls.filter(([value]) => value === slug)).toHaveLength(1);
+      // Creating the tenant invalidates the negative cache (change event).
+      await repos.tenants.create({ slug, name: "Ghost" });
+      await expect.poll(async () => (await getJson(path)).status).toBe(200);
+    } finally {
+      lookups.mockRestore();
+    }
+  });
+
+  it("does not remember a suspended tenant as unknown: reactivating it works at once", async () => {
+    const tenant = await createTenant(repos, "napping");
+    await repos.tenants.update(tenant.id, { status: "suspended" });
+    const path = `/t/${tenant.slug}/.well-known/openid-configuration`;
+    await expect.poll(async () => (await getJson(path)).status).toBe(404);
+    await repos.tenants.update(tenant.id, { status: "active" });
+    await expect.poll(async () => (await getJson(path)).status).toBe(200);
+  });
 
   it("publishes one issuer per tenant, each with its own endpoints", async () => {
     const a = await createTenant(repos, "acme");

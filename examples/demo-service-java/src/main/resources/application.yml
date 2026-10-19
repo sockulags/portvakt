@@ -1,7 +1,9 @@
 # The Java demo service, "Tjänst C" by default (client service-c of the dev seed, port 3300).
 # Environment variables as for the TypeScript demo: APP_NAME, PORT, PUBLIC_URL, ISSUER,
-# CLIENT_ID, CLIENT_SECRET, COOKIE_NAME, STEP_UP_ACR, OUTAGE_GRACE, IDLE_TIMEOUT. Development
-# defaults; DEMO_PRODUCTION=true refuses the development secret and an http issuer.
+# CLIENT_ID, CLIENT_SECRET, COOKIE_NAME, STEP_UP_ACR, OUTAGE_GRACE, IDLE_TIMEOUT. The session
+# cookie is Secure and an http issuer refused unless the `local` profile is active
+# (SPRING_PROFILES_ACTIVE=local: application-local.yml); DEMO_PRODUCTION=true also refuses the
+# development secret, an http issuer, an insecure cookie and one without SameSite.
 server:
   port: ${PORT:3300}
   servlet:
@@ -11,7 +13,7 @@ server:
         name: ${COOKIE_NAME:demo_c_session}
         http-only: true
         same-site: lax
-        secure: ${COOKIE_SECURE:false}
+        secure: ${COOKIE_SECURE:true}
 
 spring:
   application:
@@ -23,8 +25,8 @@ portvakt:
   issuer: ${ISSUER:http://localhost:3000/t/demo}
   client-id: ${CLIENT_ID:service-c}
   client-secret: ${CLIENT_SECRET:dev-only-service-c-client-secret-0123456789}
-  # Local development only: Portvakt on http://localhost.
-  allow-insecure-requests: ${ALLOW_INSECURE_REQUESTS:true}
+  # http to Portvakt only with the local profile (application-local.yml).
+  allow-insecure-requests: ${ALLOW_INSECURE_REQUESTS:false}
   login:
     enabled: true
     redirect-uri: ${PUBLIC_URL:http://localhost:3300}/auth/callback

@@ -5,12 +5,13 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type ApiClient } from "./api";
 import { I18nContext, MESSAGES } from "./i18n";
+import { ApplicationEditor } from "./pages/ApplicationEditor";
 import { ApplicationsPage } from "./pages/Applications";
 import { LoginMethodsPage } from "./pages/LoginMethods";
 import { PersonsPage } from "./pages/Persons";
 import { TenantsPage } from "./pages/Tenants";
 import type { Location } from "./router";
-import type { LoginMethod, Me, Person, Tenant, TenantApplication } from "./types";
+import type { Application, LoginMethod, Me, Person, Tenant, TenantApplication } from "./types";
 import { AdminContext, CopyValue, Modal, type Admin } from "./ui";
 
 afterEach(() => {
@@ -364,5 +365,86 @@ describe("removing things", () => {
       etag: '"p1"',
     });
     await waitFor(() => expect(admin.go).toHaveBeenCalledWith("persons"));
+  });
+
+  it("signs a person out everywhere only after the confirmation, and reports the counts", async () => {
+    const PERSON_ID = "4b3a2c1d-6e5f-4a7b-9c8d-2e1f0a3b4c5d";
+    const person: Person = {
+      id: PERSON_ID,
+      displayName: "Bo Berg",
+      email: null,
+      protectedIdentity: false,
+      createdAt: "2026-10-01T00:00:00.000Z",
+      lastLoginAt: null,
+      identities: [],
+      roleAssignments: [],
+      attributeAssignments: [],
+      grants: [],
+      etag: '"p2"',
+    };
+    const get = vi.fn().mockResolvedValue(person);
+    const send = vi.fn().mockResolvedValue({ sessions: 2, grants: 3 });
+    renderPage("persons", PERSON_ID, { get, send });
+    await userEvent.click(await screen.findByTestId("end-sessions"));
+    expect(screen.getByTestId("end-sessions-dialog").textContent).toContain(
+      MESSAGES.sv.persons.endSessionsBody,
+    );
+    expect(send).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByTestId("end-sessions-dialog-confirm"));
+    expect(send).toHaveBeenCalledWith(
+      "POST",
+      `/tenants/${TENANT.id}/persons/${PERSON_ID}/end-sessions`,
+    );
+    expect((await screen.findByTestId("end-sessions-done")).textContent).toBe(
+      "Utloggad: 2 sessioner och 3 tjänstebehörigheter avslutades.",
+    );
+    expect(screen.queryByTestId("end-sessions-dialog")).toBeNull();
+  });
+});
+
+describe("application editor", () => {
+  it("edits serviceAudiences as one client ID per line and sends only what changed", async () => {
+    const application: Application = {
+      id: "6c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+      clientId: "service-c",
+      name: "Tjänst C",
+      enabled: true,
+      clientAuth: { method: "client_secret_basic" },
+      redirectUris: ["https://c.example.test/auth/callback"],
+      postLogoutRedirectUris: [],
+      roles: [],
+      attributeKeys: [],
+      allowedExtraScopes: [],
+      serviceAudiences: ["service-a"],
+      representationMode: "none",
+      etag: '"a1"',
+    };
+    const send = vi.fn().mockResolvedValue({ application });
+    const onSaved = vi.fn();
+    const admin = {
+      api: { slug: "system", session: vi.fn(), logout: vi.fn(), get: vi.fn(), send },
+      me: { personId: "p", tenant: TENANT, platform: true, roles: ["platform-admin"] },
+      tenant: TENANT,
+      tenants: [TENANT],
+      location: { slug: "system", page: "applications", id: undefined, tenant: undefined },
+      go: vi.fn(),
+      reloadTenants: vi.fn(() => Promise.resolve()),
+    } as unknown as Admin;
+    render(
+      <I18nContext.Provider value={{ locale: "sv", t: MESSAGES.sv, setLocale: () => undefined }}>
+        <AdminContext.Provider value={admin}>
+          <ApplicationEditor application={application} onClose={vi.fn()} onSaved={onSaved} />
+        </AdminContext.Provider>
+      </I18nContext.Provider>,
+    );
+    const field = screen.getByTestId<HTMLTextAreaElement>("application-edit-service-audiences");
+    expect(field.value).toBe("service-a");
+    await userEvent.type(field, "{enter}archive-service");
+    await userEvent.click(screen.getByTestId("application-edit-save"));
+    expect(send).toHaveBeenCalledWith("PATCH", `/applications/${application.id}`, {
+      body: { serviceAudiences: ["service-a", "archive-service"] },
+      etag: '"a1"',
+    });
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
   });
 });

@@ -4,6 +4,7 @@ import {
   type PortvaktLogger,
   type SessionStore,
 } from "@portvakt/sdk-node";
+import { TokenBucketLimiter } from "@portvakt/http-kit";
 import type { AdminConfig } from "./config.js";
 
 /** Tenant slugs as Portvakt accepts them (`/t/{slug}`). */
@@ -17,6 +18,17 @@ const MAX_CLIENTS = 200;
 /** Unknown slugs remembered (negative cache), and for how long. */
 const MAX_UNKNOWN = 1000;
 const UNKNOWN_TTL_MS = 60_000;
+
+/** Too many lookups of unknown tenant slugs from one client (ADMIN_RATE_LIMIT_TENANT_LOOKUP). */
+export class TenantLookupLimitedError extends Error {
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number) {
+    super("too many tenant lookups");
+    this.name = "TenantLookupLimitedError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
 
 /** Portvakt could not say whether a tenant exists (unreachable or an unexpected answer). */
 export class TenantLookupError extends Error {
@@ -71,6 +83,8 @@ export class TenantClients {
   readonly #unknown = new Map<string, number>();
   readonly #lookups = new Map<string, Promise<boolean>>();
   readonly #fetch: typeof fetch;
+  /** Lookups that ask Portvakt, per client (unknown slugs cost a request each). */
+  readonly #lookupLimit: TokenBucketLimiter | undefined;
 
   constructor(
     config: AdminConfig,
@@ -82,15 +96,21 @@ export class TenantClients {
     this.#store = store;
     this.#logger = logger;
     this.#fetch = fetcher;
+    this.#lookupLimit =
+      config.tenantLookupRateLimit === null
+        ? undefined
+        : new TokenBucketLimiter(config.tenantLookupRateLimit);
   }
 
   /**
    * The BFF of a tenant, created once Portvakt confirmed the tenant exists (its discovery
    * answers). `undefined` for a malformed or unknown slug; unknown slugs are remembered for a
    * while in a bounded cache of their own, so they never evict real tenants' clients.
-   * Throws {@link TenantLookupError} when Portvakt cannot be asked.
+   * Throws {@link TenantLookupError} when Portvakt cannot be asked, and
+   * {@link TenantLookupLimitedError} when `client` (the rate-limit key of the caller's IP) asked
+   * about too many slugs the portal does not know.
    */
-  async get(slug: string): Promise<PortvaktBff | undefined> {
+  async get(slug: string, client?: string): Promise<PortvaktBff | undefined> {
     if (!SLUG.test(slug)) return undefined;
     const cached = this.#bffs.get(slug);
     if (cached !== undefined) {
@@ -102,6 +122,10 @@ export class TenantClients {
     const unknownUntil = this.#unknown.get(slug);
     if (unknownUntil !== undefined && unknownUntil > Date.now()) return undefined;
     let lookup = this.#lookups.get(slug);
+    if (lookup === undefined && client !== undefined && this.#lookupLimit !== undefined) {
+      const decision = this.#lookupLimit.take(client);
+      if (!decision.allowed) throw new TenantLookupLimitedError(decision.retryAfterSeconds);
+    }
     if (lookup === undefined) {
       lookup = this.#exists(slug).finally(() => this.#lookups.delete(slug));
       this.#lookups.set(slug, lookup);

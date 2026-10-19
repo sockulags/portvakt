@@ -18,7 +18,11 @@ Every operation needs `Authorization: Bearer <access token>` of the application
 - `aud` must be exactly `portvakt-admin`;
 - the tenant must be active, `portvakt-admin` must be enabled in it, and the person must exist;
 - service tokens (client credentials) are refused (`service_token_not_allowed`), and so are
-  tokens issued while representing someone (`rep` present: `representation_not_allowed`).
+  tokens issued while representing someone (`rep` present: `representation_not_allowed`);
+- with `ADMIN_MIN_ACR` set (a value of `ACR_RANKING`), a token whose `acr` ranks lower, or is
+  not ranked at all, is refused (`403 acr_too_low`). Recommended in production (`config:check`
+  warns when it is unset): without it any login method of a tenant can sign in its
+  administrators, at whatever level it asserts.
 
 Roles are checked live: the token's `roles` count only while the person still holds them right
 now (direct assignments, and rules matched against the groups stored on the identity the person
@@ -48,8 +52,14 @@ once and becomes active `policy.manualPublishAheadSeconds` later (KEY_MANUAL_PUB
 default 10 minutes; the rotation job activates it then). The answer is `status: "scheduled"` with
 `nextKid` and `activatesAt`; the key set lists the key as `next` with its `activateAt`. A
 `next` key that has already been published that long (from the scheduled rotation) is activated
-at once (`status: "activated"`). With `emergency: true` (key compromise) a new key signs at once
-and the previous one is retired immediately (`status: "activated"`, `retiredKids`).
+at once (`status: "activated"`). With `emergency: true` (key compromise) a freshly generated key
+signs at once and every other key (a pending `next`, the active key and every `retiring` key) is
+retired in the same transaction (`status: "activated"`, `retiredKids` lists them; also in the
+audit events): JWKS publishes only the new key, so every outstanding access and ID token stops
+verifying at once. Sessions continue only through a refresh (the SDKs refetch the JWKS for the
+new kid) or a new login. When the cause is a database or key leak, rotate `MASTER_KEY` as well
+(`MASTER_KEY_PREVIOUS`, then `npm run rewrap-secrets`): the leaked envelopes stay readable with
+the old master key.
 
 The role `platform-admin` of `portvakt-admin` can only be given in the `system` tenant, by a
 platform administrator: in assignments, pending assignments and rules anywhere else it is refused
@@ -93,6 +103,7 @@ correlation:
 ```
 
 `code` is stable: `unauthorized`, `invalid_token`, `forbidden`, `service_token_not_allowed`,
+`acr_too_low`,
 `representation_not_allowed`, `not_found`, `conflict`, `self_lockout`, `in_use` (a login method
 that people have signed in with: disable it instead), `last_identity` (a person's only identity:
 delete the person instead), `precondition_failed`,
@@ -144,18 +155,43 @@ Everything below needs `If-Match` and is audited.
   identity answers `409 last_identity`. `DELETE /tenants/{id}/persons/{personId}` deletes the
   person with their identities, assignments and grants as agent.
 
+## Ending sessions (kill switches)
+
+Changes that take a login away end it at once, in the change's own transaction, audited as
+`sessions.revoked` (reason, and how many sessions and grants ended):
+
+| Change                                                         | Ends                                                       |
+| -------------------------------------------------------------- | ---------------------------------------------------------- |
+| suspending the tenant                                          | every session and grant of the tenant                      |
+| disabling an application in the tenant, or detaching it        | the application's grants in the tenant                     |
+| disabling or deleting a login method                           | sessions and grants whose login came through it            |
+| unlinking an identity                                          | the person's sessions and grants through that login method |
+| deleting a person                                              | every session and grant of the person                      |
+| `POST /tenants/{id}/persons/{personId}/end-sessions` (no body) | every session and grant of the person                      |
+
+Ended grants lose their codes and refresh tokens for good: re-enabling the method, the
+application or the tenant never brings one back, and the person signs in again. Besides,
+every refresh and every authorization that reuses a session re-checks that the tenant is
+active, the application enabled, the login's method enabled and the person's identity through
+it still there (a refused refresh is `token.refresh_denied` with reason `login_revoked`).
+Access tokens are self-contained JWTs: those already issued stay valid until they expire
+(ACCESS_TOKEN_TTL, 5 minutes by default). `end-sessions` answers `{ "sessions", "grants" }`;
+the portal's person page has it as "Logga ut överallt", with a confirmation.
+
 ## Resources
 
 `/me`; `/tenants` (list, create, change name and `representationSources`, suspend, reactivate);
 `/tenants/{id}/dashboard`; `/applications` (registry: create, change name, redirect and
 post-logout URIs, roles, attribute keys, global enable, client authentication, representation
-mode and allowed extra scopes, `rotate-secret`, `removal-impact`) and
+mode, allowed extra scopes and `serviceAudiences`, the client_ids it may request
+client_credentials tokens for (empty by default: none, see docs/claims.md), `rotate-secret`,
+`removal-impact`) and
 `/tenants/{id}/applications` (attach, enable, disable, `usage`, `detach`);
 `/tenants/{id}/login-methods` (OIDC and SAML, `session-policy`, `sp-keys/prepare`,
 `sp-keys/rotate`, warnings, delete); `/tenants/{id}/roles`, `role-rules`, `role-assignments`,
 `attribute-assignments` (create, change value, remove; direct and pending);
 `/tenants/{id}/persons/search` and `/tenants/{id}/persons/{personId}`
-(`clear-protected-identity`, `identities/{identityId}/unlink`, delete); `/tenants/{id}/parties`
+(`clear-protected-identity`, `identities/{identityId}/unlink`, `end-sessions`, delete); `/tenants/{id}/parties`
 and `grants` (change applications and validity window, `revoke`); `/signing-keys` (`rotate`,
 platform administrators only); `/tenants/{id}/audit-events` and the
 platform-wide `/audit-events` (keyset pagination: pass `nextCursor` as `cursor`). Redirect URIs

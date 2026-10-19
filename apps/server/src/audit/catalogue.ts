@@ -48,6 +48,24 @@ export const GRANT_REVOCATION_REASONS = [
   "representation_invalid",
   /** The person chose another representation for the application (a new grant replaces it). */
   "representation_changed",
+  /**
+   * A kill switch ended the grant's login: its login method was disabled or deleted, the person
+   * lost the identity or was deleted, the tenant was suspended or the application disabled.
+   */
+  "login_revoked",
+] as const;
+
+/** Why an administrator's change ended logins at once (`sessions.revoked`, the kill switches). */
+export const SESSION_REVOCATION_REASONS = [
+  "tenant_suspended",
+  "application_disabled",
+  "application_detached",
+  "identity_unlinked",
+  "login_method_disabled",
+  "login_method_deleted",
+  "person_deleted",
+  /** `POST /tenants/{id}/persons/{personId}/end-sessions`. */
+  "ended_by_admin",
 ] as const;
 
 /** Why a refresh (`token.refresh_denied`) or a code exchange (`token.exchange_denied`) was refused. */
@@ -58,6 +76,11 @@ export const REFRESH_DENIAL_REASONS = [
   "representation_invalid",
   /** The application now requires representation and the grant has none. */
   "representation_required",
+  /**
+   * The grant's login may no longer be used: its login method is disabled or gone, the person
+   * has no identity through it any more, or the tenant is suspended.
+   */
+  "login_revoked",
 ] as const;
 
 /** Grant types a token can be issued for (`token.issued`). */
@@ -124,6 +147,7 @@ const APPLICATION_FIELDS = [
   "redirectUris",
   "postLogoutRedirectUris",
   "allowedExtraScopes",
+  "serviceAudiences",
   "representationMode",
   "roles",
   "attributeKeys",
@@ -297,6 +321,24 @@ export const AUDIT_EVENTS = {
     z.object({ clientId: clientIdSchema, reason: z.enum(GRANT_REVOCATION_REASONS) }).strict(),
     "Portvakt revoked an application's grant with its tokens (subject: the person).",
   ),
+  "sessions.revoked": event(
+    "success",
+    z
+      .object({
+        actorTenantId,
+        reason: z.enum(SESSION_REVOCATION_REASONS),
+        /** Broker sessions ended and grants revoked (with their codes and refresh tokens). */
+        sessions: z.number().int().min(0),
+        grants: z.number().int().min(0),
+        clientId: clientIdSchema.optional(),
+        loginMethodId: uuid.optional(),
+      })
+      .strict(),
+    "An administrator's change ended logins at once, in the change's transaction: sessions and " +
+      "grants of a suspended tenant, a disabled or detached application, a disabled or deleted " +
+      "login method, an unlinked identity, a deleted person, or every login of a person " +
+      "(end-sessions). Subject: the tenant, application, login method or person.",
+  ),
   "token.refresh_denied": event(
     "failure",
     z.object({ clientId: clientIdSchema, reason: z.enum(REFRESH_DENIAL_REASONS) }).strict(),
@@ -342,8 +384,9 @@ export const AUDIT_EVENTS = {
         activatesAt: z.iso.datetime().optional(),
       })
       .strict(),
-    "Manual signing key rotation (subject: the new key; active at once in an emergency, " +
-      "otherwise published and activated at `activatesAt`).",
+    "Manual signing key rotation (subject: the new key; in an emergency a fresh key, active at " +
+      "once, and `retiredKids` lists every other key, retired with it; otherwise published and " +
+      "activated at `activatesAt`).",
   ),
   "audit.pruned": event(
     "success",

@@ -10,9 +10,7 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
 import org.springframework.security.oauth2.core.oidc.OidcIdToken;
-import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import se.portvakt.sdk.ClientAuth;
 import se.portvakt.sdk.PortvaktClient;
 import se.portvakt.sdk.PortvaktConfig;
@@ -21,8 +19,8 @@ import se.portvakt.spring.login.PortvaktAuthorizedClientManager;
 import se.portvakt.spring.login.PortvaktAuthorizedClientRepository;
 import se.portvakt.spring.login.PortvaktClientRegistrationRepository;
 import se.portvakt.spring.login.PortvaktLoginSettings;
-import se.portvakt.spring.login.PortvaktOidcUser;
 import se.portvakt.spring.login.PortvaktRefreshTokenProvider;
+import se.portvakt.spring.login.PortvaktSecurityContextRepository;
 import se.portvakt.spring.login.PortvaktSessionState;
 import se.portvakt.spring.login.PortvaktSessions;
 import se.portvakt.spring.login.PortvaktTokenStore;
@@ -104,23 +102,20 @@ final class TestLogin {
   }
 
   /**
-   * A signed-in session as the login callback leaves it: the context and state in the session,
-   * the tokens (with Portvakt's current refresh token) in the store.
+   * A signed-in session as the login callback leaves it: the state in the session; the tokens
+   * (with Portvakt's current refresh token) and the ID token in the store.
    */
   MockHttpSession signIn(Instant endsAt) throws Exception {
     OidcIdToken idToken = verifiedIdToken();
-    PortvaktOidcUser user = PortvaktOidcUser.of(idToken);
-    SecurityContext context = SecurityContextHolder.createEmptyContext();
-    context.setAuthentication(new OAuth2AuthenticationToken(user, user.getAuthorities(), "portvakt"));
     MockHttpSession session = new MockHttpSession();
-    session.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, context);
     String grantId = PortvaktAuthorizedClientRepository.newGrantId();
     String refresh = "refresh-initial-" + grantId;
     provider.currentRefreshToken = refresh;
     Instant now = clock.instant();
     store.save(
         grantId,
-        new PortvaktTokenStore.StoredTokens("access-initial", now.minusSeconds(10), now.plusSeconds(300), java.util.Set.of("openid"), refresh),
+        new PortvaktTokenStore.StoredTokens(
+            "access-initial", now.minusSeconds(10), now.plusSeconds(300), java.util.Set.of("openid"), refresh, idToken.getTokenValue()),
         endsAt);
     new PortvaktSessionState(now, endsAt, null, now, grantId).storeIn(session);
     return session;
@@ -140,13 +135,15 @@ final class TestLogin {
     return copy;
   }
 
-  /** A request of the session, with its security context active on this thread. */
-  static MockHttpServletRequest request(MockHttpSession session) {
-    SecurityContext context =
-        (SecurityContext) session.getAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY);
-    SecurityContextHolder.setContext(context);
+  /**
+   * A request of the session, with its security context (rebuilt from the token store, as the
+   * starter's security context repository does) active on this thread.
+   */
+  MockHttpServletRequest request(MockHttpSession session) {
     MockHttpServletRequest request = new MockHttpServletRequest("GET", "/x");
     request.setSession(session);
+    SecurityContext context = new PortvaktSecurityContextRepository(store).loadDeferredContext(request).get();
+    SecurityContextHolder.setContext(context);
     return request;
   }
 }

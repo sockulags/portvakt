@@ -10,6 +10,7 @@ import {
   FlowDriver,
   LOA2,
   LOA3,
+  LOA4,
   redeem,
   startTestIdp,
   type Landing,
@@ -237,12 +238,13 @@ describe.skipIf(ts === undefined)("session policies", () => {
     // Both citizen methods link by pin, so both logins are the same person.
     const strong = await createFederatedLoginMethod(ts!, idp!, tenant, "bankid", {
       displayName: "BankID",
+      assertedAcr: LOA4,
       linkByPin: true,
       sessionPolicy: policy,
     });
     const weak = await createFederatedLoginMethod(ts!, idp!, tenant, "bankid", {
       displayName: "Other eID",
-      assertedAcr: LOA2,
+      assertedAcr: LOA3,
       linkByPin: true,
       sessionPolicy: policy,
     });
@@ -254,23 +256,23 @@ describe.skipIf(ts === undefined)("session policies", () => {
       const request = await authorizationRequest(target.config, target.redirectUri);
       const chooser = await driver.follow(request.url.href);
       const page = await driver.chooseAndFollow(chooser, { loginMethodId: methodId });
-      return redeem(target.config, request, await driver.persona(page, "sven-medborgare"));
+      return redeem(target.config, request, await driver.persona(page, "maja-loa4"));
     };
     const atA = await loginWith(a, strong.id);
-    expect(atA.claims()).toMatchObject({ idp: strong.id, acr: LOA3 });
+    expect(atA.claims()).toMatchObject({ idp: strong.id, acr: LOA4 });
     const atB = await loginWith(b, weak.id);
-    expect(atB.claims()).toMatchObject({ idp: weak.id, acr: LOA2, sub: atA.claims()?.sub });
+    expect(atB.claims()).toMatchObject({ idp: weak.id, acr: LOA3, sub: atA.claims()?.sub });
 
     // A's next refresh still reflects A's own login.
     const refreshed = await client.refreshTokenGrant(a.config, atA.refresh_token!);
-    expect(refreshed.claims()).toMatchObject({ idp: strong.id, acr: LOA3 });
+    expect(refreshed.claims()).toMatchObject({ idp: strong.id, acr: LOA4 });
     const access = JSON.parse(
       Buffer.from(refreshed.access_token.split(".")[1]!, "base64url").toString("utf8"),
     ) as Record<string, unknown>;
-    expect(access).toMatchObject({ idp: strong.id, acr: LOA3 });
+    expect(access).toMatchObject({ idp: strong.id, acr: LOA4 });
     // And B's refresh reflects B's.
     const refreshedB = await client.refreshTokenGrant(b.config, atB.refresh_token!);
-    expect(refreshedB.claims()).toMatchObject({ idp: weak.id, acr: LOA2 });
+    expect(refreshedB.claims()).toMatchObject({ idp: weak.id, acr: LOA3 });
   });
 
   it("refuses a login method maxAge beyond SESSION_TTL at write time", async () => {

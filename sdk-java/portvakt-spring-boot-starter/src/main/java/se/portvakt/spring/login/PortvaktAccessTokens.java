@@ -17,10 +17,10 @@ import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
 import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
 import org.springframework.security.oauth2.core.oidc.OidcIdToken;
-import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import se.portvakt.sdk.AccessTokenException;
 import se.portvakt.sdk.LoginRequiredException;
 import se.portvakt.sdk.PortvaktException;
+import se.portvakt.sdk.PortvaktRetryLaterException;
 import se.portvakt.sdk.PortvaktTokenVerifier;
 import se.portvakt.sdk.PortvaktUnavailableException;
 import se.portvakt.spring.PortvaktAuthorities;
@@ -40,6 +40,9 @@ import se.portvakt.spring.PortvaktAuthorities;
  *       invalid_client} (the application's own credentials) keeps it and answers 502;
  *   <li>the refreshed ID token replaces the principal and caps the session's end at the new
  *       {@code session_exp} (never later than before; a different {@code sub} ends the session);
+ *   <li>Portvakt asks to retry later (429 or {@code temporarily_unavailable}): {@link
+ *       PortvaktRetryLaterException} (503 with its {@code Retry-After}); the session keeps its
+ *       unchanged refresh token and no outage starts;
  *   <li>Portvakt unreachable: with an outage grace of 0 the session ends; otherwise the first
  *       failure starts the outage ({@link PortvaktUnavailableException}, 503, the session
  *       continues) and the session ends only when a refresh fails after the grace has passed. A
@@ -55,7 +58,7 @@ public class PortvaktAccessTokens {
   private final PortvaktSessions sessions;
   private final PortvaktLoginSettings settings;
   private final Clock clock;
-  private final HttpSessionSecurityContextRepository contexts = new HttpSessionSecurityContextRepository();
+  private final PortvaktSecurityContextRepository contexts;
 
   public PortvaktAccessTokens(
       OAuth2AuthorizedClientManager manager, PortvaktTokenVerifier verifier, PortvaktSessions sessions) {
@@ -64,6 +67,7 @@ public class PortvaktAccessTokens {
     this.sessions = sessions;
     this.settings = sessions.settings();
     this.clock = sessions.clock();
+    this.contexts = new PortvaktSecurityContextRepository(sessions.store());
   }
 
   /** A fresh access token of the request's session (see the class description). */
@@ -103,6 +107,11 @@ public class PortvaktAccessTokens {
     OAuth2AuthorizedClient client;
     try {
       client = manager.authorize(authorize.build());
+    } catch (PortvaktRetryLaterException later) {
+      // Portvakt refused and rotated nothing: the session and its refresh token stay as they
+      // were, and no outage starts (the grace is not involved). The request answers 503.
+      LOG.warn("Portvakt asked to retry the refresh later");
+      throw later;
     } catch (PortvaktUnavailableException unavailable) {
       throw outage(request, session, state, unavailable);
     } catch (ClientAuthorizationException refused) {

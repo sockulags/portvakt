@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { AuditLog } from "../../audit/audit-log.js";
 import type { Config } from "../../config/index.js";
@@ -15,6 +16,11 @@ import {
 } from "../../net/outbound.js";
 import { parseAcrValues, type AcrRanking } from "../../oidc/acr.js";
 import type { InteractionDetails } from "../../oidc/interactions.js";
+import {
+  MAX_SESSION_UPSTREAMS,
+  sessionUpstreamSchema,
+  type SessionUpstream,
+} from "../../oidc/login-context.js";
 import {
   FRESH_LOGIN_REASONS,
   type TenantProvider,
@@ -132,6 +138,8 @@ const logoutStateSchema = z
     loginMethodId: z.uuid(),
     requestId: z.string().min(1).max(128),
     returnTo: z.url(),
+    /** The session's other upstream sessions, logged out in turn after this one answers. */
+    remaining: z.array(sessionUpstreamSchema).max(MAX_SESSION_UPSTREAMS).default([]),
   })
   .loose();
 
@@ -182,8 +190,17 @@ const principalSelectionAdvertised = (metadata: IdpMetadata): boolean =>
  * response's InResponseTo (its request ID), then the browser is sent (303) to the interaction
  * path, where the interaction cookie is present, exactly as after an OIDC callback.
  */
+/** Signed SP metadata documents kept per login method (least recently used evicted first). */
+const SP_METADATA_CACHE_MAX = 500;
+
 export class SamlFederation {
   readonly #options: SamlFederationOptions;
+  /**
+   * Built (and signed) SP metadata per tenant and login method, with the fingerprint of what it
+   * was built from: the settings, display name, tenant name and SP keys. Any change of those
+   * builds it again; an unchanged one is served without signing (anyone can request it).
+   */
+  readonly #spMetadata = new Map<string, { readonly fingerprint: string; readonly xml: string }>();
   readonly #log: Logger;
   readonly #metadataRefresh: Counter;
   readonly #logouts: Counter;
@@ -566,7 +583,24 @@ export class SamlFederation {
     const found = await this.#options.repos.loginMethods.findById(tenant.id, loginMethodId);
     if (found?.protocol !== "saml") return null;
     const keys = await this.#options.repos.saml.listSpKeys(tenant.id, found.id);
-    return buildSpMetadata({
+    const cacheKey = `${tenant.id}:${found.id}`;
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify({
+          settings: found.saml,
+          displayName: found.displayName,
+          tenant: tenant.name,
+          keys: keys.map((key) => [key.id, key.purpose, key.state]),
+        }),
+      )
+      .digest("base64url");
+    const cached = this.#spMetadata.get(cacheKey);
+    if (cached !== undefined && cached.fingerprint === fingerprint) {
+      this.#spMetadata.delete(cacheKey);
+      this.#spMetadata.set(cacheKey, cached);
+      return cached.xml;
+    }
+    const xml = buildSpMetadata({
       sp: this.spEndpoints(tenant.slug, found.id),
       settings: found.saml,
       displayName: found.displayName,
@@ -574,20 +608,60 @@ export class SamlFederation {
       keys,
       signer: found.saml.signMetadata ? await this.#signer(tenant.id, found.id) : undefined,
     });
+    this.#spMetadata.delete(cacheKey);
+    while (this.#spMetadata.size >= SP_METADATA_CACHE_MAX) {
+      const oldest = this.#spMetadata.keys().next();
+      if (oldest.done === true) break;
+      this.#spMetadata.delete(oldest.value);
+    }
+    this.#spMetadata.set(cacheKey, { fingerprint, xml });
+    return xml;
   }
 
   /**
    * SP-initiated single logout after an RP-initiated logout ended the broker session locally:
-   * a signed LogoutRequest (HTTP-Redirect, or the HTTP-POST page `/logout`) to the IdP, which
-   * answers at the SLO endpoint, from where the browser continues to `returnTo`. `undefined`
-   * (keep the local redirect) when the login method or its IdP cannot do it; never throws.
+   * a signed LogoutRequest (HTTP-Redirect, or the HTTP-POST page `/logout`) to the first IdP of
+   * `upstreams` that can take one, which answers at the SLO endpoint; from there the browser
+   * goes on to the next IdP of the list, and after the last one to `returnTo`. `undefined`
+   * (keep the local redirect) when none of them can do it; never throws. Best effort: a failed
+   * or unanswered logout at one IdP never blocks the local logout or the others.
    */
   async startLogout(input: UpstreamLogoutInput): Promise<string | undefined> {
-    const { tenant, record, returnTo } = input;
-    const upstream = record.upstream;
-    if (upstream === undefined) return undefined;
+    const { tenant, upstreams, returnTo } = input;
+    for (const [position, upstream] of upstreams.entries()) {
+      const target = await this.#sendLogout(
+        tenant,
+        upstream,
+        upstreams.slice(position + 1),
+        returnTo,
+      );
+      if (target !== undefined) return target;
+    }
+    return undefined;
+  }
+
+  /** Where the browser goes after an IdP answered: the next IdP's logout, or `returnTo`. */
+  async #continueLogout(
+    tenant: Tenant,
+    pending: z.infer<typeof logoutStateSchema>,
+  ): Promise<string> {
+    return (
+      (await this.startLogout({
+        tenant,
+        upstreams: pending.remaining,
+        returnTo: pending.returnTo,
+      })) ?? pending.returnTo
+    );
+  }
+
+  async #sendLogout(
+    tenant: Tenant,
+    upstream: SessionUpstream,
+    remaining: readonly SessionUpstream[],
+    returnTo: string,
+  ): Promise<string | undefined> {
     try {
-      const method = await this.#method(tenant.id, record.loginMethodId);
+      const method = await this.#method(tenant.id, upstream.loginMethodId);
       if (method === null) return undefined;
       const metadata = await this.idpMetadata(method);
       const signer = await this.#signer(tenant.id, method.id);
@@ -599,7 +673,7 @@ export class SamlFederation {
         tenant.id,
         LOGOUT_STATE_KIND,
         hashToken(relayState),
-        { loginMethodId: method.id, requestId, returnTo },
+        { loginMethodId: method.id, requestId, returnTo, remaining: [...remaining] },
         LOGOUT_STATE_TTL_SECONDS,
       );
       const sp = this.spEndpoints(tenant.slug, method.id);
@@ -621,7 +695,7 @@ export class SamlFederation {
     } catch (error) {
       this.#logouts.inc({ direction: "sp_initiated", outcome: "error" });
       this.#log.warn(
-        { err: error, loginMethodId: record.loginMethodId },
+        { err: error, loginMethodId: upstream.loginMethodId },
         "SAML logout request not sent",
       );
       return undefined;
@@ -680,7 +754,9 @@ export class SamlFederation {
       const relayState = relayStateOf(params);
       if (isResponse(params) && relayState !== undefined) {
         const pending = await this.#consumeLogoutState(tenant.id, relayState);
-        if (pending !== null) return { kind: "redirect", url: pending.returnTo };
+        if (pending !== null) {
+          return { kind: "redirect", url: await this.#continueLogout(tenant, pending) };
+        }
       }
       return { kind: "refused", status: 400 };
     }
@@ -719,7 +795,7 @@ export class SamlFederation {
       }
       return pending === null
         ? { kind: "logged_out" }
-        : { kind: "redirect", url: pending.returnTo };
+        : { kind: "redirect", url: await this.#continueLogout(tenant, pending) };
     }
 
     // A signed LogoutRequest is accepted once (its ID, per tenant and login method).

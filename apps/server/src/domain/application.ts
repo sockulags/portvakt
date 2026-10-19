@@ -126,6 +126,11 @@ export interface Application {
   readonly roles: readonly DeclaredRole[];
   readonly attributeKeys: readonly DeclaredAttributeKey[];
   readonly allowedExtraScopes: readonly ExtraScope[];
+  /**
+   * The client_ids this application may request client_credentials tokens for (the target must
+   * also be enabled in the tenant). Empty: no service tokens for other applications.
+   */
+  readonly serviceAudiences: readonly string[];
   readonly representationMode: RepresentationMode;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -151,6 +156,12 @@ const declaredAttributeKeySchema = z.object({
 const uniqueBy = <T>(items: readonly T[], key: (item: T) => string): boolean =>
   new Set(items.map(key)).size === items.length;
 
+/** `serviceAudiences`: distinct client_ids, at most 50. */
+export const serviceAudiencesSchema = z
+  .array(clientIdSchema)
+  .max(50)
+  .refine((ids) => new Set(ids).size === ids.length, "service audiences must be unique");
+
 export const createApplicationInputSchema = z.object({
   clientId: clientIdSchema,
   name: displayNameSchema,
@@ -169,6 +180,7 @@ export const createApplicationInputSchema = z.object({
     .default([])
     .refine((keys) => uniqueBy(keys, (k) => k.key), "attribute keys must be unique"),
   allowedExtraScopes: z.array(z.enum(EXTRA_SCOPES)).default([]),
+  serviceAudiences: serviceAudiencesSchema.default([]),
   representationMode: z.enum(REPRESENTATION_MODES).default("none"),
 });
 export type CreateApplicationInput = z.input<typeof createApplicationInputSchema>;
@@ -181,6 +193,7 @@ export const updateApplicationInputSchema = z
     redirectUris: z.array(redirectUriSchema).min(1).max(50),
     postLogoutRedirectUris: z.array(redirectUriSchema).max(50),
     allowedExtraScopes: z.array(z.enum(EXTRA_SCOPES)),
+    serviceAudiences: serviceAudiencesSchema,
     representationMode: z.enum(REPRESENTATION_MODES),
   })
   .partial();

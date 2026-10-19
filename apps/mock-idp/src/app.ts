@@ -35,6 +35,10 @@ export interface MockIdp {
   lastClientAssertionAudience(kind: IssuerKind, clientId: string): unknown;
   /** Registers (or replaces) a relying party of an issuer at runtime (tests). */
   registerClient(client: MockClientInput): void;
+  /** One OIDC issuer: its pushed authorization requests and the PAR test switch. */
+  oidc(
+    kind: IssuerKind,
+  ): Pick<MockIssuer, "pushedAuthorizationRequests" | "advertisePushedAuthorizationRequests">;
   /**
    * A SAML IdP: a flavour (`/saml/bankid`, `/saml/freja`, `/saml/siths`), or `ecdsa` (Freja
    * personas, signing with ECDSA P-256).
@@ -114,6 +118,7 @@ export async function createMockIdp(options: MockIdpOptions): Promise<MockIdp> {
     lastClientAssertionAudience: (kind, clientId) =>
       issuerOf(kind).lastClientAssertionAudience(clientId),
     registerClient,
+    oidc: issuerOf,
     saml: samlOf,
   };
 }

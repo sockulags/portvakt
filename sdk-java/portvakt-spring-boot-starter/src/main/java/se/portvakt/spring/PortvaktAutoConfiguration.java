@@ -231,6 +231,14 @@ public class PortvaktAutoConfiguration {
       return new InMemoryTokenStore(clock);
     }
 
+    /** Warns at start about an insecure session cookie in a production profile. */
+    @Bean
+    SmartInitializingSingleton portvaktCookieCheck(Environment environment) {
+      return () -> {
+        for (String warning : se.portvakt.spring.login.PortvaktCookieCheck.warnings(environment)) LOG.warn(warning);
+      };
+    }
+
     /** Deletes expired tokens and pending logins in the background. */
     @Bean
     SmartLifecycle portvaktTokenStoreCleanup(PortvaktTokenStore store, PortvaktProperties properties) {

@@ -11,7 +11,7 @@ import { InvalidIdError, InvalidReferenceError, ValidationError } from "./errors
 
 const testDb = await setupTestDatabase();
 
-const CITIZEN_ACR = "urn:portvakt:acr:loa3";
+const CITIZEN_ACR = "http://id.elegnamnden.se/loa/1.0/loa3";
 
 describe.skipIf(testDb === undefined)("PersonRepository JIT upsert", () => {
   const { repos, db } = testDb!;
@@ -121,6 +121,7 @@ describe.skipIf(testDb === undefined)("PersonRepository JIT upsert", () => {
         kind: "citizen" as const,
         displayName: name,
         assertedAcr: CITIZEN_ACR,
+        claimMapping: { subject: "sub", pin: "pin", acr: "acr" },
         linkByPin: link,
       });
       const bankid = await createLoginMethod(repos, tenant.id, options("BankID", linkByPin[0]));
@@ -163,6 +164,76 @@ describe.skipIf(testDb === undefined)("PersonRepository JIT upsert", () => {
       });
       expect(weak).toMatchObject({ created: true, linked: false });
       expect(weak.person.id).not.toBe(first.person.id);
+    });
+
+    it("refuses linkByPin at save without a pin mapping or below loa3, unranked included", async () => {
+      const tenant = await createTenant(repos);
+      const base = { kind: "citizen" as const, displayName: "Self-asserted", linkByPin: true };
+      // The probe: an unranked, self-asserted acr needs no upstream acr mapping, so it proves
+      // nothing about who signed in, and must never link into a BankID person.
+      await expect(
+        createLoginMethod(repos, tenant.id, {
+          ...base,
+          assertedAcr: "urn:example:self-asserted",
+          claimMapping: { subject: "sub", pin: "pin" },
+        }),
+      ).rejects.toThrow(/linkByPin: the method must assert at least loa3/);
+      await expect(
+        createLoginMethod(repos, tenant.id, {
+          ...base,
+          assertedAcr: "http://id.elegnamnden.se/loa/1.0/loa2",
+          claimMapping: { subject: "sub", pin: "pin", acr: "acr" },
+        }),
+      ).rejects.toThrow(/linkByPin: the method must assert at least loa3/);
+      await expect(
+        createLoginMethod(repos, tenant.id, {
+          ...base,
+          assertedAcr: CITIZEN_ACR,
+          claimMapping: { subject: "sub", acr: "acr" },
+        }),
+      ).rejects.toThrow(/linkByPin: the method must map a personal identity number/);
+      const plain = await createLoginMethod(repos, tenant.id, {
+        ...base,
+        linkByPin: false,
+        assertedAcr: "urn:example:self-asserted",
+        claimMapping: { subject: "sub", pin: "pin" },
+      });
+      await expect(
+        repos.loginMethods.update(tenant.id, plain.id, { linkByPin: true }),
+      ).rejects.toThrow(/linkByPin: the method must assert at least loa3/);
+    });
+
+    it("does not link through or into a method below loa3 saved before the rule", async () => {
+      const { tenant, bankid, freja } = await citizenMethods([true, true]);
+      // An older row: linkByPin on a self-asserted, unranked method (the save rule is newer).
+      const selfAsserted = "urn:example:self-asserted";
+      await db.query("UPDATE login_methods SET asserted_acr = $2 WHERE id = $1", [
+        freja.id,
+        selfAsserted,
+      ]);
+      const victim = await login(repos, tenant.id, bankid, "bankid-sub", { pin: TEST_PINS[1] });
+      const intruder = await login(repos, tenant.id, freja, "self-sub", {
+        pin: TEST_PINS[1],
+        acr: selfAsserted,
+      });
+      expect(intruder).toMatchObject({ created: true, linked: false });
+      expect(intruder.person.id).not.toBe(victim.person.id);
+
+      // The other direction: a person known only to the weak method is never joined either.
+      const other = await citizenMethods([true, true]);
+      await db.query("UPDATE login_methods SET asserted_acr = $2 WHERE id = $1", [
+        other.freja.id,
+        selfAsserted,
+      ]);
+      const weakFirst = await login(repos, other.tenant.id, other.freja, "self-sub", {
+        pin: TEST_PINS[2],
+        acr: selfAsserted,
+      });
+      const strong = await login(repos, other.tenant.id, other.bankid, "bankid-sub", {
+        pin: TEST_PINS[2],
+      });
+      expect(strong).toMatchObject({ created: true, linked: false });
+      expect(strong.person.id).not.toBe(weakFirst.person.id);
     });
 
     it("does not link without a pin, with another pin, or across tenants", async () => {

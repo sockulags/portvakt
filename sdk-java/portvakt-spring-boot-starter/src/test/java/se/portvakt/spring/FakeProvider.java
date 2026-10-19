@@ -47,6 +47,10 @@ final class FakeProvider implements AutoCloseable {
   /** The token endpoint answers with this status and OAuth error instead (for example 401). */
   volatile int tokenErrorStatus;
   volatile String tokenError;
+  /** With {@link #tokenErrorStatus}: a Retry-After header, or {@code null}. */
+  volatile String tokenRetryAfter;
+  /** Further claims of the ID tokens (for example pin and email). */
+  volatile Map<String, Object> extraClaims = Map.of();
   /** Delay of the token endpoint, to make concurrent requests overlap. */
   volatile long tokenDelayMillis;
   /** session_exp of the ID tokens (epoch seconds), or {@code null} for none. */
@@ -91,6 +95,7 @@ final class FakeProvider implements AutoCloseable {
     claims.put("attrs", Map.of());
     claims.put("name", "Sven Medborgare");
     if (withNonce != null) claims.put("nonce", withNonce);
+    claims.putAll(extraClaims);
     claims.put("iat", now);
     claims.put("exp", now + 300);
     return claims;
@@ -151,6 +156,7 @@ final class FakeProvider implements AutoCloseable {
       return;
     }
     if (tokenErrorStatus != 0) {
+      if (tokenRetryAfter != null) exchange.getResponseHeaders().set("Retry-After", tokenRetryAfter);
       send(exchange, tokenErrorStatus, "{\"error\":\"" + tokenError + "\"}");
       return;
     }

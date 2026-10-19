@@ -62,6 +62,50 @@ export function isUnavailable(error: unknown, depth = 0): boolean {
   return false;
 }
 
+/** Seconds of a `Retry-After` header (delta-seconds or an HTTP date), bounded to 1..3600. */
+export function retryAfterSeconds(value: string | null | undefined): number | undefined {
+  if (value === null || value === undefined || value.trim() === "") return undefined;
+  const trimmed = value.trim();
+  const seconds = /^\d{1,10}$/.test(trimmed)
+    ? Number(trimmed)
+    : Math.ceil((Date.parse(trimmed) - Date.now()) / 1000);
+  if (!Number.isFinite(seconds)) return undefined;
+  return Math.min(3600, Math.max(1, seconds));
+}
+
+/**
+ * Whether Portvakt's token endpoint asked to be retried later: HTTP 429 (rate limited), or the
+ * OAuth error `temporarily_unavailable` with any status. Such an answer is transient: a session
+ * keeps its (unchanged, unused) refresh token and no outage starts. Returns the `Retry-After`
+ * (seconds, when Portvakt sent one), or `undefined` when the failure is not transient.
+ */
+export async function transientRefusal(
+  error: unknown,
+  depth = 0,
+): Promise<{ readonly retryAfterSeconds: number | undefined } | undefined> {
+  if (depth > 5 || !(error instanceof Error || error instanceof Response)) return undefined;
+  if (error instanceof Response) {
+    const transient = { retryAfterSeconds: retryAfterSeconds(error.headers.get("retry-after")) };
+    if (error.status === 429) return transient;
+    // A 5xx answer is not parsed by openid-client: its body may still say temporarily_unavailable.
+    if (!/json/i.test(error.headers.get("content-type") ?? "") || error.bodyUsed) return undefined;
+    try {
+      const text = await error.clone().text();
+      if (text.length > 16_384) return undefined;
+      const body = JSON.parse(text) as { error?: unknown } | null;
+      return body?.error === "temporarily_unavailable" ? transient : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (error instanceof client.ResponseBodyError) {
+    if (error.status !== 429 && error.error !== "temporarily_unavailable") return undefined;
+    return { retryAfterSeconds: retryAfterSeconds(error.response.headers.get("retry-after")) };
+  }
+  const cause = (error as { cause?: unknown }).cause;
+  return cause !== undefined && cause !== error ? transientRefusal(cause, depth + 1) : undefined;
+}
+
 /**
  * Portvakt's discovery metadata as an openid-client `Configuration`, cached for
  * `discoveryCacheSeconds` and fetched once at a time. When a refresh fails the last good

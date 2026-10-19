@@ -714,6 +714,106 @@ describe.skipIf(ts === undefined)("SAML upstream (Swedish eID Framework)", () =>
       });
     });
 
+    /**
+     * One browser session with two upstream SAML logins of the same person: two BankID-style
+     * methods (two SPs at the same IdP) that link by personal identity number, the second login
+     * forced with prompt=login.
+     */
+    async function twoUpstreamLogins(prefix: string) {
+      const w = await world(prefix);
+      const first = await createSamlLoginMethod(ts!, idp!, w.tenant, "bankid", {
+        displayName: "BankID A",
+        linkByPin: true,
+      });
+      const second = await createSamlLoginMethod(ts!, idp!, w.tenant, "bankid", {
+        displayName: "BankID B",
+        linkByPin: true,
+      });
+      const driver = new FlowDriver(ts!, idp!);
+      const loginWith = async (methodId: string, params: Record<string, string> = {}) => {
+        const request = await authorizationRequest(w.config, w.redirectUri, {
+          scope: "openid profile pin",
+          ...params,
+        });
+        const chooser = await driver.follow(request.url.href);
+        const page = await driver.chooseAndFollow(chooser, { loginMethodId: methodId });
+        return redeem(w.config, request, await driver.persona(page, "saml-sven"));
+      };
+      const viaFirst = await loginWith(first.id);
+      const viaSecond = await loginWith(second.id, { prompt: "login" });
+      expect(viaSecond.claims()).toMatchObject({ idp: second.id, sub: viaFirst.claims()!.sub });
+      return { w, first, second, driver, viaFirst, viaSecond };
+    }
+
+    it("sends single logout to every upstream session of the broker session", async () => {
+      const { w, first, second, driver, viaSecond } = await twoUpstreamLogins("saml-slo-two");
+      const before = mock("bankid").logoutRequests().length;
+      const landing = await rpLogout(w, driver, viaSecond.id_token!);
+      expect(landing.kind).toBe("app");
+      if (landing.kind === "app") {
+        expect(`${landing.url.origin}${landing.url.pathname}`).toBe(POST_LOGOUT);
+      }
+      // Newest login first, then the earlier one; both name the person's upstream session.
+      const sent = mock("bankid").logoutRequests().slice(before);
+      expect(sent.map((request) => request.spEntityId)).toEqual([
+        spEntityId(ts!, w.tenant, second),
+        spEntityId(ts!, w.tenant, first),
+      ]);
+      expect(sent.every((request) => request.nameId === "bankid-nameid-7f3a9c2e51d84b06")).toBe(
+        true,
+      );
+      await expectNoSession(w, driver);
+    });
+
+    it("ends the local logout and the remaining upstream logouts when one IdP fails", async () => {
+      const { w, first, driver, viaSecond } = await twoUpstreamLogins("saml-slo-two-bad");
+      const url = client.buildEndSessionUrl(w.config, {
+        id_token_hint: viaSecond.id_token!,
+        post_logout_redirect_uri: POST_LOGOUT,
+      });
+      const html = await (await driver.browser.request(url.href)).text();
+      const action = /<form id="op\.logoutForm" method="post" action="([^"]+)">/.exec(html)![1]!;
+      const xsrf = /name="xsrf" value="([^"]+)"/.exec(html)![1]!;
+      const confirm = await driver.browser.request(new URL(action, url).href, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ xsrf, logout: "yes" }).toString(),
+      });
+      // The first IdP's answer is tampered with: Portvakt still goes on to the next upstream.
+      const back = (await driver.browser.request(confirm.headers.get("location")!)).headers.get(
+        "location",
+      )!;
+      const next = await driver.browser.request(back.replace(/Signature=[^&]+/, "Signature=AAAA"));
+      expect(next.status).toBe(303);
+      const toSecondIdp = next.headers.get("location")!;
+      expect(toSecondIdp.startsWith(`${mock("bankid").entityId}/slo?SAMLRequest=`)).toBe(true);
+      const landing = await driver.follow(toSecondIdp);
+      expect(landing.kind).toBe("app");
+      expect(mock("bankid").logoutRequests().at(-1)?.spEntityId).toBe(
+        spEntityId(ts!, w.tenant, first),
+      );
+      await expectNoSession(w, driver);
+    });
+
+    it("ends the broker session on an IdP-initiated logout from an earlier upstream login", async () => {
+      const { w, first, driver, viaFirst, viaSecond } = await twoUpstreamLogins("saml-slo-two-idp");
+      // The latest login came through the second method; the first IdP's logout still counts.
+      const url = await mock("bankid").initiateLogout(spEntityId(ts!, w.tenant, first), {
+        nameId: "bankid-nameid-7f3a9c2e51d84b06",
+      });
+      const landing = await driver.follow(url);
+      expect(landing.kind).toBe("other");
+      for (const tokens of [viaFirst, viaSecond]) {
+        await expect(client.refreshTokenGrant(w.config, tokens.refresh_token!)).rejects.toThrow();
+      }
+      await expectNoSession(w, driver);
+      expect((await audits(w.tenant, "session.logout"))[0]?.details).toMatchObject({
+        initiator: "idp",
+        loginMethodId: first.id,
+        sessions: 1,
+      });
+    });
+
     it("refuses an unsigned IdP-initiated LogoutRequest", async () => {
       const w = await world("saml-slo-unsigned");
       const method = await createSamlLoginMethod(ts!, idp!, w.tenant, "freja");
@@ -758,6 +858,28 @@ describe.skipIf(ts === undefined)("SAML upstream (Swedish eID Framework)", () =>
         (await fetch(`${ts!.baseUrl}/t/${w.tenant.slug}/saml/${crypto.randomUUID()}/metadata`))
           .status,
       ).toBe(404);
+    });
+
+    it("serves the signed SP metadata from a cache, built again after a key or setting change", async () => {
+      const w = await world("saml-meta-cache");
+      const method = await createSamlLoginMethod(ts!, idp!, w.tenant, "bankid");
+      const url = `${spEntityId(ts!, w.tenant, method)}/metadata`;
+      const first = await (await fetch(url)).text();
+      // Every build has a fresh ID: the same bytes again means nothing was built or signed.
+      expect(first).toMatch(/ID="_[^"]+"/);
+      expect(await (await fetch(url)).text()).toBe(first);
+      await ts!.portvakt.samlAdmin.prepareSpKeyRotation(w.tenant.id, method.id);
+      const rotated = await (await fetch(url)).text();
+      expect(rotated).not.toBe(first);
+      expect(rotated.match(/<md:KeyDescriptor use="signing">/g)).toHaveLength(2);
+      expect(await (await fetch(url)).text()).toBe(rotated);
+      await ts!.portvakt.samlAdmin.update(
+        w.tenant.id,
+        method.id,
+        { displayName: "Mock BankID (renamed)" },
+        { type: "system", id: null },
+      );
+      expect(await (await fetch(url)).text()).not.toBe(rotated);
     });
 
     it("refuses an ACS post without a known RelayState without auditing it", async () => {

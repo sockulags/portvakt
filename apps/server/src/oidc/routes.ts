@@ -6,7 +6,7 @@ import {
   readReplayableForm,
 } from "../http/client-id.js";
 import {
-  clientIp,
+  clientIpKey,
   tooManyRequests,
   type RateLimitCheck,
   type RequestLimits,
@@ -167,9 +167,11 @@ export function tenantRoutes(options: TenantRoutesOptions): Router {
   const limits = options.limits;
   /**
    * Rate limits in front of the provider: authorization requests per IP and per client_id (from
-   * the query), the client-authenticating endpoints per IP and per client_id (HTTP Basic, or the
-   * form body's client_id or client_assertion). Refusals: OAuth error JSON
-   * (`temporarily_unavailable`) on the token endpoints, the login UI page on authorization.
+   * the query, or the form body of a POST), the client-authenticating endpoints per IP before
+   * the provider, and per client_id (HTTP Basic, or the form body's client_id or
+   * client_assertion) only for failed client authentication, after the provider answered (see
+   * `chargeFailedClientAuthentication`). Refusals: OAuth error JSON (`temporarily_unavailable`)
+   * on the token endpoints, the login UI page on authorization. IPv6 clients are keyed by /64.
    */
   const limitProvider = (req: Request, res: Response, next: NextFunction): void => {
     if (limits === undefined) {
@@ -177,22 +179,43 @@ export function tenantRoutes(options: TenantRoutesOptions): Router {
       return;
     }
     const slug = (req.params as { slug?: string }).slug ?? "";
-    const ip = clientIp(req);
+    const ip = clientIpKey(req);
     const path = req.path.replace(/\/+$/, "");
-    if (path === "/auth" && (req.method === "GET" || req.method === "POST")) {
-      const clientId = typeof req.query.client_id === "string" ? req.query.client_id : undefined;
-      const checks: RateLimitCheck[] = [["authorizeIp", ip]];
-      if (clientId !== undefined && clientId.length <= 255) {
-        checks.push(["authorizeClient", `${slug}:${clientId}`]);
-      }
-      const outcome = limits.check(checks);
-      if (outcome.allowed) {
-        next();
+    const bodyTooLarge = (error: unknown): void => {
+      if (error instanceof BodyTooLargeError) {
+        res.status(413).set("Cache-Control", "no-store").json({
+          error: "invalid_request",
+          error_description: "request body too large",
+        });
         return;
       }
-      tooManyRequests(res, outcome.retryAfterSeconds);
-      if (options.rateLimitedPage === undefined) res.json({ error: "temporarily_unavailable" });
-      else options.rateLimitedPage(req, res);
+      next(error);
+    };
+    if (path === "/auth" && (req.method === "GET" || req.method === "POST")) {
+      const authorize = (clientId: string | undefined): void => {
+        const checks: RateLimitCheck[] = [["authorizeIp", ip]];
+        if (clientId !== undefined && clientId.length <= 255) {
+          checks.push(["authorizeClient", `${slug}:${clientId}`]);
+        }
+        const outcome = limits.check(checks);
+        if (outcome.allowed) {
+          next();
+          return;
+        }
+        tooManyRequests(res, outcome.retryAfterSeconds);
+        if (options.rateLimitedPage === undefined) res.json({ error: "temporarily_unavailable" });
+        else options.rateLimitedPage(req, res);
+      };
+      const fromQuery = typeof req.query.client_id === "string" ? req.query.client_id : undefined;
+      if (req.method === "GET" || fromQuery !== undefined) {
+        authorize(fromQuery);
+        return;
+      }
+      // A POSTed authorization request carries its client_id in the form body.
+      readReplayableForm(req).then((form) => {
+        const fromBody = form?.get("client_id");
+        authorize(fromBody === null ? undefined : fromBody);
+      }, bodyTooLarge);
       return;
     }
     if (req.method !== "POST" || !CLIENT_ENDPOINTS.has(path)) {
@@ -216,29 +239,45 @@ export function tenantRoutes(options: TenantRoutesOptions): Router {
       const form = await readReplayableForm(req);
       return form === undefined ? undefined : bodyClientId(form);
     };
-    clientIdOf().then(
-      (clientId) => {
-        if (clientId !== undefined) {
-          const byClient = limits.check([["tokenClient", `${slug}:${clientId}`]]);
-          if (!byClient.allowed) {
-            refuse(byClient.retryAfterSeconds);
-            return;
-          }
-        }
-        next();
-      },
-      (error: unknown) => {
-        if (error instanceof BodyTooLargeError) {
-          res.status(413).set("Cache-Control", "no-store").json({
-            error: "invalid_request",
-            error_description: "request body too large",
-          });
-          return;
-        }
-        next(error);
-      },
-    );
+    clientIdOf().then((clientId) => {
+      if (clientId !== undefined) {
+        chargeFailedClientAuthentication(res, limits, `${slug}:${clientId}`);
+      }
+      next();
+    }, bodyTooLarge);
   };
+
+  /**
+   * The per-client bucket of the client-authenticating endpoints is charged only when the
+   * provider refused the client's authentication (401 `invalid_client`), so a successful
+   * authentication is never blocked by what other parties send in the client's name. Once the
+   * bucket is empty, further failed authentications for that client answer 429 with
+   * Retry-After instead of 401 (the per-IP limit before the provider bounds each sender).
+   */
+  function chargeFailedClientAuthentication(
+    res: Response,
+    limiter: RequestLimits,
+    key: string,
+  ): void {
+    const end = res.end.bind(res) as (...args: unknown[]) => Response;
+    (res as unknown as { end: (...args: unknown[]) => Response }).end = (...args: unknown[]) => {
+      if (res.headersSent || res.statusCode !== 401) return end(...args);
+      const outcome = limiter.check([["tokenClient", key]]);
+      if (outcome.allowed) return end(...args);
+      const body = JSON.stringify({
+        error: "temporarily_unavailable",
+        error_description: "Too many requests; retry later",
+      });
+      res.removeHeader("WWW-Authenticate");
+      res.statusCode = 429;
+      res.setHeader("Retry-After", String(outcome.retryAfterSeconds));
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.setHeader("Content-Length", String(Buffer.byteLength(body)));
+      const callback = args.find((arg) => typeof arg === "function");
+      return callback === undefined ? end(body) : end(body, callback);
+    };
+  }
 
   const toProvider = (req: Request, res: Response): void => {
     const tenantProvider = tenantOf(res);

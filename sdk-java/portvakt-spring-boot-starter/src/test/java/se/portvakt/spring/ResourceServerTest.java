@@ -90,6 +90,7 @@ class ResourceServerTest {
                   .requestMatchers("/api/acting").access(portvakt.accessToken(r -> r.allowRepresentation(true)))
                   .requestMatchers("/api/role").hasAuthority("PORTVAKT_ROLE_handlaggare")
                   .requestMatchers("/api/authenticated", "/api/method", "/api/annotated").authenticated()
+                  .requestMatchers("/api/open").permitAll()
                   .anyRequest().access(portvakt.accessToken()));
       return http.build();
     }
@@ -101,6 +102,11 @@ class ResourceServerTest {
     Map<String, Object> plain() {
       var principal = PortvaktSecurity.currentPrincipal().orElseThrow();
       return Map.of("sub", principal.sub(), "isService", principal.isService());
+    }
+
+    @GetMapping("/api/open")
+    Map<String, Object> open() {
+      return Map.of("principal", PortvaktSecurity.currentPrincipal().isPresent());
     }
 
     @PreAuthorize("@portvakt.hasRole('handlaggare')")
@@ -224,6 +230,25 @@ class ResourceServerTest {
         .andExpect(status().isForbidden())
         .andExpect(jsonPath("$.reason").value("representation_not_allowed"));
     mvc.perform(get("/api/acting").header("Authorization", acting)).andExpect(status().isOk());
+  }
+
+  @Test
+  @Order(6)
+  void hidesTheRestrictedTokensPrincipalFromCurrentPrincipalUnlessTheRouteAcceptedIt() throws Exception {
+    // An open route: a token the defaults refuse yields no principal (it would pass for a person).
+    for (String restricted :
+        List.of(bearer(service("other-app")), bearer(person("rep", Map.of("sub", "party-1", "type", "organisation"))))) {
+      mvc.perform(get("/api/open").header("Authorization", restricted))
+          .andExpect(status().isOk())
+          .andExpect(jsonPath("$.principal").value(false));
+    }
+    mvc.perform(get("/api/open").header("Authorization", bearer(person())))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.principal").value(true));
+    // A route that accepts the service token explicitly still sees it.
+    mvc.perform(get("/api/service").header("Authorization", bearer(service("other-app"))))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.isService").value(true));
   }
 
   @Test

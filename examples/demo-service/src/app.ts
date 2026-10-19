@@ -104,8 +104,9 @@ export function createDemoApp(config: DemoConfig, options: DemoAppOptions = {}):
     });
   });
 
-  // "Anropa API": the BFF fetches its own API with the session's access token.
-  app.get("/app/api-call", bff.requireLogin(), (req, res, next) => {
+  // "Anropa API": the BFF fetches its own API with the session's access token. A POST, so
+  // requireLogin checks the CSRF token (X-CSRF-Token) and that the request is same-origin.
+  app.post("/app/api-call", bff.requireLogin(), (req, res, next) => {
     bff
       .getAccessToken(req)
       .then(async (token) => {

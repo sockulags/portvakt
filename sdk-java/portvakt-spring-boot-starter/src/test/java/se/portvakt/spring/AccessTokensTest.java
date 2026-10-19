@@ -35,6 +35,7 @@ import org.springframework.security.oauth2.core.oidc.OidcIdToken;
 import se.portvakt.sdk.AcrRanking;
 import se.portvakt.sdk.LoginRequiredException;
 import se.portvakt.sdk.PortvaktException;
+import se.portvakt.sdk.PortvaktRetryLaterException;
 import se.portvakt.sdk.PortvaktUnavailableException;
 import se.portvakt.spring.login.InMemoryTokenStore;
 import se.portvakt.spring.login.PortvaktAuthorizationRequestResolver;
@@ -72,6 +73,7 @@ class AccessTokensTest {
     PROVIDER.down = false;
     PROVIDER.jwksDown = false;
     PROVIDER.tokenErrorStatus = 0;
+    PROVIDER.tokenRetryAfter = null;
     PROVIDER.tokenDelayMillis = 0;
     PROVIDER.refreshIdToken = true;
     PROVIDER.accessTokenLifetime = 300;
@@ -84,7 +86,7 @@ class AccessTokensTest {
   }
 
   static String token(TestLogin login, MockHttpSession session, Duration minValidity) {
-    MockHttpServletRequest request = TestLogin.request(session);
+    MockHttpServletRequest request = login.request(session);
     return login.tokens.getAccessToken(request, new MockHttpServletResponse(), minValidity);
   }
 
@@ -173,10 +175,63 @@ class AccessTokensTest {
     MockHttpSession session = login.signIn(Instant.now().plusSeconds(3600));
     login.registrations.findByRegistrationId("portvakt");
     PROVIDER.tokenErrorStatus = 503;
-    PROVIDER.tokenError = "temporarily_unavailable";
+    PROVIDER.tokenError = "server_error";
     assertThatThrownBy(() -> token(login, session, Duration.ofHours(1)))
         .isInstanceOf(LoginRequiredException.class)
         .satisfies(error -> assertThat(((LoginRequiredException) error).reason()).isEqualTo(LoginRequiredException.Reason.OUTAGE_GRACE_EXCEEDED));
+  }
+
+  @Test
+  void keepsTheSessionAndItsRefreshTokenWhenPortvaktAsksToRetryLater() throws Exception {
+    // Grace 0: an outage would end the session at once. 429 and temporarily_unavailable must not.
+    TestLogin login = login(Duration.ZERO);
+    MockHttpSession session = login.signIn(Instant.now().plusSeconds(3600));
+    String grantId = PortvaktSessionState.of(session).grantId();
+    String refresh = login.store.load(grantId).refreshToken();
+    record Answer(int status, String error, String retryAfter, long expectedSeconds) {}
+    for (Answer answer :
+        List.of(
+            new Answer(429, "temporarily_unavailable", "7", 7),
+            new Answer(429, "slow_down", null, 0),
+            new Answer(400, "temporarily_unavailable", null, 0),
+            new Answer(503, "temporarily_unavailable", "12", 12))) {
+      PROVIDER.tokenErrorStatus = answer.status();
+      PROVIDER.tokenError = answer.error();
+      PROVIDER.tokenRetryAfter = answer.retryAfter();
+      int grants = PROVIDER.refreshGrants.get();
+      assertThatThrownBy(() -> token(login, session, Duration.ofHours(1)))
+          .isInstanceOf(PortvaktRetryLaterException.class)
+          .satisfies(
+              error -> {
+                PortvaktRetryLaterException later = (PortvaktRetryLaterException) error;
+                assertThat(later.status()).isEqualTo(503);
+                assertThat(later.code()).isEqualTo("portvakt_unavailable");
+                if (answer.expectedSeconds() == 0) assertThat(later.retryAfter()).isNull();
+                else assertThat(later.retryAfter()).isEqualTo(Duration.ofSeconds(answer.expectedSeconds()));
+              });
+      // Real HTTP through Spring's client; nothing about the session changed.
+      assertThat(PROVIDER.refreshGrants.get()).isEqualTo(grants);
+      assertThat(session.isInvalid()).isFalse();
+      assertThat(PortvaktSessionState.of(session).outageSince()).isNull();
+      assertThat(login.store.load(grantId).refreshToken()).isEqualTo(refresh);
+    }
+    // Portvakt answers again: the unchanged refresh token works.
+    PROVIDER.tokenErrorStatus = 0;
+    assertThat(token(login, session, Duration.ofHours(1))).startsWith("access-");
+    assertThat(login.store.load(grantId).refreshToken()).isNotEqualTo(refresh);
+  }
+
+  @Test
+  void answersRetryLaterWith503AndPortvaktsRetryAfter() throws Exception {
+    MockHttpServletResponse response = new MockHttpServletResponse();
+    new se.portvakt.spring.web.PortvaktExceptionResolver(null)
+        .resolveException(
+            new MockHttpServletRequest(), response, null, new PortvaktRetryLaterException(Duration.ofSeconds(9)));
+    assertThat(response.getStatus()).isEqualTo(503);
+    assertThat(response.getHeader("Retry-After")).isEqualTo("9");
+    assertThat(PortvaktRetryLaterException.parseRetryAfter("120", Instant.now())).isEqualTo(Duration.ofSeconds(120));
+    assertThat(PortvaktRetryLaterException.parseRetryAfter("999999", Instant.now())).isEqualTo(Duration.ofHours(1));
+    assertThat(PortvaktRetryLaterException.parseRetryAfter("soon", Instant.now())).isNull();
   }
 
   @Test

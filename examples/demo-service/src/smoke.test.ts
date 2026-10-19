@@ -73,7 +73,16 @@ describe.skipIf(ts === undefined)("demo service smoke test", () => {
       principal: { roles: ["handlaggare"], name: "Anna Andersson", idpKind: "employee" },
     });
 
-    const call = (await (await driver.browser.request(`${base}/app/api-call`, json)).json()) as {
+    const csrfToken = (session as unknown as { csrfToken: string }).csrfToken;
+    // Without the session's CSRF token the BFF refuses the POST.
+    expect(
+      (await driver.browser.request(`${base}/app/api-call`, { ...json, method: "POST" })).status,
+    ).toBe(403);
+    const apiCall = await driver.browser.request(`${base}/app/api-call`, {
+      method: "POST",
+      headers: { ...json.headers, "x-csrf-token": csrfToken },
+    });
+    const call = (await apiCall.json()) as {
       status: number;
       body: { app: string; principal: Record<string, unknown> };
     };

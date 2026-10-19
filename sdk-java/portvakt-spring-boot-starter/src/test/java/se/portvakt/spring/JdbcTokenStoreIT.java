@@ -113,7 +113,7 @@ class JdbcTokenStoreIT {
   static String call(CountDownLatch go, TestLogin login, MockHttpSession session) throws Exception {
     go.await();
     try {
-      return login.tokens.getAccessToken(TestLogin.request(session), new MockHttpServletResponse(), Duration.ofHours(1));
+      return login.tokens.getAccessToken(login.request(session), new MockHttpServletResponse(), Duration.ofHours(1));
     } finally {
       SecurityContextHolder.clearContext();
     }

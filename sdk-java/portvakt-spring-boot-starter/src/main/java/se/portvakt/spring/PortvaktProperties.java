@@ -95,9 +95,10 @@ public class PortvaktProperties {
 
     /**
      * While refetches fail, keys stay in use until cache-max-age plus this after their last
-     * successful fetch; then validation answers 503.
+     * successful fetch; then validation answers 503. Default 1 hour (longer survives longer
+     * outages, but trusts a key an emergency rotation retired for longer).
      */
-    @NotNull private Duration staleMaxAge = Duration.ofDays(1);
+    @NotNull private Duration staleMaxAge = Duration.ofHours(1);
 
     public Duration getCacheMaxAge() {
       return cacheMaxAge;

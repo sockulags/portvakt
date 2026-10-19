@@ -46,8 +46,8 @@ public class PortvaktExceptionResolver implements HandlerExceptionResolver, Orde
     try {
       if (error instanceof LoginRequiredException && login != null) {
         login.loginRequired(request, response);
-      } else if (error instanceof PortvaktUnavailableException) {
-        response.setHeader("Retry-After", "5");
+      } else if (error instanceof PortvaktUnavailableException unavailable) {
+        response.setHeader("Retry-After", Responses.retryAfterSeconds(unavailable));
         Responses.json(response, 503, Map.of("error", error.code()));
       } else if (error instanceof AccessTokenException bearer) {
         Responses.bearerError(response, bearer);

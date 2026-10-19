@@ -51,7 +51,7 @@ export function createRepositories(
     tenants: new TenantRepository(db),
     applications: new ApplicationRepository(db, keys.secrets),
     loginMethods: new LoginMethodRepository(db, keys.secrets, options),
-    persons: new PersonRepository(db, keys),
+    persons: new PersonRepository(db, keys, options),
     access: new AccessRepository(db),
     parties: new PartyRepository(db, keys),
     grants: new RepresentationGrantRepository(db, keys),

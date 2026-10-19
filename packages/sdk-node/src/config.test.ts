@@ -33,7 +33,7 @@ describe("client configuration", () => {
       clockSkewSeconds: 30,
       httpTimeoutSeconds: 10,
       discoveryCacheSeconds: 3600,
-      jwks: { cacheMaxAgeSeconds: 300, cooldownSeconds: 30, staleMaxAgeSeconds: 86_400 },
+      jwks: { cacheMaxAgeSeconds: 300, cooldownSeconds: 30, staleMaxAgeSeconds: 3600 },
       outageGraceSeconds: 0,
       acrRanking: [
         "http://id.elegnamnden.se/loa/1.0/loa2",

@@ -356,10 +356,11 @@ describe.skipIf(ts === undefined)("clients and tenants", () => {
     expect(await oauthError(client.clientCredentialsGrant(atY))).toBe("invalid_client");
   });
 
-  it("issues client_credentials tokens for another app enabled in the tenant, nothing else", async () => {
+  it("issues client_credentials tokens only for the apps of serviceAudiences enabled in the tenant", async () => {
     const world = await createTenantWorld(repos, "s2s");
     const api = await createTestClient(repos, world.tenant);
     const foreign = await createTestClient(repos, null);
+    const unlisted = await createTestClient(repos, world.tenant);
     const issuer = ts!.issuerOf(world.tenant.slug);
     const config = await discoverWithSecret(ts!, world.tenant.slug, world.app);
     const jwks = createRemoteJWKSet(new URL(`${issuer}/jwks`));
@@ -373,6 +374,17 @@ describe.skipIf(ts === undefined)("clients and tenants", () => {
       tid: world.tenant.slug,
     });
 
+    // By default an application gets no service tokens for other applications.
+    expect(
+      await oauthError(
+        client.clientCredentialsGrant(config, {
+          resource: resourceIndicatorFor(api.application.clientId),
+        }),
+      ),
+    ).toBe("invalid_target");
+    await repos.applications.update(world.app.application.id, {
+      serviceAudiences: [api.application.clientId, foreign.application.clientId],
+    });
     const forApi = await client.clientCredentialsGrant(config, {
       resource: resourceIndicatorFor(api.application.clientId),
     });
@@ -383,13 +395,16 @@ describe.skipIf(ts === undefined)("clients and tenants", () => {
     expect(apiToken.payload.aud).toBe(api.application.clientId);
     expect(apiToken.payload).not.toHaveProperty("roles");
 
-    expect(
-      await oauthError(
-        client.clientCredentialsGrant(config, {
-          resource: resourceIndicatorFor(foreign.application.clientId),
-        }),
-      ),
-    ).toBe("invalid_target");
+    // Listed but not enabled in the tenant, or enabled but not listed: refused.
+    for (const target of [foreign, unlisted]) {
+      expect(
+        await oauthError(
+          client.clientCredentialsGrant(config, {
+            resource: resourceIndicatorFor(target.application.clientId),
+          }),
+        ),
+      ).toBe("invalid_target");
+    }
     expect(
       await oauthError(
         client.clientCredentialsGrant(config, { resource: "https://elsewhere.example" }),

@@ -55,6 +55,8 @@ export interface SeedService {
   readonly enabled: boolean;
   /** Extra scopes the application may request (`hsa` for Service A: SITHS, e2e scenario 10). */
   readonly allowedExtraScopes?: readonly ExtraScope[] | undefined;
+  /** client_ids it may request client_credentials tokens for (`serviceAudiences`). */
+  readonly serviceAudiences?: readonly string[] | undefined;
 }
 
 export interface DevSeedOptions {
@@ -453,6 +455,7 @@ async function ensureApplication(
     postLogoutRedirectUris: [`${service.url}/`],
     representationMode: "optional" as const,
     allowedExtraScopes: [...(service.allowedExtraScopes ?? [])],
+    serviceAudiences: [...(service.serviceAudiences ?? [])],
   };
   let application = await repos.applications.findByClientId(service.clientId);
   let created = false;

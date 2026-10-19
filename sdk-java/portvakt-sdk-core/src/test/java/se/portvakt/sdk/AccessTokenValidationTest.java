@@ -322,13 +322,15 @@ class AccessTokenValidationTest {
   void stopsTrustingCachedKeysPastCacheMaxAgePlusStaleMaxAgeAlsoWithinTheCooldown() throws Exception {
     PortvaktClient portvakt = client();
     portvakt.verifier().verifyAccessToken(op.sign(person()), FakeOp.CLIENT_ID);
-    // A day (cache age plus stale limit) is fine while Portvakt answers nothing...
+    // Within the cache age plus the stale limit (5 min + 1 h by default) the keys stay in use
+    // while Portvakt answers nothing...
     op.down = true;
-    clock.advance(Duration.ofSeconds(80_000));
+    clock.advance(Duration.ofSeconds(3_800));
     assertThat(portvakt.verifier().verifyAccessToken(op.sign(person()), FakeOp.CLIENT_ID).sub()).isEqualTo(PERSON);
-    // ...a month is not: the refetch fails, and the next request (within the cooldown, so no
-    // refetch) must not fall back to the month-old keys either.
-    clock.advance(Duration.ofDays(30));
+    // ...past it they do not (the default was a day: a retired key stayed trusted that long):
+    // the refetch fails, and the next request (within the cooldown, so no refetch) must not
+    // fall back to the old keys either.
+    clock.advance(Duration.ofSeconds(200));
     for (int attempt = 0; attempt < 2; attempt++) {
       String token = op.sign(person());
       assertThat(refusal(portvakt, token).code()).isEqualTo("portvakt_unavailable");

@@ -27,7 +27,8 @@
     "db:up": "docker compose -f deploy/docker-compose.dev.yml up -d --wait",
     "db:down": "docker compose -f deploy/docker-compose.dev.yml down",
     "dev:stack": "node scripts/dev-stack.js",
-    "license:check": "node scripts/license-check.js"
+    "license:check": "node scripts/license-check.js",
+    "images:check": "node scripts/images.js --check"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

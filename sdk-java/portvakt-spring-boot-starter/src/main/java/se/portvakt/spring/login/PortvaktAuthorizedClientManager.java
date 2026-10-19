@@ -63,7 +63,10 @@ public class PortvaktAuthorizedClientManager implements OAuth2AuthorizedClientMa
                           })
                       .build();
               OAuth2AuthorizedClient refreshed = provider.authorize(context);
-              return refreshed == null ? current : PortvaktAuthorizedClientRepository.toTokens(refreshed);
+              // The session's ID token stays until the caller stores the refreshed one.
+              return refreshed == null
+                  ? current
+                  : PortvaktAuthorizedClientRepository.toTokens(refreshed).withIdToken(current.idToken());
             });
     return tokens == null ? null : PortvaktAuthorizedClientRepository.toClient(registration, principal.getName(), tokens);
   }

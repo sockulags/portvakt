@@ -37,17 +37,17 @@ public class PortvaktSessionExpiryFilter extends OncePerRequestFilter {
   protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
       throws ServletException, IOException {
     HttpSession session = request.getSession(false);
-    if (session != null) {
+    PortvaktSessionState state = PortvaktSessionState.of(session);
+    if (state != null) {
       Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-      if (authentication instanceof OAuth2AuthenticationToken token
-          && token.getPrincipal() instanceof PortvaktOidcUser) {
-        PortvaktSessionState state = PortvaktSessionState.of(session);
-        if (sessions.ended(state)) {
-          LOG.debug("Portvakt session ended: session_expired");
-          sessions.end(request);
-        } else if (!notActivity.matches(request)) {
-          sessions.touch(session, state);
-        }
+      boolean signedIn =
+          authentication instanceof OAuth2AuthenticationToken token && token.getPrincipal() instanceof PortvaktOidcUser;
+      // Without its person (the token store's entry expired or was deleted) the session is over too.
+      if (sessions.ended(state) || !signedIn) {
+        LOG.debug("Portvakt session ended: session_expired");
+        sessions.end(request);
+      } else if (!notActivity.matches(request)) {
+        sessions.touch(session, state);
       }
     }
     chain.doFilter(request, response);

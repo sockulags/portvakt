@@ -15,7 +15,8 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16-alpine
+        # postgres:16-alpine, pinned by digest as in deploy/images.Dockerfile (images:check).
+        image: postgres:16-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
         env:
           POSTGRES_USER: portvakt
           POSTGRES_PASSWORD: portvakt
@@ -53,6 +54,7 @@ jobs:
         run: npm audit --audit-level=low
       - name: Licenses of the production dependencies
         run: npm run license:check
+      - run: npm run images:check
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check

@@ -131,9 +131,12 @@ export function keyRoutes(deps: AdminDeps): AdminRoute[] {
         "Without `emergency` a new key is published in JWKS at once and becomes active " +
         "`policy.manualPublishAheadSeconds` later (status `scheduled`, `nextKid`, `activatesAt`), " +
         "so every verifier has fetched it before it signs; the previous key then stays published " +
-        "(retiring) so issued tokens remain verifiable. `emergency` (key compromise) activates a " +
-        "new key at once and retires the previous key immediately (status `activated`): tokens " +
-        "it signed stop verifying. The reason is audited and must not contain personal data. " +
+        "(retiring) so issued tokens remain verifiable. `emergency` (key compromise) generates a " +
+        "fresh key, activates it at once and retires every other key (next, active, retiring) in " +
+        "the same transaction (status `activated`, `retiredKids`): JWKS publishes only the new " +
+        "key, so every outstanding token stops verifying and every session must refresh or sign " +
+        "in again. When the cause is a database or key leak, rotate MASTER_KEY too " +
+        "(MASTER_KEY_PREVIOUS and `rewrap-secrets`). The reason is audited and must not contain personal data. " +
         "If-Match takes the key set's etag; it is checked under the rotation's lock, so of " +
         "concurrent rotations with the same tag exactly one succeeds.",
       tag: "Signing keys",

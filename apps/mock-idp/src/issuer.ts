@@ -117,6 +117,18 @@ export interface MockIssuer {
   registerClient(client: MockClient): void;
   /** `aud` of the last private_key_jwt client assertion a client authenticated with. */
   lastClientAssertionAudience(clientId: string): unknown;
+  /** Pushed authorization requests received (PAR: `bankid` only), oldest first. */
+  pushedAuthorizationRequests(): readonly ReceivedPushedRequest[];
+  /**
+   * Test switch: whether discovery advertises `pushed_authorization_request_endpoint` (the
+   * `bankid` issuer does by default; the Entra issuers have no PAR at all).
+   */
+  advertisePushedAuthorizationRequests(advertised: boolean): void;
+}
+
+export interface ReceivedPushedRequest {
+  readonly clientId: string;
+  readonly loginHint: string | undefined;
 }
 
 const ENTRA_CLAIMS: Configuration["claims"] = {
@@ -227,6 +239,8 @@ export async function createMockIssuer(options: {
       // Needed when another persona signs in over an existing session: oidc-provider ends the
       // old session first, through the logout confirmation.
       rpInitiatedLogout: { enabled: true },
+      // The BankID broker accepts pushed authorization requests (RFC 9126); Entra here does not.
+      pushedAuthorizationRequests: { enabled: kind === "bankid" },
     },
     findAccount: (_ctx, sub): Account | undefined => {
       const persona = bySubject.get(sub);
@@ -277,6 +291,32 @@ export async function createMockIssuer(options: {
       }
     });
   }
+  let parAdvertised = true;
+  provider.use(async (ctx, next) => {
+    await next();
+    const route = (ctx as { oidc?: { route?: string } }).oidc?.route;
+    if (
+      !parAdvertised &&
+      route === "discovery" &&
+      typeof ctx.body === "object" &&
+      ctx.body !== null
+    ) {
+      const { pushed_authorization_request_endpoint: _par, ...rest } = ctx.body as Record<
+        string,
+        unknown
+      >;
+      void _par;
+      ctx.body = rest;
+    }
+  });
+  const pushed: ReceivedPushedRequest[] = [];
+  provider.on("pushed_authorization_request.success", (ctx: KoaContextWithOIDC) => {
+    const params = ctx.oidc.params as { login_hint?: unknown } | undefined;
+    pushed.push({
+      clientId: ctx.oidc.client?.clientId ?? "",
+      loginHint: typeof params?.login_hint === "string" ? params.login_hint : undefined,
+    });
+  });
   const assertionAudiences = new Map<string, unknown>();
   provider.on("grant.success", (ctx: KoaContextWithOIDC) => {
     const params = ctx.oidc.params as { client_assertion?: unknown } | undefined;
@@ -431,6 +471,10 @@ export async function createMockIssuer(options: {
     provider,
     router,
     lastClientAssertionAudience: (clientId) => assertionAudiences.get(clientId),
+    pushedAuthorizationRequests: () => [...pushed],
+    advertisePushedAuthorizationRequests(advertised) {
+      parAdvertised = advertised;
+    },
     registerClient(client) {
       if (client.issuer !== kind) throw new Error(`client for ${client.issuer}, not ${kind}`);
       clients.set(client.client_id, client);

@@ -317,6 +317,36 @@ describe.skipIf(ts === undefined)("admin BFF", () => {
     });
   });
 
+  it("limits lookups of tenant slugs it does not know per client IP", async () => {
+    const config = loadAdminConfig({
+      NODE_ENV: "development",
+      ADMIN_PUBLIC_URL: base,
+      PORTVAKT_PUBLIC_URL: ts!.baseUrl,
+      ADMIN_CLIENT_SECRET: world.secret,
+      ADMIN_WEB_DIR: "does-not-exist",
+      ADMIN_RATE_LIMIT_TENANT_LOOKUP: "3/1m",
+      ADMIN_TRUST_PROXY: "1",
+    });
+    await serving(createAdminApp(config, { logger: silentLogger }), async (origin) => {
+      const get = (path: string, ip: string) =>
+        fetch(`${origin}${path}`, { headers: { "x-forwarded-for": ip }, redirect: "manual" });
+      for (let index = 0; index < 3; index += 1) {
+        expect((await get(`/t/ghost-${index}/`, "2001:db8:5:6::1")).status).toBe(404);
+      }
+      // A fourth unknown slug from the same client (any address of its IPv6 /64) is refused.
+      for (const path of ["/t/ghost-3/", "/t/ghost-4/auth/login", "/t/ghost-5/api/me"]) {
+        const refused = await get(path, "2001:db8:5:6::99");
+        expect(refused.status, path).toBe(429);
+        expect(refused.headers.get("retry-after")).not.toBeNull();
+      }
+      // Remembered slugs cost nothing, and other clients are not affected.
+      expect((await get("/t/ghost-0/", "2001:db8:5:6::1")).status).toBe(404);
+      expect((await get(`/t/${x.tenant.slug}/auth/login`, "203.0.113.50")).status).toBe(302);
+      const metrics = await (await fetch(`${origin}/metrics`)).text();
+      expect(metrics).toMatch(/portvakt_admin_rate_limited_total{limit="tenant_lookup"} [1-9]/);
+    });
+  });
+
   it("continues the trace into the admin API and names it in problem responses", async () => {
     const browser = new TestBrowser();
     await signIn(browser, x, adminX);
@@ -390,6 +420,25 @@ describe.skipIf(ts === undefined)("admin BFF", () => {
       "ADMIN_COOKIE_SECRET: reuses the value of ADMIN_CLIENT_SECRET; every secret must be generated separately",
     );
     expect(reused.join("\n")).not.toContain(production.ADMIN_CLIENT_SECRET);
+    // The admin API: https, or http to this machine outside production only.
+    expect(issuesOf({ ...production, ADMIN_API_URL: "http://portvakt.internal:3000" })).toContain(
+      "ADMIN_API_URL: must use https in production",
+    );
+    expect(issuesOf({ ...production, ADMIN_API_URL: "http://127.0.0.1:3000" })).toContain(
+      "ADMIN_API_URL: must use https in production",
+    );
+    expect(issuesOf({ ...production, ADMIN_API_URL: "https://portvakt.internal" })).toEqual([]);
+    const development = { NODE_ENV: "development", ADMIN_WEB_DIR: "does-not-exist" };
+    expect(issuesOf({ ...development, ADMIN_API_URL: "http://portvakt.internal:3000" })).toContain(
+      "ADMIN_API_URL: http is allowed only to a loopback host (use https)",
+    );
+    expect(issuesOf({ ...development, ADMIN_API_URL: "http://127.0.0.1:3000" })).toEqual([]);
+    expect(issuesOf({ ...development, ADMIN_API_URL: "http://localhost:3000" })).toEqual([]);
+    // ADMIN_TRUST_PROXY=true is allowed, with a warning.
+    expect(loadAdminConfig({ ...production, ADMIN_TRUST_PROXY: "true" }).warnings).toEqual([
+      expect.stringMatching(/^ADMIN_TRUST_PROXY: true trusts every X-Forwarded-For hop/),
+    ]);
+    expect(loadAdminConfig({ ...production, ADMIN_TRUST_PROXY: "2" }).warnings).toEqual([]);
   });
 
   it("sends HSTS only when the portal is served over https", async () => {
