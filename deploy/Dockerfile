@@ -26,7 +26,7 @@ ARG SOURCE=unknown
 ARG CREATED=unknown
 
 # --- Build: every workspace's dependencies, then the compiled output and the SPA builds. -------
-FROM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f AS build
+FROM node:24-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS build
 WORKDIR /src
 # The lockfile covers every workspace, so npm ci needs each workspace's package.json.
 COPY package.json package-lock.json ./
@@ -53,7 +53,7 @@ RUN npm run build -w packages/http-kit -w packages/sdk-node \
  && npx tsc -b apps/server/tsconfig.build-dev.json
 
 # --- Production dependencies, one tree per image (npm ci limited to the workspace). ------------
-FROM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f AS manifests
+FROM node:24-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS manifests
 WORKDIR /app
 COPY --from=build /src/package.json /src/package-lock.json ./
 COPY --from=build /src/apps/admin/package.json apps/admin/
@@ -82,7 +82,7 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund -w @portvakt/demo-se
 # --- Runtime base: Node without npm, npx, corepack or yarn. ------------------------------------
 # The package managers are removed and the result is copied into an empty image, so they are not
 # merely hidden by a later layer (smaller images, nothing that installs code at run time).
-FROM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f AS node-slim
+FROM node:24-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS node-slim
 RUN rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx       /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg /opt/yarn-*  && mkdir -p /app
 
 FROM scratch AS runtime
