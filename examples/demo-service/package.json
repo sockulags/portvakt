@@ -26,7 +26,7 @@
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "supertest": "^7.3.1",
-    "vite": "^8.3.4"
+    "vite": "^8.3.5"
   },
   "scripts": {
     "dev": "tsx watch --conditions=portvakt-source src/main.ts",
