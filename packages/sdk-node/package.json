@@ -30,7 +30,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "jose": "^6.2.12",
+    "jose": "^6.2.13",
     "openid-client": "^6.8.8",
     "zod": "^4.6.7"
   },
