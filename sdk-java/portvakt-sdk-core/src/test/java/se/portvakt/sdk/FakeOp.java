@@ -52,6 +52,9 @@ final class FakeOp implements AutoCloseable {
   volatile boolean trickleJwks;
   volatile long tokenLifetime = 300;
   volatile String tokenError;
+  /** The status of the {@code tokenError} answer, and its {@code Retry-After} (when set). */
+  volatile int tokenErrorStatus = 400;
+  volatile String tokenErrorRetryAfter;
 
   FakeOp() throws Exception {
     server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -167,7 +170,9 @@ final class FakeOp implements AutoCloseable {
           String authorization = exchange.getRequestHeaders().getFirst("Authorization");
           if (authorization != null) tokenAuthorizations.add(authorization);
           if (tokenError != null) {
-            send(exchange, 400, "{\"error\":\"" + tokenError + "\"}", "application/json");
+            String retryAfter = tokenErrorRetryAfter;
+            if (retryAfter != null) exchange.getResponseHeaders().set("Retry-After", retryAfter);
+            send(exchange, tokenErrorStatus, "{\"error\":\"" + tokenError + "\"}", "application/json");
             return;
           }
           String token = "token-" + tokenRequests.get();

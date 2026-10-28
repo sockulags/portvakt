@@ -25,6 +25,9 @@ export const DEFAULT_SESSION_TABLE = "portvakt_sessions";
 
 const IDENTIFIER = /^[a-z_][a-z0-9_]{0,62}$/;
 
+/** SQLSTATE of a `lock_timeout` that expired. */
+const LOCK_NOT_AVAILABLE = "55P03";
+
 /** `table` or `schema.table`, lower case, quoted for SQL. */
 function quotedTable(tableName: string): string {
   const parts = tableName.split(".");
@@ -71,7 +74,10 @@ export interface PgSessionStoreOptions {
    * `connectionTimeoutMillis` is often unlimited). Default 10 seconds.
    */
   readonly connectTimeoutSeconds?: number;
-  /** How long `withLock` waits for another holder of the same session lock. Default 15 s. */
+  /**
+   * How long `withLock` waits for another holder of the same session lock; then it fails with
+   * {@link PortvaktUnavailableError} (503). Default 15 s.
+   */
   readonly lockTimeoutSeconds?: number;
 }
 
@@ -143,6 +149,13 @@ export class PgSessionStore implements SessionStore {
       ]);
     } catch (error) {
       connection.release(true);
+      if ((error as { code?: unknown } | null)?.code === LOCK_NOT_AVAILABLE) {
+        // Another request (or replica) held the session's lock for lockTimeoutSeconds: retry
+        // later (503), not a server error.
+        throw new PortvaktUnavailableError("the session is locked by another request", {
+          cause: error,
+        });
+      }
       throw error;
     }
     let result: T;

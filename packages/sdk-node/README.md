@@ -136,7 +136,11 @@ the existing session exactly as it was.
   store's `withLock` across replicas (`PgSessionStore` uses an advisory lock). Portvakt rotates
   refresh tokens and treats a replay as theft, so concurrent refreshes would end the grant.
 - A refused refresh (`invalid_grant`: grant revoked, representation no longer valid, broker
-  session ended) ends the session: `LoginRequiredError`.
+  session ended) ends the session: `LoginRequiredError`. `invalid_client` (the application's own
+  credentials; with `client_secret_basic` Portvakt sends it in a `WWW-Authenticate` challenge)
+  is a configuration problem: the session and its refresh token stay, `getAccessToken` throws
+  `PortvaktError` `invalid_client` (502), and the login callback shows the error page with
+  `invalid_client` (502).
 - Portvakt asks to retry later (HTTP 429, or the OAuth error `temporarily_unavailable` with any
   status), at a refresh or at the login callback: transient. `getAccessToken` throws
   `PortvaktUnavailableError` (503 with Portvakt's `Retry-After`, `retryAfterSeconds`); the
@@ -182,7 +186,7 @@ the store never needs a second connection while it holds one. Size `max` for the
 refreshes you expect plus ordinary reads (10 per instance suits most applications). When the pool
 is exhausted, `withLock` gives up after `connectTimeoutSeconds` (default 10) with
 `PortvaktUnavailableError`; a session lock held by another replica is waited for at most
-`lockTimeoutSeconds` (default 15).
+`lockTimeoutSeconds` (default 15), then the request fails with `PortvaktUnavailableError` (503).
 
 The runtime role needs `SELECT, INSERT, UPDATE, DELETE` on the table. Any object implementing
 `SessionStore` (`get`, `set`, `destroy`, optional `withLock`) works too.
@@ -209,7 +213,8 @@ Failures answer with RFC 6750 errors and `WWW-Authenticate: Bearer realm="portva
 400 `invalid_request` (malformed header), 401 without error (no token), 401 `invalid_token`,
 403 `insufficient_scope` (with `reason`: `missing_role`, `service_not_allowed`,
 `representation_not_allowed`), 401 `insufficient_user_authentication` with `acr_values` (RFC 9470),
-and 503 `temporarily_unavailable` when Portvakt's keys were never fetched.
+and 503 `temporarily_unavailable` when Portvakt's keys cannot be fetched (never fetched, or past
+`jwks.staleMaxAgeSeconds` while refetches fail).
 
 ## Service-to-service
 
@@ -221,7 +226,10 @@ const response = await fetch(url, {
 ```
 
 Tokens are cached until shortly before they expire (10% of the lifetime, at least 30 s) and
-fetched once at a time. The target must be enabled in the same tenant and listed in the calling
+fetched once at a time. A network error, timeout or 5xx, a 429 and the OAuth error
+`temporarily_unavailable` are `PortvaktUnavailableError` (`retryAfterSeconds` from Portvakt's
+`Retry-After`); any other refusal is a `PortvaktError` with Portvakt's OAuth error code (502).
+The target must be enabled in the same tenant and listed in the calling
 application's `serviceAudiences` in Portvakt (empty by default: no service tokens for other
 applications; a token for the application itself always works).
 
