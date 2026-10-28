@@ -70,6 +70,32 @@ export function unsealUpstreamSession(
   };
 }
 
+/**
+ * The same upstream session under the current master key (master key rotation): the sealed
+ * values re-wrapped (the data ciphertext kept) and both blind indexes computed again with the
+ * current index key. Throws when no configured key opens the sealed values.
+ */
+export function reindexUpstreamSession(
+  keys: KeyRing,
+  loginMethodId: string,
+  session: UpstreamSession,
+): UpstreamSession {
+  const subject = unsealUpstreamSession(keys, loginMethodId, session);
+  return {
+    protocol: "saml",
+    nameIdIndex: keys.index.compute("saml", nameIdValue(loginMethodId, subject.nameId)).index,
+    ...(subject.sessionIndex === undefined
+      ? {}
+      : {
+          sessionIndexIndex: keys.index.compute(
+            "saml",
+            sessionIndexValue(loginMethodId, subject.sessionIndex),
+          ).index,
+        }),
+    sealed: keys.secrets.rewrap(session.sealed, context(loginMethodId)),
+  };
+}
+
 /** The NameID's index under every configured master key (current first). */
 export const nameIdIndexCandidates = (
   keys: KeyRing,

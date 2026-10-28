@@ -859,8 +859,12 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
   Destination the SP's SLO URL, IssueInstant within 5 minutes plus skew, its ID accepted once)
   ends the matching sessions (their oidc-provider Session and grants are deleted,
   `logout.idp_initiated` is audited) and gets a signed LogoutResponse over HTTP-Redirect, or
-  HTTP-POST when the IdP has no Redirect SLO endpoint. Sealed sessions are not re-wrapped by
-  `rewrap-secrets`: keep the old key in MASTER_KEY_PREVIOUS until SESSION_TTL has passed.
+  HTTP-POST when the IdP has no Redirect SLO endpoint. `rewrap-secrets` re-wraps the sealed
+  upstreams of live session records and recomputes their blind indexes with the current key
+  (`federation/saml/upstream-session-rewrap.ts`, `reindexUpstreamSession`; the record is updated
+  only while its `upstreams` are unchanged, and the index rows are replaced with the record's
+  expiry), so MASTER_KEY_PREVIOUS can go right after it; only in-flight logins and logouts
+  (federation states, logout states: at most INTERACTION_TTL) still hold old-key values.
 - The init script in `deploy/postgres-init` only runs on a fresh volume. To recreate the databases:
   `docker compose -f deploy/docker-compose.dev.yml down -v` then `npm run db:up`.
 - Person and service access tokens are told apart by the claims the server issues: person tokens

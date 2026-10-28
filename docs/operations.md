@@ -368,11 +368,16 @@ One ES256 key set signs for every tenant; private keys are encrypted with MASTER
    environment plus `MIGRATION_DATABASE_URL` (it connects as the owner, like the other
    maintenance jobs; Kubernetes: a one-off Job mounting the server and owner Secrets; compose:
    `docker compose run --rm -e MIGRATION_DATABASE_URL=... server node dist/db/rewrap-cli.js`).
-   It re-encrypts signing keys, client secrets, upstream
-   client keys, SAML SP keys and personal identity numbers under the new key and re-indexes
-   blind indexes, and prints counts per kind.
-3. Keep the old key in `MASTER_KEY_PREVIOUS` for at least `SESSION_TTL` after step 1: sealed SAML
-   logout data in live sessions is not re-wrapped. Then remove it and roll out again.
+   It re-encrypts signing keys, client secrets, upstream client keys (active and prepared),
+   SAML SP keys, personal identity numbers and the sealed upstream SAML sessions of live broker
+   sessions (single logout data) under the new key, re-indexes blind indexes (with the index
+   rows IdP-initiated logout looks up), and prints counts per kind (`upstreamSessions` for the
+   SAML sessions). Running it again reports zero.
+3. Remove the old key from `MASTER_KEY_PREVIOUS` and roll out again. Only logins and logouts in
+   flight while the re-wrap ran still hold values under the old key (pending upstream requests
+   and SAML logout states, at most `INTERACTION_TTL`, 15 minutes by default): wait that long
+   after step 2 if they must not fail (a failed one shows an error and the person signs in
+   again).
 
 ## Backups and restore
 
