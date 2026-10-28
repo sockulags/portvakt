@@ -188,6 +188,7 @@ function Parties() {
           title={editing === "new" ? t.representation.createParty : editing.displayName}
           onClose={() => setEditing(undefined)}
           testId="party-dialog"
+          errors={action.errors}
           footer={
             <div className="pv-dialog-actions">
               <Button variant="ghost" onClick={() => setEditing(undefined)}>
@@ -492,6 +493,7 @@ function Grants() {
           }
           onClose={closeDialog}
           testId="grant-dialog"
+          errors={action.errors}
           footer={
             <div className="pv-dialog-actions">
               <Button variant="ghost" onClick={closeDialog}>
@@ -556,6 +558,7 @@ function Grants() {
                 error={action.errors.pin ?? action.errors["agent.pin"]}
               >
                 <TextInput
+                  invalid={(action.errors.pin ?? action.errors["agent.pin"]) !== undefined}
                   value={draft.pin}
                   autoComplete="off"
                   inputMode="numeric"
@@ -568,6 +571,9 @@ function Grants() {
                 error={action.errors.personId ?? action.errors["agent.personId"]}
               >
                 <TextInput
+                  invalid={
+                    (action.errors.personId ?? action.errors["agent.personId"]) !== undefined
+                  }
                   value={draft.personId}
                   autoComplete="off"
                   onChange={(event) => setDraft({ ...draft, personId: event.target.value })}
@@ -605,6 +611,7 @@ function Grants() {
             <div className="pv-inline-fields">
               <Field label={t.representation.validFrom} error={action.errors.validFrom}>
                 <TextInput
+                  invalid={action.errors.validFrom !== undefined}
                   type="date"
                   value={draft.validFrom}
                   onChange={(event) => setDraft({ ...draft, validFrom: event.target.value })}
@@ -612,6 +619,7 @@ function Grants() {
               </Field>
               <Field label={t.representation.validTo} error={action.errors.validTo}>
                 <TextInput
+                  invalid={action.errors.validTo !== undefined}
                   type="date"
                   value={draft.validTo}
                   onChange={(event) => setDraft({ ...draft, validTo: event.target.value })}

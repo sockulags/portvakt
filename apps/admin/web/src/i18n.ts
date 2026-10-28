@@ -42,6 +42,7 @@ const sv = {
     created: "Skapad",
     never: "Aldrig",
     menu: "Meny",
+    nothing: "Inget att visa",
   },
   nav: {
     label: "Administration",
@@ -61,6 +62,10 @@ const sv = {
     tenantSwitcher: "Organisation som administreras",
     signedInAs: "Inloggad som {name}",
     signOut: "Logga ut",
+    openMenu: "Öppna menyn",
+    closeMenu: "Stäng menyn",
+    skipToContent: "Hoppa till innehållet",
+    breadcrumbs: "Du är här",
   },
   auth: {
     signInTitle: "Logga in till administrationen",
@@ -500,6 +505,7 @@ const en: Messages = {
     created: "Created",
     never: "Never",
     menu: "Menu",
+    nothing: "Nothing to show",
   },
   nav: {
     label: "Administration",
@@ -519,6 +525,10 @@ const en: Messages = {
     tenantSwitcher: "Organisation being administered",
     signedInAs: "Signed in as {name}",
     signOut: "Sign out",
+    openMenu: "Open the menu",
+    closeMenu: "Close the menu",
+    skipToContent: "Skip to content",
+    breadcrumbs: "You are here",
   },
   auth: {
     signInTitle: "Sign in to administration",

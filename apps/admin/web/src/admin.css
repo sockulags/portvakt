@@ -137,6 +137,44 @@ body {
   box-shadow: var(--shadow-lg);
 }
 
+/* Skip link: the first stop of the keyboard, visible only while focused. */
+.pv-skip-link {
+  position: absolute;
+  z-index: 60;
+  top: var(--space-2);
+  left: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-xs);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+  box-shadow: var(--shadow-lg);
+  transform: translateY(calc(-100% - var(--space-4)));
+}
+
+.pv-skip-link:focus {
+  transform: none;
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Focus moved here by navigation (the content or its heading): no ring for a mouse user. */
+.pv-content:focus,
+.pv-content h1[tabindex="-1"]:focus {
+  outline: none;
+}
+
+.pv-content:focus-visible,
+.pv-content h1[tabindex="-1"]:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--radius-xs);
+}
+
+.pv-spinner {
+  display: inline-flex;
+}
+
 .pv-content {
   width: 100%;
   max-width: 76rem;

@@ -6,7 +6,7 @@ import {
   Field,
   Textarea,
 } from "@portvakt/design-system/components";
-import { DataTable, PageHeader } from "@portvakt/design-system/patterns";
+import { DataTable, EmptyState, PageHeader } from "@portvakt/design-system/patterns";
 import { useState } from "react";
 import { ApiError } from "../api";
 import { format, formatDate, formatTime, useI18n } from "../i18n";
@@ -118,6 +118,7 @@ export function KeysPage() {
             loading={keys.loading && keys.data === undefined}
             rows={[...(keys.data?.keys ?? [])]}
             rowKey={(key) => key.kid}
+            empty={<EmptyState compact title={t.common.nothing} />}
             columns={[
               {
                 key: "kid",

@@ -277,6 +277,7 @@ function PersonDetail({ id }: { readonly id: string }) {
           density="compact"
           rows={[...data.identities]}
           rowKey={(identity) => identity.id}
+          empty={<EmptyState compact title={t.common.nothing} />}
           columns={[
             {
               key: "method",

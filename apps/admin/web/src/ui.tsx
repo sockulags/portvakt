@@ -102,12 +102,37 @@ export function errorText(error: unknown, t: Messages): string {
 
 export function Loading({ label }: { readonly label?: string }) {
   const { t } = useI18n();
+  // The design system's Spinner is itself a status named "Loading" (English): it is hidden
+  // here, the translated text is the announcement.
   return (
     <div className="pv-loading" role="status" data-testid="loading">
-      <Spinner />
+      <span className="pv-spinner" aria-hidden="true">
+        <Spinner />
+      </span>
       <span>{label ?? t.common.loading}</span>
     </div>
   );
+}
+
+const INVALID = '[aria-invalid="true"]';
+
+/**
+ * Moves focus to the first invalid field inside `scope` whenever `errors` changes to a
+ * non-empty value (a refused submit, client or server side): the error is then read with the
+ * field's label, wherever the field is in a long form. Unchanged errors move nothing.
+ */
+export function useFocusFirstInvalid(
+  errors: Readonly<Record<string, unknown>> | undefined,
+  scope: () => ParentNode | null | undefined,
+): void {
+  const scopeRef = useRef(scope);
+  useEffect(() => {
+    scopeRef.current = scope;
+  });
+  useEffect(() => {
+    if (errors === undefined || Object.keys(errors).length === 0) return;
+    scopeRef.current()?.querySelector<HTMLElement>(INVALID)?.focus();
+  }, [errors]);
 }
 
 export function ErrorState({
@@ -187,14 +212,18 @@ export function Modal({
   footer,
   onClose,
   testId,
+  errors,
 }: {
   readonly title: string;
   readonly children: ReactNode;
   readonly footer: ReactNode;
   readonly onClose: () => void;
   readonly testId: string;
+  /** The form's field errors: focus moves to the first invalid field when they change. */
+  readonly errors?: Readonly<Record<string, unknown>> | undefined;
 }) {
   const container = useRef<HTMLDivElement>(null);
+  useFocusFirstInvalid(errors, () => container.current);
   const titleId = useId();
   const onCloseRef = useRef(onClose);
   useEffect(() => {
@@ -264,6 +293,7 @@ export function ConfirmDialog({
   onCancel,
   children,
   testId,
+  errors,
 }: {
   readonly title: string;
   readonly body: string;
@@ -277,6 +307,8 @@ export function ConfirmDialog({
   readonly onCancel: () => void;
   readonly children?: ReactNode;
   readonly testId: string;
+  /** Field errors of the dialog's own fields (see `Modal`). */
+  readonly errors?: Readonly<Record<string, unknown>> | undefined;
 }) {
   const { t } = useI18n();
   return (
@@ -284,6 +316,7 @@ export function ConfirmDialog({
       title={title}
       onClose={onCancel}
       testId={testId}
+      errors={errors}
       footer={
         <div className="pv-dialog-actions">
           <Button variant="ghost" onClick={onCancel} data-testid={`${testId}-cancel`}>
@@ -317,17 +350,23 @@ export function CopyButton({ value, testId }: { readonly value: string; readonly
     const timer = setTimeout(() => setCopied(false), 2000);
     return () => clearTimeout(timer);
   }, [copied]);
+  // A changed button label is not announced reliably: the status says it once.
   return (
-    <Button
-      variant="secondary"
-      size="sm"
-      data-testid={testId}
-      onClick={() => {
-        void navigator.clipboard?.writeText(value).then(() => setCopied(true));
-      }}
-    >
-      {copied ? t.common.copied : t.common.copy}
-    </Button>
+    <>
+      <Button
+        variant="secondary"
+        size="sm"
+        data-testid={testId}
+        onClick={() => {
+          void navigator.clipboard?.writeText(value).then(() => setCopied(true));
+        }}
+      >
+        {copied ? t.common.copied : t.common.copy}
+      </Button>
+      <span className="pv-visually-hidden" role="status" data-testid={`${testId}-status`}>
+        {copied ? t.common.copied : ""}
+      </span>
+    </>
   );
 }
 

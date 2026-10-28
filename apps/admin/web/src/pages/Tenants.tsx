@@ -194,6 +194,7 @@ export function TenantsPage() {
           }
           onClose={close}
           testId="tenant-dialog"
+          errors={errors}
           footer={
             <div className="pv-dialog-actions">
               <Button variant="ghost" onClick={close}>

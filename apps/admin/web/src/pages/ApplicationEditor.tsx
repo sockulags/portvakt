@@ -277,6 +277,7 @@ export function ApplicationEditor({
       title={`${t.common.edit}: ${application.name}`}
       onClose={onClose}
       testId="application-edit-dialog"
+      errors={errors}
       footer={
         <div className="pv-dialog-actions">
           <Button variant="ghost" onClick={onClose}>
@@ -317,6 +318,7 @@ export function ApplicationEditor({
           error={errors.clientAuth}
         >
           <Select
+            invalid={errors.clientAuth !== undefined}
             value={draft.method}
             onChange={(event) => set("method", event.target.value as AuthMethod)}
           >
@@ -349,6 +351,7 @@ export function ApplicationEditor({
         </Field>
         <Field label={t.applications.postLogoutUris} error={errors.postLogoutRedirectUris}>
           <Textarea
+            invalid={errors.postLogoutRedirectUris !== undefined}
             rows={2}
             value={draft.postLogoutRedirectUris}
             onChange={(event) => set("postLogoutRedirectUris", event.target.value)}
@@ -356,6 +359,7 @@ export function ApplicationEditor({
         </Field>
         <Field label={t.applications.roles} hint={t.applications.rolesHint} error={errors.roles}>
           <Textarea
+            invalid={errors.roles !== undefined}
             rows={3}
             value={draft.roles}
             data-testid="application-edit-roles"
@@ -368,6 +372,7 @@ export function ApplicationEditor({
           error={errors.attributeKeys}
         >
           <Textarea
+            invalid={errors.attributeKeys !== undefined}
             rows={2}
             value={draft.attributeKeys}
             onChange={(event) => set("attributeKeys", event.target.value)}
@@ -375,6 +380,7 @@ export function ApplicationEditor({
         </Field>
         <Field label={t.applications.representation} error={errors.representationMode}>
           <Select
+            invalid={errors.representationMode !== undefined}
             value={draft.representationMode}
             onChange={(event) =>
               set("representationMode", event.target.value as RepresentationMode)

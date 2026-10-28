@@ -43,6 +43,7 @@ import {
   Loading,
   serverFieldMessage,
   useAdmin,
+  useFocusFirstInvalid,
   useResource,
 } from "../ui";
 import { warningText } from "./Overview";
@@ -174,6 +175,7 @@ function LoginMethodEditor({
   const [saved, setSaved] = useState(false);
   const [confirm, setConfirm] = useState<Confirm>();
   const [deleteError, setDeleteError] = useState<unknown>();
+  useFocusFirstInvalid(errors, () => document.querySelector('[data-testid="login-method-form"]'));
   const current = method.data;
 
   // A newly loaded version (after a save or a reload) replaces the draft.
@@ -471,6 +473,7 @@ function LoginMethodEditor({
               </Field>
               <Field label={t.methods.entityCategories} error={message("entityCategories")}>
                 <Textarea
+                  invalid={message("entityCategories") !== undefined}
                   rows={3}
                   value={draft.entityCategories}
                   onChange={(event) => setDraft({ ...draft, entityCategories: event.target.value })}
@@ -744,6 +747,7 @@ function SpKeysSection({
         density="compact"
         rows={[...keys]}
         rowKey={(key) => key.id}
+        empty={<EmptyState compact title={t.common.nothing} />}
         columns={[
           {
             key: "purpose",
