@@ -125,6 +125,18 @@ proxy in front of `127.0.0.1:3000` and `127.0.0.1:3400`, and start it:
 docker compose --env-file deploy/compose/production.env -f deploy/docker-compose.yml up -d --build
 ```
 
+Audit retention is a one-off job in the profile `jobs` (`up` never starts it): schedule it daily
+on the host (cron or a systemd timer) and alert when it exits non-zero:
+
+```sh
+docker compose --env-file deploy/compose/production.env -f deploy/docker-compose.yml run --rm audit-prune
+```
+
+The server connects to Postgres over the Compose network without TLS, so `config:check` warns
+about `DATABASE_URL`; that is expected while the database runs on the same host. Back up the
+database (`docker compose ... exec postgres pg_dump ...`) as in [Backups](#backups-and-restore);
+the volume alone is not a consistent backup while Postgres runs.
+
 For evaluation on one machine, `npm run compose:local` adds
 [`deploy/docker-compose.local.yml`](../deploy/docker-compose.local.yml) and the `demo` profile
 (mock IdPs, dev seed, Tjänst A and B): the same images in the explicitly non-production
@@ -170,11 +182,19 @@ With `NODE_ENV=production` the server also refuses: the development keys and sec
 `.env.example`, keys with too few distinct bytes, `COOKIE_KEYS` shorter than 32 characters, an
 http, localhost or `.test` `PUBLIC_URL` or `ADMIN_PUBLIC_URL`, one database role for both URLs, `MIGRATE_ON_START=true` without `MIGRATION_DATABASE_URL`,
 development database passwords, `ALLOW_PRIVATE_UPSTREAM_HOSTS`, a bootstrap without
-`ADMIN_CLIENT_SECRET` and `ADMIN_PUBLIC_URL`, metrics on the main port without a 32-character
+`ADMIN_CLIENT_SECRET` and `ADMIN_PUBLIC_URL`, an http or local `BOOTSTRAP_IDP_ISSUER`, the
+development `ADMIN_CLIENT_SECRET`, metrics on the main port without a 32-character
 `METRICS_TOKEN`, `KEY_MANUAL_PUBLISH_AHEAD` below 390 s, and any secret reused for another
-purpose. Development and test mode run only with a loopback or `*.localhost` `PUBLIC_URL`. It
-warns (at start and in `config:check`) about `TRUST_PROXY=true`, debug logging, a rate limit
-switched off, metrics on a separate port without a token, `ADMIN_MIN_ACR` unset,
+purpose. Development and test mode run only with a loopback or `*.localhost` `PUBLIC_URL`. In
+every mode it refuses settings that would only fail later: a multi-tenant `BOOTSTRAP_IDP_ISSUER`
+(Entra ID `/common`, `/organizations`, `/consumers`: the bootstrap cannot restrict the upstream
+tenants, so use your own tenant's issuer), a `BOOTSTRAP_IDP_ACR` of `ACR_RANKING` without
+`BOOTSTRAP_IDP_ACR_CLAIM`, and a `SAML_METADATA_CHECK_INTERVAL` not shorter than
+`SAML_METADATA_MAX_AGE`. In production it warns (at start and in `config:check`) about
+`TRUST_PROXY=true`, debug, trace, fatal or silent logging, a rate limit switched off, metrics on a
+separate port without a token, `ADMIN_MIN_ACR` unset, a `BOOTSTRAP_IDP_ACR` ranked below
+`ADMIN_MIN_ACR` (the first administrator would get `acr_too_low`), `SHUTDOWN_DRAIN_DELAY=0`,
+database URLs without verified TLS (see [Database roles](#database-roles)),
 `MIGRATE_ON_START=true`, and a `MIGRATION_DATABASE_URL` given to the server, which does not use it.
 
 ### Server variables
@@ -236,8 +256,8 @@ switched off, metrics on a separate port without a token, `ADMIN_MIN_ACR` unset,
 | `METRICS_PORT`                         | unset                                   | A separate metrics listener (keep it off the ingress); without it metrics are on `PORT` and need `METRICS_TOKEN` in production.                                                                                                                                              |
 | `METRICS_HOST`                         | `0.0.0.0`                               | Address of the separate metrics listener.                                                                                                                                                                                                                                    |
 | `METRICS_TOKEN`                        | unset                                   | Bearer token required to scrape (at least 32 characters in production).                                                                                                                                                                                                      |
-| `ADMIN_PUBLIC_URL`                     | `http://localhost:3400` (dev)           | The admin portal's origin: the bootstrap registers `{ADMIN_PUBLIC_URL}/t/{tenant}/auth/callback` for `portvakt-admin`.                                                                                                                                                       |
-| `ADMIN_CLIENT_SECRET`                  | generated in development                | Client secret of `portvakt-admin` set at the bootstrap (at least 32 characters); the portal uses the same value.                                                                                                                                                             |
+| `ADMIN_PUBLIC_URL`                     | `http://localhost:3400` (dev)           | The admin portal's origin: the bootstrap registers `{ADMIN_PUBLIC_URL}/t/{tenant}/auth/callback` for `portvakt-admin` (read at the first start only; see [Secret rotation](#secret-rotation) to move the portal).                                                            |
+| `ADMIN_CLIENT_SECRET`                  | generated in development                | Client secret of `portvakt-admin` set at the bootstrap (at least 32 characters); the portal uses the same value. Read at the first start only: rotate it as in [Secret rotation](#secret-rotation).                                                                          |
 | `ADMIN_MIN_ACR`                        | unset (warned)                          | A level of `ACR_RANKING` administrators must sign in with; the admin API refuses lower or unranked acr (`acr_too_low`).                                                                                                                                                      |
 | `BOOTSTRAP_IDP_ISSUER`                 | unset                                   | OIDC issuer of the first login method of the `system` tenant (https in production). See [Bootstrap](#bootstrap).                                                                                                                                                             |
 | `BOOTSTRAP_IDP_CLIENT_ID`              | required with the issuer                | Client id at that IdP.                                                                                                                                                                                                                                                       |
@@ -306,7 +326,13 @@ SELECT, INSERT, UPDATE, DELETE ON TABLES TO portvakt_admin`) and cannot reach Po
   database.
 
 The compose init script ([`10-portvakt-roles.sh`](../deploy/compose/postgres-init/10-portvakt-roles.sh))
-shows the statements. Use TLS to the database (`?sslmode=verify-full` in the URLs).
+shows the statements. Use TLS to the database: `?sslmode=verify-full` in every URL. `pg` then
+verifies the server certificate against Node's CA store; for a private CA (most managed
+databases and in-cluster operators) mount the CA certificate as a file and add
+`&sslrootcert=/path/to/ca.pem` (or set `NODE_EXTRA_CA_CERTS`). `sslmode=require` without
+`uselibpqcompat=true` is treated as `verify-full` by `pg`; `no-verify` and `disable` are not, and
+production warns about any URL without verified TLS (a database on a host-local network, as in
+the Compose stack, is the only place to accept that warning).
 
 `config:check` reports the server's configuration; `config:check -- --job` (in the image:
 `node dist/config/check-cli.js --job`) reports it as the owner-role jobs see it, which also need
@@ -322,7 +348,18 @@ the application `portvakt-admin` (roles `platform-admin`, `tenant-admin`; redire
 for `BOOTSTRAP_ADMIN_SUBJECT` (or `BOOTSTRAP_ADMIN_PIN`), audited as `admin.bootstrap`. That
 person signs in at `{ADMIN_PUBLIC_URL}/t/system/` and becomes platform administrator. Concurrent
 replicas bootstrap once. Without tenants and without `BOOTSTRAP_IDP_*` the server only logs a
-warning. For Entra ID: register an app with the redirect URI
+warning. The bootstrap is the only reader of `BOOTSTRAP_*`, `ADMIN_PUBLIC_URL` and the server's
+`ADMIN_CLIENT_SECRET`: changing them later changes nothing (change the login method, the
+redirect URIs and the secret through the admin API, see [Secret rotation](#secret-rotation)).
+Once the first administrator has signed in, the `BOOTSTRAP_*` variables (all of them together)
+and the server's `ADMIN_CLIENT_SECRET` can be removed from the server's environment.
+
+Before the first start, check that the first administrator will get through: with
+`ADMIN_MIN_ACR` set, `BOOTSTRAP_IDP_ACR` must rank at least as high (a ranked level needs
+`BOOTSTRAP_IDP_ACR_CLAIM`, and the IdP must send that level), otherwise the admin API refuses
+their tokens with `acr_too_low` (`config:check` warns). Entra ID asserts no Swedish level of
+assurance: bootstrap with it and `ADMIN_MIN_ACR` unset, or with a BankID/Freja OIDC broker and
+`BOOTSTRAP_ADMIN_PIN`. For Entra ID: register an app with the redirect URI
 `{PUBLIC_URL}/t/system/federation/{loginMethodId}/callback` after the first start (the login
 method id is in the admin API and the logs), or register the method yourself through the admin
 API; see [login-methods.md](login-methods.md).
@@ -373,6 +410,44 @@ One ES256 key set signs for every tenant; private keys are encrypted with MASTER
 3. Keep the old key in `MASTER_KEY_PREVIOUS` for at least `SESSION_TTL` after step 1: sealed SAML
    logout data in live sessions is not re-wrapped. Then remove it and roll out again.
 
+## Secret rotation
+
+Every other secret, on a schedule or after a suspected leak. Roll out means: change the Secret
+(Kubernetes) or `production.env` (Compose) and restart the replicas (`kubectl rollout restart`,
+`docker compose up -d`).
+
+- **`COOKIE_KEYS`** (server): prepend the new key (`new,old`) and roll out; the first key signs,
+  all verify. After `SESSION_TTL` remove the old key and roll out again. Removing it at once makes
+  every browser's Portvakt cookies unreadable: people sign in again at their next authorization
+  request.
+- **`portvakt-admin` client secret** (`ADMIN_CLIENT_SECRET`): the server reads it only at the
+  bootstrap, so changing the variable there does nothing. Rotate it with the admin API's
+  `rotate-secret` of the application `portvakt-admin` (platform administrator; its id is in the
+  list of applications), which returns the new secret once and ends the old one at once. Put the
+  new value into the portal's `ADMIN_CLIENT_SECRET` and roll the portal out right away: until
+  then the portal's sign-ins and token refreshes fail.
+- **Moving the admin portal** (a new `ADMIN_PUBLIC_URL`): `PATCH /applications/{id}` of
+  `portvakt-admin` with the new `{ADMIN_PUBLIC_URL}/t/{tenant}/auth/callback` (and post-logout)
+  URIs, keeping the old ones until the portal runs at the new origin; the server's
+  `ADMIN_PUBLIC_URL` is read only at the bootstrap.
+- **`ADMIN_COOKIE_SECRET`, `ADMIN_SESSION_ENCRYPTION_KEY`** (portal): prepend the new value
+  (comma-separated; the first signs or seals, all verify or open) and roll out; remove the old
+  one once the sessions sealed with it have ended (removing it at once signs administrators out).
+- **`METRICS_TOKEN`, `ADMIN_METRICS_TOKEN`**: one value each. Change the Secret and the scraper's
+  credentials together; scrapes fail (401) until both agree.
+- **Database passwords**: `ALTER ROLE portvakt_app PASSWORD '...'` (as a role allowed to), update
+  `DATABASE_URL` and roll out; connections already open stay authenticated. The same for the
+  owner role (`MIGRATION_DATABASE_URL`, only the jobs use it) and the admin roles.
+- **Upstream secrets** (`BOOTSTRAP_IDP_CLIENT_SECRET` and every login method's client secret):
+  stored encrypted in the database; the variable is read only at the bootstrap. Create the new
+  secret at the IdP, `PATCH /tenants/{id}/login-methods/{id}` with `clientSecret`, then revoke the
+  old one at the IdP.
+- **Downstream application secrets**: `POST /applications/{id}/rotate-secret` ends the old secret
+  at once; deploy the new one to the application immediately (see [admin-api.md](admin-api.md)).
+- **SAML SP keys**: `sp-keys/prepare` publishes the next key in the SP metadata; once every IdP
+  has fetched the metadata (or it is re-registered), `sp-keys/rotate`
+  ([login-methods.md](login-methods.md)).
+
 ## Backups and restore
 
 Back up:
@@ -389,12 +464,39 @@ Back up:
   or the ability to regenerate them: they can be replaced; existing browser cookies and portal
   sessions then end.
 
-Restore: restore the database, deploy with the same `MASTER_KEY` (and previous keys), run the
-migration job, start. Sessions and refresh tokens in the backup are as old as the backup;
-everything issued after it is gone, so people sign in again. Signing keys come back with the
-database: tokens signed by a key created after the backup do not verify any more, which ends
-those sessions at their next refresh. After restoring an older backup consider an emergency key
-rotation if the newer keys might have leaked.
+A logical backup as the owner role: `pg_dump -Fc -d "$MIGRATION_DATABASE_URL" -f
+portvakt.dump` (Compose: `docker compose ... exec -T postgres pg_dump -Fc -U postgres portvakt >
+portvakt.dump`). Test the restore regularly, on a copy.
+
+Restore:
+
+1. Stop the server replicas (scale to 0, `docker compose stop server admin`), so nothing writes
+   while the database is replaced.
+2. Make sure the four roles exist ([Database roles](#database-roles); on a new cluster create them
+   first), create an empty database owned by the owner role and restore into it as the owner:
+   `pg_restore --no-owner -d "$MIGRATION_DATABASE_URL" portvakt.dump`. Keep the privileges in the
+   dump (no `--no-acl`): they include the revocation of `audit_events_prune` from `PUBLIC`, without
+   which production refuses to start (`assertRestrictedRuntimeRole`).
+3. Run the migration job: it applies anything newer than the backup and re-applies the runtime
+   role's grants (`migrations/grants/runtime-role.sql`). Run the admin portal's session job
+   (`migrate-sessions`) too when the portal's session database was not restored: the portal needs
+   its table.
+4. Start with the same `MASTER_KEY` (and previous keys) as when the backup was taken.
+
+What a restore means:
+
+- Sessions and refresh tokens are as old as the backup; everything issued after it is gone, so
+  people sign in again. Signing keys come back with the database: tokens signed by a key created
+  after the backup do not verify any more, which ends those sessions at their next refresh.
+- Admin changes made after the backup are gone, and so are their kill switches: sessions and
+  grants revoked after the backup (a disabled login method, an unlinked identity, ended sessions)
+  are valid again. Re-apply the security-relevant changes from your forwarded copy of the audit
+  trail (`audit_events` after the backup's last `seq` is lost with the database). To end every
+  session and token at once instead, run `DELETE FROM oidc_payloads;` as the owner before step 4:
+  it holds only short-lived state (sessions, grants, codes, refresh tokens, interactions, replay
+  markers), so everyone signs in again.
+- After restoring an older backup consider an emergency key rotation if the newer keys might have
+  leaked.
 
 ## Monitoring
 
@@ -405,29 +507,38 @@ templates, reason codes, grant types, login method ids, tenant slugs and kids, n
 data ([`metrics/registry.ts`](../apps/server/src/metrics/registry.ts),
 [`metrics/collectors.ts`](../apps/server/src/metrics/collectors.ts)).
 
-| Metric                                                             | Meaning                                                        |
-| ------------------------------------------------------------------ | -------------------------------------------------------------- |
-| `portvakt_http_requests_total`, `..._duration_seconds`             | Requests and latency by method, route template, status         |
-| `portvakt_logins_total`                                            | Finished logins by `outcome`, `reason`, `protocol`             |
-| `portvakt_tokens_issued_total`                                     | Token endpoint successes by `grant_type`, `tenant`             |
-| `portvakt_rate_limited_total`                                      | Requests refused by a rate limit, by `limit`                   |
-| `portvakt_upstream_request_duration_seconds`, `_failures_total`    | Upstream requests by `login_method`, `purpose`, outcome        |
-| `portvakt_federation_callback_rejected_total`                      | Upstream callbacks with an unknown state                       |
-| `portvakt_saml_metadata_refresh_total`, `_refresh_failing`         | SAML metadata refreshes; 1 while a method's refresh fails      |
-| `portvakt_saml_metadata_age_seconds`, `_valid_until_seconds`       | Age and validUntil of each method's cached metadata            |
-| `portvakt_saml_logout_total`                                       | SAML single logout messages                                    |
-| `portvakt_signing_keys_loaded`, `portvakt_signing_key_age_seconds` | Keys of this replica by state; key ages                        |
-| `portvakt_db_pool_connections`                                     | Runtime pool connections by `state` (`waiting` > 0: saturated) |
-| `process_*`, `nodejs_eventloop_delay_p99_seconds`                  | Process CPU, memory, event loop delay                          |
-| `portvakt_admin_*`                                                 | The admin portal's HTTP and session pool metrics               |
+| Metric                                                             | Meaning                                                           |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| `portvakt_http_requests_total`, `..._duration_seconds`             | Requests and latency by method, route template, status            |
+| `portvakt_logins_total`                                            | Finished logins by `outcome`, `reason`, `protocol`                |
+| `portvakt_tokens_issued_total`                                     | Token endpoint successes by `grant_type`, `tenant`                |
+| `portvakt_rate_limited_total`                                      | Requests refused by a rate limit, by `limit`                      |
+| `portvakt_upstream_request_duration_seconds`, `_failures_total`    | Upstream requests by `login_method`, `purpose`, outcome           |
+| `portvakt_federation_callback_rejected_total`                      | Upstream callbacks with an unknown state                          |
+| `portvakt_saml_metadata_refresh_total`, `_refresh_failing`         | SAML metadata refreshes; 1 while a method's refresh fails         |
+| `portvakt_saml_metadata_age_seconds`, `_valid_until_seconds`       | Age and validUntil of each method's cached metadata               |
+| `portvakt_saml_logout_total`                                       | SAML single logout messages                                       |
+| `portvakt_signing_keys_loaded`, `portvakt_signing_key_age_seconds` | Keys of this replica by state; seconds since each key's creation  |
+| `portvakt_signing_key_state_since_seconds`                         | When each published key entered its state (Unix time), by `state` |
+| `portvakt_signing_key_activation_scheduled_seconds`                | When a manually rotated `next` key becomes active (Unix time)     |
+| `portvakt_db_pool_connections`                                     | Runtime pool connections by `state` (`waiting` > 0: saturated)    |
+| `process_*`, `nodejs_eventloop_delay_p99_seconds`                  | Process CPU, memory, event loop delay                             |
+| `portvakt_admin_*`                                                 | The admin portal's HTTP and session pool metrics                  |
 
 Suggested alerts (tune the thresholds to your traffic):
 
 - `/readyz` failing on any replica for 2 minutes, or fewer ready replicas than the PDB allows.
 - `sum(rate(portvakt_http_requests_total{status=~"5.."}[5m])) / sum(rate(portvakt_http_requests_total[5m])) > 0.02`.
 - `portvakt_signing_keys_loaded{state="active"} == 0` on any replica (it cannot sign).
-- `max(portvakt_signing_key_age_seconds{state="active"}) > KEY_ROTATION_INTERVAL + 1d`: the
-  rotation job is not running.
+- `time() - max(portvakt_signing_key_state_since_seconds{state="active"}) > KEY_ROTATION_INTERVAL + 1d`
+  (in seconds): the key has signed longer than the interval, so the rotation job is not running.
+  Not `portvakt_signing_key_age_seconds`: it counts from the key's creation, which precedes its
+  activation by `KEY_PUBLISH_AHEAD`, so with the defaults every active key passes 91 days.
+- `time() - max(portvakt_signing_key_activation_scheduled_seconds) > 600`: a manually rotated key
+  is overdue for activation (the replicas' timers and the periodic check both missed it).
+- The audit retention job (CronJob, or the Compose `audit-prune` run) failing, for example
+  `kube_job_status_failed{job_name=~".*audit-prune.*"} > 0` with kube-state-metrics: audit events
+  then outlive `AUDIT_RETENTION`.
 - `portvakt_saml_metadata_refresh_failing == 1` for 1 hour, or
   `portvakt_saml_metadata_valid_until_seconds - time() < 2*86400`: a SAML method will fail closed.
 - `rate(portvakt_upstream_request_failures_total[10m]) > 0` per `login_method` for 10 minutes:
@@ -503,6 +614,22 @@ for the latest minor version ([SECURITY.md](../SECURITY.md)). Roll back by deplo
 images (`helm rollback`, which does not run the migration hook): additive migrations keep the
 schema usable by the previous minor release. Do not run the previous version's migration job
 against a newer schema: the runner refuses a database with applied migrations it does not know.
+That decides how to roll back:
+
+- **Helm**: `helm rollback portvakt <revision>`. Not `helm upgrade` with the older chart or image:
+  its `pre-upgrade` migration hook runs the older runner, which fails and stops the upgrade.
+- **Compose**: `up` always runs the `migrate` job first, so with the older `PORTVAKT_TAG` start
+  only the long-running services, without their dependencies:
+  `PORTVAKT_TAG=<previous> docker compose ... up -d --no-deps server admin`.
+- **`MIGRATE_ON_START=true`**: an older replica refuses to start against the newer schema; set
+  it to `false` for the rolled-back version.
+
+Upgrade procedure: read the changelog, back up the database ([Backups](#backups-and-restore)),
+run `config:check` with the new image and the production environment (`node
+dist/config/check-cli.js`, and `--job` for the jobs' environment: new releases may refuse or warn
+about settings), then deploy (the migration job runs first). A failed migration rolls back its
+own transaction (each file runs in one); with Helm the hook then stops the upgrade before any pod
+changes. Fix the cause and deploy again.
 
 **PostgreSQL versions.** CI, the dev database and the Compose stack run PostgreSQL 18. Portvakt
 uses no 18-only features, but only 18 is tested. A major PostgreSQL upgrade is a database
