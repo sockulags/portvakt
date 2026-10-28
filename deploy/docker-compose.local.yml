@@ -37,6 +37,11 @@ services:
   admin-migrate:
     <<: *local
 
+  audit-prune:
+    <<: *local
+    environment:
+      NODE_ENV: development
+
   server:
     <<: *local
     ports: !reset []
