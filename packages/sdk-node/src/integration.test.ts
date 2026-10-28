@@ -185,7 +185,8 @@ async function getJson(driver: FlowDriver, url: string) {
 }
 
 describe.skipIf(ts === undefined)("SDK against Portvakt", () => {
-  const repos = ts!.db.repos;
+  // The describe body also runs when the suite is skipped (no Postgres): only the tests use it.
+  const repos = ts?.db.repos as NonNullable<typeof ts>["db"]["repos"];
 
   it("signs an employee in over OIDC, calls the API with the BFF's token and logs out", async () => {
     const tenant = await createTenant(repos, "sdk-emp");
