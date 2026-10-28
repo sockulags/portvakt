@@ -72,6 +72,23 @@ services:
       DATABASE_URL: postgres://portvakt_app:${PORTVAKT_APP_DB_PASSWORD}@${PORTVAKT_DB_HOST:-postgres}:5432/portvakt
       MIGRATION_DATABASE_URL: postgres://portvakt:${PORTVAKT_OWNER_DB_PASSWORD}@${PORTVAKT_DB_HOST:-postgres}:5432/portvakt
 
+  # Audit retention (AUDIT_RETENTION, default 400d) as the owner role, the only role that may
+  # prune audit_events. Profile `jobs`: never started by `up`; run it daily from the host, e.g.
+  #   docker compose --env-file deploy/compose/production.env -f deploy/docker-compose.yml \
+  #     run --rm audit-prune
+  audit-prune:
+    profiles: [jobs]
+    image: ${PORTVAKT_REGISTRY:-}portvakt-server:${PORTVAKT_TAG:-1.0.0}
+    <<: *hardened
+    command: ["node", "dist/audit/prune-cli.js"]
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      AUDIT_RETENTION: ${AUDIT_RETENTION:-400d}
+      DATABASE_URL: postgres://portvakt_app:${PORTVAKT_APP_DB_PASSWORD}@${PORTVAKT_DB_HOST:-postgres}:5432/portvakt
+      MIGRATION_DATABASE_URL: postgres://portvakt:${PORTVAKT_OWNER_DB_PASSWORD}@${PORTVAKT_DB_HOST:-postgres}:5432/portvakt
+
   # The admin portal's session table, in its own database, as that database's owner.
   admin-migrate:
     image: ${PORTVAKT_REGISTRY:-}portvakt-admin:${PORTVAKT_TAG:-1.0.0}

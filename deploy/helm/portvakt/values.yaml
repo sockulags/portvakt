@@ -91,6 +91,8 @@ server:
     idpKind: ""
     idpDisplayName: ""
     idpAcr: ""
+    # Required when idpAcr is a level of ACR_RANKING: the upstream claim that proves it.
+    idpAcrClaim: ""
     adminSubject: ""
 
   # Further non-secret configuration as environment variables (docs/operations.md lists them),

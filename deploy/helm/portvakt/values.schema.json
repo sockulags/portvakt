@@ -325,6 +325,9 @@
             "idpAcr": {
               "type": "string"
             },
+            "idpAcrClaim": {
+              "type": "string"
+            },
             "adminSubject": {
               "type": "string",
               "maxLength": 255
