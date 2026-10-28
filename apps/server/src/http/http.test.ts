@@ -1,9 +1,16 @@
 import { HSTS } from "@portvakt/http-kit";
+import express from "express";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
 import { createLogger } from "../logging/logger.js";
-import { basicClientId, bodyClientId } from "./client-id.js";
+import {
+  basicClientId,
+  bodyClientId,
+  BodyTooLargeError,
+  PROVIDER_BODY_LIMIT,
+  readReplayableForm,
+} from "./client-id.js";
 import { routeTemplate } from "./route-template.js";
 
 describe("route templates", () => {
@@ -54,6 +61,52 @@ describe("client ids for the token endpoint limit", () => {
     expect(bodyClientId(new URLSearchParams({ client_assertion: "garbage" }))).toBeUndefined();
     expect(bodyClientId(new URLSearchParams({ client_id: "x".repeat(300) }))).toBeUndefined();
     expect(bodyClientId(new URLSearchParams())).toBeUndefined();
+  });
+});
+
+describe("readReplayableForm", () => {
+  // The rate limit reads the form, then the provider reads the same bytes again
+  // (`req.iterator()`, as oidc-provider's selective_body.js does).
+  const app = express();
+  app.post("/token", (req, res) => {
+    readReplayableForm(req).then(
+      async (form) => {
+        const chunks: Buffer[] = [];
+        if (req.readable) {
+          for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+            chunks.push(Buffer.from(chunk as Buffer));
+          }
+        }
+        res.json({
+          clientId: form?.get("client_id") ?? null,
+          replayed: Buffer.concat(chunks).toString(),
+        });
+      },
+      (error: unknown) => {
+        res.status(error instanceof BodyTooLargeError ? 413 : 500).end();
+      },
+    );
+  });
+
+  it("reads the client_id and replays the same body", async () => {
+    const res = await request(app)
+      .post("/token")
+      .type("form")
+      .send("grant_type=refresh_token&client_id=app-1");
+    expect(res.body).toEqual({
+      clientId: "app-1",
+      replayed: "grant_type=refresh_token&client_id=app-1",
+    });
+  });
+
+  it("leaves other content types alone and refuses bodies above the provider's limit", async () => {
+    const other = await request(app).post("/token").type("json").send({ client_id: "app-1" });
+    expect(other.body).toMatchObject({ clientId: null });
+    const declared = await request(app)
+      .post("/token")
+      .type("form")
+      .send(`client_id=app-1&pad=${"x".repeat(PROVIDER_BODY_LIMIT)}`);
+    expect(declared.status).toBe(413);
   });
 });
 
