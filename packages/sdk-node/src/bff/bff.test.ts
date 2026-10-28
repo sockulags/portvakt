@@ -49,6 +49,7 @@ beforeEach(() => {
   op.down = false;
   op.serverError = undefined;
   op.tokenError = undefined;
+  op.rejectClient = false;
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -1082,6 +1083,48 @@ describe("security review fixes", () => {
         }),
       ),
     ).toEqual([]);
+  });
+});
+
+describe("invalid_client with a WWW-Authenticate challenge (client_secret_basic)", () => {
+  it("keeps the session and its refresh token when Portvakt refuses the client at a refresh", async () => {
+    const h = await harness();
+    try {
+      const browser = new MiniBrowser();
+      await login(h, browser);
+      // oidc-provider answers a refused client_secret_basic with 401 and a Basic challenge;
+      // openid-client then reports a WWWAuthenticateChallengeError, not a ResponseBodyError.
+      op.rejectClient = true;
+      const presented = op.presentedRefreshTokens.length;
+      const refused = await browser.request(`${h.base}/token?min=3600`, {
+        headers: { accept: "application/json" },
+      });
+      // Not a 401 login_required: PortvaktError invalid_client (502) passes on to the
+      // application's error handler (here Express's own, which uses the error's status).
+      expect(refused.status).toBe(502);
+      expect(op.presentedRefreshTokens.length).toBe(presented + 1);
+      expect((await sessionOf(h, browser)).authenticated).toBe(true);
+      // Once the credentials are fixed, the same refresh token still works.
+      op.rejectClient = false;
+      expect((await browser.request(`${h.base}/token?min=3600`)).status).toBe(200);
+      expect(op.presentedRefreshTokens.at(-1)).toBe(op.presentedRefreshTokens[presented]);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("answers the login callback with invalid_client (502), not a generic login failure", async () => {
+    const h = await harness();
+    try {
+      const browser = new MiniBrowser();
+      op.rejectClient = true;
+      const { done } = await login(h, browser);
+      expect(done.status).toBe(502);
+      expect(await done.text()).toContain('data-testid="portvakt-error-code">invalid_client<');
+      expect((await sessionOf(h, browser)).authenticated).toBe(false);
+    } finally {
+      await h.close();
+    }
   });
 });
 

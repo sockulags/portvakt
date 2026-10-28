@@ -102,8 +102,39 @@ export async function transientRefusal(
     if (error.status !== 429 && error.error !== "temporarily_unavailable") return undefined;
     return { retryAfterSeconds: retryAfterSeconds(error.response.headers.get("retry-after")) };
   }
+  if (error instanceof client.WWWAuthenticateChallengeError) {
+    // An answer with a challenge (oidc-provider adds one to a 401 of a request with an
+    // Authorization header), also a 429 that kept it.
+    if (error.status !== 429 && oauthErrorOf(error) !== "temporarily_unavailable") {
+      return undefined;
+    }
+    return { retryAfterSeconds: retryAfterSeconds(error.response.headers.get("retry-after")) };
+  }
   const cause = (error as { cause?: unknown }).cause;
   return cause !== undefined && cause !== error ? transientRefusal(cause, depth + 1) : undefined;
+}
+
+const OAUTH_ERROR = /^[a-z_]{1,64}$/;
+
+/**
+ * The OAuth error code of a failed request to Portvakt's token endpoint, or `undefined`.
+ * openid-client reports it in two shapes: a `ResponseBodyError` (from the JSON body), or a
+ * `WWWAuthenticateChallengeError` when the answer carries a `WWW-Authenticate` challenge.
+ * oidc-provider adds one to every 401 of a request with an `Authorization` header, so a refused
+ * `client_secret_basic` (the default) is `invalid_client` only in the challenge's `error`.
+ */
+export function oauthErrorOf(error: unknown, depth = 0): string | undefined {
+  if (depth > 5 || !(error instanceof Error)) return undefined;
+  let code: unknown;
+  if (error instanceof client.ResponseBodyError) code = error.error;
+  else if (error instanceof client.WWWAuthenticateChallengeError) {
+    code = error.cause.find((challenge) => typeof challenge.parameters.error === "string")
+      ?.parameters.error;
+  } else {
+    const cause = (error as { cause?: unknown }).cause;
+    return cause !== error ? oauthErrorOf(cause, depth + 1) : undefined;
+  }
+  return typeof code === "string" && OAUTH_ERROR.test(code) ? code : undefined;
 }
 
 /**

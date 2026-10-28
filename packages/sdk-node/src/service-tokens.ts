@@ -1,6 +1,6 @@
 import * as client from "openid-client";
 import type { ResolvedConfig } from "./config.js";
-import { DiscoveryCache, isUnavailable } from "./discovery.js";
+import { DiscoveryCache, isUnavailable, oauthErrorOf, transientRefusal } from "./discovery.js";
 import { PortvaktError, PortvaktUnavailableError } from "./errors.js";
 import { errorDetails } from "./logger.js";
 
@@ -60,10 +60,18 @@ export class ClientCredentialsSource implements ServiceTokenSource {
         { ...errorDetails(error), audience: this.audience },
         "client_credentials grant failed",
       );
+      // 429 or temporarily_unavailable: Portvakt asked to be retried later, as at a refresh.
+      const transient = await transientRefusal(error);
+      if (transient !== undefined) {
+        throw new PortvaktUnavailableError("Portvakt asked to retry later", {
+          cause: error,
+          retryAfterSeconds: transient.retryAfterSeconds,
+        });
+      }
       if (isUnavailable(error)) {
         throw new PortvaktUnavailableError("Portvakt is unavailable", { cause: error });
       }
-      const code = error instanceof client.ResponseBodyError ? error.error : "token_request_failed";
+      const code = oauthErrorOf(error) ?? "token_request_failed";
       throw new PortvaktError(code, "Portvakt refused the client_credentials grant", 502, {
         cause: error,
       });

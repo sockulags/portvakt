@@ -10,7 +10,12 @@ import { compactVerify } from "jose";
 import * as client from "openid-client";
 import { z } from "zod";
 import { formatIssues, type ResolvedConfig } from "../config.js";
-import { isUnavailable, transientRefusal, type DiscoveryCache } from "../discovery.js";
+import {
+  isUnavailable,
+  oauthErrorOf,
+  transientRefusal,
+  type DiscoveryCache,
+} from "../discovery.js";
 import type { JwksCache } from "../jwks.js";
 import {
   LoginFailedError,
@@ -678,6 +683,13 @@ class BffEngine {
         });
       }
       if (isUnavailable(error)) throw new PortvaktUnavailableError(undefined, { cause: error });
+      if (oauthErrorOf(error) === "invalid_client") {
+        // The application's own credentials: a configuration problem (as at a refresh).
+        this.#config.logger.error(errorDetails(error), "code exchange refused: invalid_client");
+        throw new LoginFailedError("invalid_client", "Portvakt refused the client", 502, {
+          cause: error,
+        });
+      }
       throw new LoginFailedError("login_failed", "the code exchange failed", 400, { cause: error });
     }
     if (tokens.id_token !== undefined && !(await this.#signedByPortvakt(tokens.id_token))) {
@@ -1033,7 +1045,7 @@ class BffEngine {
         });
       }
       if (isUnavailable(error)) return this.#outage(key, current, error);
-      if (error instanceof client.ResponseBodyError && error.error === "invalid_client") {
+      if (oauthErrorOf(error) === "invalid_client") {
         // The application's own credentials are wrong: a configuration problem, not the
         // person's session. Keep the session and fail the request.
         this.#config.logger.error(errorDetails(error), "refresh refused: invalid_client");

@@ -46,6 +46,15 @@ export interface FakeOp {
    */
   tokenError:
     { readonly status: number; readonly body: unknown; readonly retryAfter?: string } | undefined;
+  /** The same for client_credentials grants (which `tokenError` leaves alone). */
+  clientCredentialsError:
+    { readonly status: number; readonly body: unknown; readonly retryAfter?: string } | undefined;
+  /**
+   * Every token request fails client authentication as oidc-provider answers it: 401
+   * `invalid_client`, plus a `WWW-Authenticate: Basic ...` challenge when the request carried an
+   * Authorization header (client_secret_basic).
+   */
+  rejectClient: boolean;
   readonly counters: {
     refresh: number;
     jwks: number;
@@ -125,6 +134,8 @@ export async function startFakeOp(): Promise<FakeOp> {
     down: false,
     serverError: undefined,
     tokenError: undefined,
+    clientCredentialsError: undefined,
+    rejectClient: false,
     counters: { refresh: 0, jwks: 0, discovery: 0, token: 0, failed: 0 },
     authorizations: [],
     presentedRefreshTokens: [],
@@ -285,8 +296,31 @@ export async function startFakeOp(): Promise<FakeOp> {
         return;
       }
       const grantType = body.get("grant_type");
-      const refused = op.tokenError;
-      if (refused !== undefined && grantType !== "client_credentials") {
+      if (op.rejectClient) {
+        if (grantType === "refresh_token") {
+          op.counters.refresh += 1;
+          op.presentedRefreshTokens.push(body.get("refresh_token") ?? "");
+        }
+        res.writeHead(401, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          ...(authorization === ""
+            ? {}
+            : {
+                "www-authenticate": `Basic realm="${issuer}", error="invalid_client", error_description="client authentication failed"`,
+              }),
+        });
+        res.end(
+          JSON.stringify({
+            error: "invalid_client",
+            error_description: "client authentication failed",
+          }),
+        );
+        return;
+      }
+      const refused =
+        grantType === "client_credentials" ? op.clientCredentialsError : op.tokenError;
+      if (refused !== undefined) {
         if (grantType === "refresh_token") {
           op.counters.refresh += 1;
           op.presentedRefreshTokens.push(body.get("refresh_token") ?? "");
