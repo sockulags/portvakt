@@ -19,7 +19,7 @@
       "oid": "c7b2e4a1-9f3d-4e6c-8a15-d4f7b2c9e061",
       "name": "Olle Overage",
       "email": "olle.overage@kommun.example",
-      "groups": ["grp-handlaggare"],
+      "groups": ["grp-handlaggare", "grp-all-staff", "grp-overage-extra"],
       "groupsOverage": true
     }
   ],

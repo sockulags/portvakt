@@ -174,6 +174,7 @@ const LOGIN_METHOD_FIELDS = [
   "allowedUpstreamTenants",
   "trustUpstreamEmail",
   "pinLoginHint",
+  "resolveGroupsOverage",
   "scopes",
   "claimMapping",
   "saml",
@@ -227,8 +228,16 @@ export const AUDIT_EVENTS = {
   ),
   "login.groups_overage": event(
     "success",
-    z.object({ loginMethodId: uuid }).strict(),
-    "Entra ID groups overage: the groups of this login were treated as empty.",
+    z
+      .object({
+        loginMethodId: uuid,
+        /** The groups were read from Microsoft Graph (`resolveGroupsOverage`). */
+        resolved: z.boolean().optional(),
+      })
+      .strict(),
+    "Entra ID groups overage: the groups of this login were read from Microsoft Graph " +
+      "(`resolved`), or else treated as empty. A failed Graph lookup is a `login.failure` with " +
+      "detail `groups_overage_unresolved` instead.",
   ),
   "person.created": event(
     "success",

@@ -71,6 +71,7 @@ interface LoginMethodRow {
   allowed_upstream_tenants: string[];
   trust_upstream_email: boolean;
   pin_login_hint: boolean;
+  resolve_groups_overage: boolean;
   scopes: string[];
   claim_mapping: unknown;
   asserted_acr: string;
@@ -112,7 +113,8 @@ const SELECT_LOGIN_METHOD = `
   SELECT lm.id, lm.tenant_id, lm.protocol, lm.kind, lm.display_name, lm.issuer, lm.client_id,
          lm.client_secret_encrypted IS NOT NULL AS has_client_secret,
          lm.token_endpoint_auth_method, lm.client_key_kid, lm.use_userinfo,
-         lm.client_assertion_audience, lm.allowed_upstream_tenants, lm.trust_upstream_email, lm.pin_login_hint, lm.scopes,
+         lm.client_assertion_audience, lm.allowed_upstream_tenants, lm.trust_upstream_email, lm.pin_login_hint,
+         lm.resolve_groups_overage, lm.scopes,
          lm.claim_mapping, lm.asserted_acr, lm.secret_expires_at, lm.max_age_seconds,
          lm.idle_seconds, lm.allow_sso, lm.link_by_pin, lm.trust_pin_for_representation, lm.enabled, lm.created_at, lm.updated_at,
          ARRAY(SELECT d.domain FROM login_method_domains d
@@ -203,6 +205,7 @@ function toLoginMethod(row: LoginMethodRow): LoginMethod {
     allowedUpstreamTenants: row.allowed_upstream_tenants,
     trustUpstreamEmail: row.trust_upstream_email,
     pinLoginHint: row.pin_login_hint,
+    resolveGroupsOverage: row.resolve_groups_overage,
     scopes: row.scopes,
     claimMapping: claimMappingSchema.parse(row.claim_mapping),
   };
@@ -297,9 +300,9 @@ export class LoginMethodRepository {
               allow_sso, link_by_pin, enabled, token_endpoint_auth_method, use_userinfo,
               client_key_kid, client_public_jwk, client_private_jwk_encrypted,
               client_assertion_audience, allowed_upstream_tenants, trust_upstream_email,
-              pin_login_hint, trust_pin_for_representation)
+              pin_login_hint, trust_pin_for_representation, resolve_groups_overage)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16,
-                   $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26)`,
+                   $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26, $27)`,
           [
             id,
             tenantId,
@@ -327,6 +330,7 @@ export class LoginMethodRepository {
             data.trustUpstreamEmail,
             data.pinLoginHint,
             data.trustPinForRepresentation,
+            data.resolveGroupsOverage,
           ],
         ),
       );
@@ -356,6 +360,7 @@ export class LoginMethodRepository {
       trustPinForRepresentation:
         data.trustPinForRepresentation ?? current.trustPinForRepresentation,
       linkByPin: data.linkByPin ?? current.linkByPin,
+      resolveGroupsOverage: data.resolveGroupsOverage ?? current.resolveGroupsOverage,
     });
     const secretChanged = data.clientSecret !== undefined;
     const encryptedSecret =
@@ -387,7 +392,8 @@ export class LoginMethodRepository {
              allowed_upstream_tenants = COALESCE($22, allowed_upstream_tenants),
              trust_upstream_email = COALESCE($23, trust_upstream_email),
              pin_login_hint = COALESCE($24, pin_login_hint),
-             trust_pin_for_representation = COALESCE($25, trust_pin_for_representation)
+             trust_pin_for_representation = COALESCE($25, trust_pin_for_representation),
+             resolve_groups_overage = COALESCE($26, resolve_groups_overage)
            WHERE tenant_id = $1 AND id = $2 AND protocol = 'oidc'
            RETURNING id`,
           [
@@ -416,6 +422,7 @@ export class LoginMethodRepository {
             data.trustUpstreamEmail ?? null,
             data.pinLoginHint ?? null,
             data.trustPinForRepresentation ?? null,
+            data.resolveGroupsOverage ?? null,
           ],
         ),
       );

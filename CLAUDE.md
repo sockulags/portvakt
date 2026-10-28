@@ -227,7 +227,8 @@ tenant), and `createPortvakt({ auditSink })` (forwarding audit events to the sta
 service).
 
 Migration 0007 (`0007_security_review.sql`) adds `applications.service_audiences`; 0008
-(`0008_client_key_rotation.sql`) the next and retiring upstream client keys of login methods. Migrations are
+(`0008_client_key_rotation.sql`) the next and retiring upstream client keys of login methods;
+0009 (`0009_groups_overage.sql`) `login_methods.resolve_groups_overage`. Migrations are
 plain SQL in `apps/server/migrations/NNNN_name.sql`, applied by our own runner
 (`src/db/migrate.ts`): it is ~150 lines, takes an advisory lock and keeps checksums, which a
 dependency would only wrap.
@@ -717,9 +718,18 @@ number>`.
   served at `/metrics`). One pending `federation_states` row per
   (interaction, login method) is reused while valid. Discovery failures are cached for
   `UPSTREAM_FAILURE_CACHE`.
-- Entra ID groups overage (`_claim_names` instead of `groups`) is not resolved through Graph:
-  the groups count as empty and `login.groups_overage` is audited. Configure the Entra app to
-  emit only groups assigned to the application (docs/claims.md).
+- Entra ID groups overage (`_claim_names` instead of `groups`): by default the groups count as
+  empty and `login.groups_overage` is audited. A method with `resolveGroupsOverage` (migration
+  0009, needs `claimMapping.groups`) reads them in the callback from Microsoft Graph
+  (`federation/graph-groups.ts`: `{GRAPH_API_URL}/v1.0/me/transitiveMemberOf?$select=id` with
+  the upstream access token, through the outbound guard with `redirect: "manual"`, paging links
+  only below the base, at most 1,000 groups / 10 pages / 1 MB a page, groups only) and audits
+  `login.groups_overage` with `resolved: true`; any failure fails the login closed
+  (`login.failure` with detail `groups_overage_unresolved`). The token's `_claim_sources`
+  endpoint is never called. The mock's Entra issuers serve `/graph/v1.0/me/transitiveMemberOf`
+  (page size 2, a directory role mixed in; `oidc(kind).failGraph(status)` in tests);
+  `groups-overage.test.ts` starts the mock first so GRAPH_API_URL can point at it. Configure the
+  Entra app to emit only groups assigned to the application anyway (docs/claims.md).
 - The login UI is `apps/login/dist` (or `LOGIN_UI_DIR`), served by the server: every page is its
   `index.html` plus a `<script type="application/json" id="pv-bootstrap">` block that selects
   the view. Production refuses to start without the build. oidc-provider's logout form is

@@ -146,6 +146,12 @@ export interface OidcLoginMethod extends LoginMethodBase {
    * default (the number then never leaves Portvakt in a front-channel URL).
    */
   readonly pinLoginHint: boolean;
+  /**
+   * Entra ID groups overage (`_claim_names` names the groups claim instead of carrying it):
+   * read the groups from Microsoft Graph (GRAPH_API_URL, `/me/transitiveMemberOf`) with the
+   * upstream access token. Off: the groups count as empty. A failed lookup fails the login.
+   */
+  readonly resolveGroupsOverage: boolean;
   readonly scopes: readonly string[];
   readonly claimMapping: ClaimMapping;
 }
@@ -179,6 +185,7 @@ export const createLoginMethodInputSchema = z.object({
   allowedUpstreamTenants: upstreamTenantsSchema.default([]),
   trustUpstreamEmail: z.boolean().default(false),
   pinLoginHint: z.boolean().default(false),
+  resolveGroupsOverage: z.boolean().default(false),
   scopes: scopesSchema.default(["openid"]),
   claimMapping: claimMappingSchema,
   assertedAcr: z.string().min(1).max(255),
@@ -205,6 +212,7 @@ export const updateLoginMethodInputSchema = z
     allowedUpstreamTenants: upstreamTenantsSchema,
     trustUpstreamEmail: z.boolean(),
     pinLoginHint: z.boolean(),
+    resolveGroupsOverage: z.boolean(),
     scopes: scopesSchema,
     claimMapping: claimMappingSchema,
     assertedAcr: z.string().min(1).max(255),
@@ -275,10 +283,16 @@ export function loginMethodRuleViolations(
     readonly allowedUpstreamTenants: readonly string[];
     readonly assertedAcr: string;
     readonly claimMapping: ClaimMapping;
+    readonly resolveGroupsOverage?: boolean;
   },
   acrRanking: readonly string[],
 ): string[] {
   const issues: string[] = [];
+  if (method.resolveGroupsOverage === true && method.claimMapping.groups === undefined) {
+    issues.push(
+      "resolveGroupsOverage: requires claimMapping.groups (the claim an overage replaces)",
+    );
+  }
   if (isMultiTenantIssuer(method.issuer) && method.allowedUpstreamTenants.length === 0) {
     issues.push(
       "allowedUpstreamTenants: required for a multi-tenant issuer (only the listed upstream tenants may sign in)",
