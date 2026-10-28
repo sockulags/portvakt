@@ -35,7 +35,30 @@ class ClientCredentialsTest {
     op.down = false;
     op.serverError = null;
     op.tokenError = null;
+    op.tokenErrorStatus = 400;
+    op.tokenErrorRetryAfter = null;
     op.tokenLifetime = 300;
+  }
+
+  @Test
+  void treats429AndTemporarilyUnavailableAsRetryLater() {
+    PortvaktClient portvakt = PortvaktClient.create(op.config().build());
+    ServiceTokenSource tokens = portvakt.clientCredentials().forAudience("rate-limited");
+    op.tokenError = "invalid_request";
+    op.tokenErrorStatus = 429;
+    op.tokenErrorRetryAfter = "7";
+    assertThatThrownBy(tokens::getToken)
+        .isInstanceOf(PortvaktRetryLaterException.class)
+        .satisfies(
+            error -> assertThat(((PortvaktRetryLaterException) error).retryAfter()).isEqualTo(Duration.ofSeconds(7)));
+    op.tokenError = "temporarily_unavailable";
+    op.tokenErrorStatus = 400;
+    op.tokenErrorRetryAfter = null;
+    assertThatThrownBy(tokens::getToken)
+        .isInstanceOf(PortvaktRetryLaterException.class)
+        .satisfies(error -> assertThat(((PortvaktRetryLaterException) error).retryAfter()).isNull());
+    op.tokenError = null;
+    assertThat(tokens.getToken()).startsWith("token-");
   }
 
   @Test

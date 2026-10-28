@@ -27,8 +27,12 @@ import java.util.concurrent.TimeoutException;
  * Internal API.
  */
 public final class Http {
-  /** A response: status and body (at most the limit). */
-  public record Response(int status, String body) {
+  /** A response: status, body (at most the limit) and the {@code Retry-After} header, if any. */
+  public record Response(int status, String body, String retryAfter) {
+    public Response(int status, String body) {
+      this(status, body, null);
+    }
+
     public boolean ok() {
       return status >= 200 && status < 300;
     }
@@ -94,7 +98,10 @@ public final class Http {
         client.sendAsync(request, info -> new LimitedBody(maxBytes));
     try {
       HttpResponse<byte[]> response = pending.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-      return new Response(response.statusCode(), new String(response.body(), StandardCharsets.UTF_8));
+      return new Response(
+          response.statusCode(),
+          new String(response.body(), StandardCharsets.UTF_8),
+          response.headers().firstValue("Retry-After").orElse(null));
     } catch (TimeoutException deadline) {
       pending.cancel(true);
       throw new HttpTimeoutException("request to Portvakt timed out");

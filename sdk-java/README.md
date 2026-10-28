@@ -33,8 +33,9 @@ The demo service `examples/demo-service-java` ("Tjänst C") uses the starter for
 Built against Spring Boot 4.1.1 (Spring Framework 7.0, Spring Security 7.1.1, Jackson 3) and
 Nimbus JOSE+JWT 10.9.1, the version Spring Security declares (one Nimbus for the core and
 Spring); tested with JUnit 6.0 and AssertJ 3.27 from Boot's BOM. Spring Boot 3.5 is not
-supported (its open-source support ended on 2026-06-30). Publishing to a repository belongs to
-M9.
+supported (its open-source support ended on 2026-06-30). The release workflow (`v*` tags) builds
+the jars with sources and javadoc (`mvn -Prelease`) and keeps them as workflow artifacts; they
+are not deployed to a Maven repository.
 
 ## Browser login quick start
 
@@ -224,8 +225,9 @@ String token = clientCredentials.forAudience("archive-service").getToken();
 
 Tokens (`resource=urn:portvakt:app:{audience}`) are cached until shortly before they expire (10%
 of the lifetime, at least 30 s) and fetched once at a time. A network error, timeout or 5xx is
-`PortvaktUnavailableException`; a refusal is a `PortvaktException` with Portvakt's OAuth error
-code. The target must be enabled in the same tenant and listed in the calling application's
+`PortvaktUnavailableException`; a 429 or the OAuth error `temporarily_unavailable` is
+`PortvaktRetryLaterException` (a `PortvaktUnavailableException` with Portvakt's `Retry-After`);
+any other refusal is a `PortvaktException` with Portvakt's OAuth error code (502). The target must be enabled in the same tenant and listed in the calling application's
 `serviceAudiences` in Portvakt (empty by default: no service tokens for other applications).
 
 ## Core without Spring

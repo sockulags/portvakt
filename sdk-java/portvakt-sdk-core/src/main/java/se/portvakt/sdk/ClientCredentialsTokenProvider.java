@@ -36,8 +36,10 @@ import se.portvakt.sdk.internal.Http;
  * {@code urn:portvakt:app:{audience}} (RFC 8707). Tokens are cached until shortly before they
  * expire (10% of the lifetime, at least 30 s, at most half the lifetime) and fetched once at a
  * time per audience. A network error, a timeout or a 5xx answer is {@link
- * PortvaktUnavailableException}; a refusal is a {@link PortvaktException} with Portvakt's OAuth
- * error code (HTTP 502). The target must be enabled in the same tenant. Thread-safe.
+ * PortvaktUnavailableException}; a 429 or the OAuth error {@code temporarily_unavailable} is
+ * {@link PortvaktRetryLaterException} (with Portvakt's {@code Retry-After}); any other refusal is
+ * a {@link PortvaktException} with Portvakt's OAuth error code (HTTP 502). The target must be
+ * enabled in the same tenant. Thread-safe.
  */
 public final class ClientCredentialsTokenProvider {
   private static final System.Logger LOG =
@@ -165,6 +167,12 @@ public final class ClientCredentialsTokenProvider {
       if (!response.ok()) {
         Object error = body.get("error");
         String code = error instanceof String text && OAUTH_ERROR.matcher(text).matches() ? text : "token_request_failed";
+        if (response.status() == 429 || code.equals("temporarily_unavailable")) {
+          // Portvakt asked to be retried later (a rate limit): transient, not a refusal.
+          LOG.log(Level.WARNING, "client_credentials grant for {0}: Portvakt asked to retry later", audience);
+          throw new PortvaktRetryLaterException(
+              PortvaktRetryLaterException.parseRetryAfter(response.retryAfter(), config.clock().instant()));
+        }
         LOG.log(Level.WARNING, "client_credentials grant for {0} refused: {1}", audience, code);
         throw new PortvaktException(code, "Portvakt refused the client_credentials grant", 502);
       }
