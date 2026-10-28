@@ -526,6 +526,22 @@
           "type": "integer",
           "minimum": 0
         },
+        "serviceAccount": {
+          "description": "The migration hook Jobs' ServiceAccount, created as a hook before them.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "create": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "annotations": {
+              "type": "object"
+            }
+          }
+        },
         "resources": {
           "$ref": "#/definitions/resources"
         }

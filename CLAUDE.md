@@ -413,9 +413,12 @@ Secure and an http issuer refused unless the `local` profile is active
   `scripts/e2e.js --compose` builds the images, starts postgres first, runs the Java demo in the
   maven container with `--network container:portvakt-e2e-postgres-1` (no PortForward), follows
   `docker compose logs -f` per service into e2e/.artifacts/logs and runs `down -v` at the end.
-- Helm (`deploy/helm/portvakt`): hook Jobs (migrations) use the namespace's default service
-  account (the chart's does not exist yet at pre-install) and inline env (no ConfigMaps yet);
-  `values.schema.json` refuses secret variables in `server.env`/`admin.env`; templates are Go
+- Helm (`deploy/helm/portvakt`): non-secret env comes from ConfigMaps everywhere (server, admin,
+  the audit prune CronJob's `-audit-prune`); the hook Jobs (migrations) run before the chart's
+  ServiceAccount and ConfigMaps exist, so a hook ServiceAccount and a hook ConfigMap
+  (`{fullname}-migrate`, weight -10, before the Jobs at -5/-4; `portvakt.jobConfig`: NODE_ENV
+  plus `server.env`) are created for them (`migrations.serviceAccount`); secrets only through
+  `secretKeyRef`/`secretRef`; `values.schema.json` refuses secret variables in `server.env`/`admin.env`; templates are Go
   templates, so prettier ignores `deploy/helm/portvakt/templates`. `scripts/helm-check.js` runs
   helm and kubeconform from `deploy/images.Dockerfile`.
 - Releases: `.github/workflows/release.yml` on `v*` tags checks that the tag matches every

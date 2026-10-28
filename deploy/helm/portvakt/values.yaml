@@ -208,10 +208,19 @@ admin:
 
 # Migrations as a pre-install/pre-upgrade hook (MIGRATION_DATABASE_URL, the owner role), and the
 # admin portal's session table (ADMIN_MIGRATION_DATABASE_URL), both from database.ownerSecret.
+# Their non-secret environment (NODE_ENV, server.env) is a hook ConfigMap created before them.
 migrations:
   enabled: true
   activeDeadlineSeconds: 600
   backoffLimit: 1
+  # The Jobs' ServiceAccount, created as a hook before them (the chart's own does not exist yet
+  # at pre-install); never with a token. create: false uses an existing one (name, or the
+  # namespace's "default").
+  serviceAccount:
+    create: true
+    # Default: {release fullname}-migrate.
+    name: ""
+    annotations: {}
   resources:
     requests:
       cpu: 50m

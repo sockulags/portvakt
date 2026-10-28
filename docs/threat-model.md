@@ -150,8 +150,9 @@ packaging); operational guidance (deployment, backup, rotation runbooks) is in
   every tenant; per-tenant keys are a recorded follow-up.
 - **MASTER_KEY protects everything at rest.** Whoever has it and a database dump has every secret
   and personal identity number. It lives in each replica's environment; keep it in a secret
-  manager, rotate with `MASTER_KEY_PREVIOUS` and `rewrap-secrets`. Sealed SAML session data is not
-  re-wrapped (keep the old key for SESSION_TTL).
+  manager, rotate with `MASTER_KEY_PREVIOUS` and `rewrap-secrets` (which also re-wraps the sealed
+  SAML session data of live sessions; only in-flight logins keep old-key values, for at most
+  INTERACTION_TTL).
 - **The mock IdP is never part of production.** It refuses NODE_ENV=production, and production
   refuses private upstream hosts and local bootstrap issuers, but nothing stops an operator from
   deploying it elsewhere and configuring it as a login method over https: it signs anyone in.

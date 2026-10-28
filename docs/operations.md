@@ -89,11 +89,18 @@ What the chart creates:
 - **Ingress** with TLS for `ingress.host` (Portvakt) and `ingress.adminHost` (the portal).
   `PUBLIC_URL` and `ADMIN_PUBLIC_URL` default to `https://{host}`.
 - **Migration Jobs** as `pre-install,pre-upgrade` hooks: `migrate-cli` as the owner role, then
-  the admin session table as the session database's owner (both from the owner Secret). A failed migration stops the upgrade before any pod changes. Hooks
-  run before the chart's ServiceAccount exists, so they use the namespace's default one, without
-  a token.
+  the admin session table as the session database's owner (both from the owner Secret). A
+  failed migration stops the upgrade before any pod changes. Hooks run before the chart's
+  ServiceAccount and ConfigMaps exist, so the Jobs get their own, created as hooks just before
+  them (weight -10): a ServiceAccount `{release}-migrate` without a token
+  (`migrations.serviceAccount`; `create: false` uses an existing one) and a ConfigMap
+  `{release}-migrate` with their non-secret environment (`NODE_ENV` and `server.env`, so
+  database timeouts set there apply to the migrations too). Both are deleted with the Jobs once
+  the hooks succeeded.
 - **Audit retention CronJob** (`auditPrune.schedule`, default daily 03:17, `concurrencyPolicy:
-Forbid`), as the owner role (owner Secret).
+Forbid`), as the owner role (owner Secret), with its non-secret environment
+  (`AUDIT_RETENTION` from `auditPrune.retention`, `NODE_ENV`, `server.env`) from the ConfigMap
+  `{release}-audit-prune`.
 - **Metrics**: `METRICS_PORT` (9464) on a Service of its own (`-server-metrics`), never behind
   the Ingress; an optional ServiceMonitor that sends METRICS_TOKEN from the Secret
   (`metrics.serviceMonitor.tokenSecretKey`).
