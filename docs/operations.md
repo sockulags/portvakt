@@ -528,8 +528,10 @@ Signs of it: a private key or a database dump together with MASTER_KEY may have 
    refetch.
 3. If MASTER_KEY may have leaked too, rotate it ([Master key rotation](#master-key-rotation)),
    then rotate every downstream client secret (`POST /applications/{id}/rotate-secret`), every
-   upstream client secret (at the IdP, then `PATCH` the login method) and the SAML SP keys
-   (`sp-keys/prepare`, re-register the SP metadata with the IdP, `sp-keys/rotate`).
+   upstream client secret (at the IdP, then `PATCH` the login method), every upstream client key
+   of a `private_key_jwt` method (`client-key/prepare`, let the IdP fetch the JWKS,
+   `client-key/rotate`) and the SAML SP keys (`sp-keys/prepare`, re-register the SP metadata
+   with the IdP, `sp-keys/rotate`).
 4. Review `audit_events` (`key.*`, `token.issued`) for the period.
 
 ### Compromised upstream IdP

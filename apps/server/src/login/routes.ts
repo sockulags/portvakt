@@ -5,7 +5,11 @@ import type { Config } from "../config/index.js";
 import type { Application } from "../domain/application.js";
 import type { LoginMethod } from "../domain/login-method.js";
 import type { RepresentationChoice } from "../domain/representation.js";
-import { FederationError, type FederationService } from "../federation/service.js";
+import {
+  CLIENT_JWKS_MAX_AGE_SECONDS,
+  FederationError,
+  type FederationService,
+} from "../federation/service.js";
 import type { Logger } from "../logging/logger.js";
 import { parseAcrValues } from "../oidc/acr.js";
 import {
@@ -648,15 +652,18 @@ export function loginRoutes(options: LoginRoutesOptions): Router {
     run(async (req, res) => {
       const tp = tenantOf(res);
       const id = req.params.loginMethodId;
-      const jwk =
+      // The active key, a prepared next key and a retiring key during its overlap.
+      const keys =
         typeof id === "string" && z.uuid().safeParse(id).success
-          ? await repos.loginMethods.ensureClientPublicJwk(tp.tenant.id, id)
+          ? await repos.loginMethods.listClientKeys(tp.tenant.id, id)
           : null;
-      if (jwk === null) {
+      if (keys === null) {
         res.status(404).json({ error: "not_found" });
         return;
       }
-      res.set("Cache-Control", "public, max-age=300").json({ keys: [jwk] });
+      res
+        .set("Cache-Control", `public, max-age=${CLIENT_JWKS_MAX_AGE_SECONDS}`)
+        .json({ keys: keys.map((key) => key.publicJwk) });
     }),
   );
 

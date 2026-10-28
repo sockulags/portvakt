@@ -226,7 +226,8 @@ Bolagsverket or Mina ombud as further `RepresentationSource`s in `server.ts` and
 tenant), and `createPortvakt({ auditSink })` (forwarding audit events to the starter kit's log
 service).
 
-Migration 0007 (`0007_security_review.sql`) adds `applications.service_audiences`. Migrations are
+Migration 0007 (`0007_security_review.sql`) adds `applications.service_audiences`; 0008
+(`0008_client_key_rotation.sql`) the next and retiring upstream client keys of login methods. Migrations are
 plain SQL in `apps/server/migrations/NNNN_name.sql`, applied by our own runner
 (`src/db/migrate.ts`): it is ~150 lines, takes an advisory lock and keeps checksums, which a
 dependency would only wrap.
@@ -695,7 +696,12 @@ number>`.
 - Login methods authenticate upstream with `client_secret_basic`, `client_secret_post` or
   `private_key_jwt` (a per-login-method ES256 key, encrypted as
   `login_method:<id>:client_private_jwk`, public at `/t/{slug}/federation/{id}/jwks`).
-  `rewrap-secrets` re-wraps it with the secrets.
+  `rewrap-secrets` re-wraps it (and a prepared next key) with the secrets. Rotation (migration
+  0008, admin API `client-key/prepare` and `client-key/rotate`): a `next` key is published next to
+  the active one without signing; promotion moves its envelope (same context) to the active
+  columns, and the former key keeps only its public half, published as `retiring` until
+  `client_retiring_until` (`CLIENT_KEY_RETIRE_AFTER_SECONDS`, 1 h). The upstream setup cache is
+  keyed by `updatedAt` and the active kid, so a promotion takes effect at the next login.
 - Multi-tenant upstream issuers (Entra `/common`, `/organizations`, `/consumers`, or a
   discovered `{tenantid}` issuer) need `allowedUpstreamTenants` (refused at write time without).
   openid-client only accepts `{tenantid}` issuers for login.microsoftonline.com, so
@@ -710,8 +716,7 @@ number>`.
   logged and counted in `portvakt_federation_callback_rejected_total` (`metrics/registry.ts`,
   served at `/metrics`). One pending `federation_states` row per
   (interaction, login method) is reused while valid. Discovery failures are cached for
-  `UPSTREAM_FAILURE_CACHE`. Follow-up: rotation of the per-login-method upstream client key
-  (private_key_jwt) with an overlap; today a key is generated once.
+  `UPSTREAM_FAILURE_CACHE`.
 - Entra ID groups overage (`_claim_names` instead of `groups`) is not resolved through Graph:
   the groups count as empty and `login.groups_overage` is audited. Configure the Entra app to
   emit only groups assigned to the application (docs/claims.md).

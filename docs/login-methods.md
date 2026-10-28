@@ -50,6 +50,16 @@ signature against the upstream JWKS with asymmetric algorithms only); every requ
 upstream goes through the outbound guard (no private addresses, https, bounded redirects and
 sizes). Code: [`federation/upstream.ts`](../apps/server/src/federation/upstream.ts).
 
+Rotating the client key (`private_key_jwt`): `POST
+/tenants/{id}/login-methods/{id}/client-key/prepare` adds a `next` key, published at the
+method's `jwksUri` next to the active one and not used to sign yet. Wait until the upstream has
+fetched the JWKS again (Portvakt serves it with `max-age=300`; add the upstream's own cache
+time), or register the new public key there, then `POST .../client-key/rotate`: the next key
+signs the client assertions from then on, and the former key loses its private part and stays
+published as `retiring` for one hour, so assertions signed just before the promotion still
+verify. The view's `oidc.clientKeys` lists the keys with their state; both steps are audited
+(`admin.login_method.client_key_prepare`, `admin.login_method.client_key_rotate`).
+
 ### Entra ID (employees)
 
 1. In Entra ID, register an application (single tenant), platform **Web**, redirect URI as

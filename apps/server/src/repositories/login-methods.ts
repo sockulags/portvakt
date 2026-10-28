@@ -45,7 +45,14 @@ import {
 } from "../domain/saml.js";
 import { emailDomainSchema } from "../domain/schemas.js";
 import { emitChange } from "./change-events.js";
-import { mapDbErrors, NotFoundError, parseInput, requireUuids, ValidationError } from "./errors.js";
+import {
+  ConflictError,
+  mapDbErrors,
+  NotFoundError,
+  parseInput,
+  requireUuids,
+  ValidationError,
+} from "./errors.js";
 import { insertSpKey, type NewSpKey } from "./saml.js";
 
 interface LoginMethodRow {
@@ -228,6 +235,23 @@ export interface LoginMethodClientKey {
   readonly publicJwk: PublicJwk;
   readonly privateJwk: PrivateJwk;
 }
+
+/** Where a client key is in its rotation. */
+export type ClientKeyState = "active" | "next" | "retiring";
+
+/** A published client key (public half only), as the JWKS and the admin API show it. */
+export interface ClientKeyInfo {
+  readonly kid: string;
+  readonly state: ClientKeyState;
+  readonly publicJwk: PublicJwk;
+  /** When the next key was prepared (`next` only). */
+  readonly createdAt: Date | null;
+  /** Until when a retiring key stays published (`retiring` only). */
+  readonly retiresAt: Date | null;
+}
+
+/** The overlap after a promotion: the former active key stays published this long. */
+export const CLIENT_KEY_RETIRE_AFTER_SECONDS = 3600;
 
 interface EncryptedClientKey {
   readonly kid: string;
@@ -645,6 +669,130 @@ export class LoginMethodRepository {
     return { kid: row.kid, publicJwk: publicJwkSchema.parse(row.public), privateJwk };
   }
 
+  /**
+   * The login method's published client keys, active first, then next and the retiring key
+   * while its overlap lasts (`at`, the app clock). Generates the active key first if the method
+   * has none yet. `null` for an unknown or SAML login method.
+   */
+  async listClientKeys(
+    tenantId: string,
+    id: string,
+    at: Date = new Date(),
+  ): Promise<ClientKeyInfo[] | null> {
+    requireUuids({ tenantId, id });
+    if ((await this.ensureClientPublicJwk(tenantId, id)) === null) return null;
+    const [row] = await this.#db.query<{
+      kid: string;
+      public: unknown;
+      next_kid: string | null;
+      next_public: unknown;
+      next_created_at: Date | null;
+      retiring_kid: string | null;
+      retiring_public: unknown;
+      retiring_until: Date | null;
+    }>(
+      `SELECT client_key_kid AS kid, client_public_jwk AS public,
+              client_next_key_kid AS next_kid, client_next_public_jwk AS next_public,
+              client_next_key_created_at AS next_created_at,
+              client_retiring_key_kid AS retiring_kid,
+              client_retiring_public_jwk AS retiring_public,
+              client_retiring_until AS retiring_until
+         FROM login_methods
+        WHERE tenant_id = $1 AND id = $2 AND protocol = 'oidc' AND client_key_kid IS NOT NULL`,
+      [tenantId, id],
+    );
+    if (row === undefined) return null;
+    const keys: ClientKeyInfo[] = [
+      {
+        kid: row.kid,
+        state: "active",
+        publicJwk: publicJwkSchema.parse(row.public),
+        createdAt: null,
+        retiresAt: null,
+      },
+    ];
+    if (row.next_kid !== null) {
+      keys.push({
+        kid: row.next_kid,
+        state: "next",
+        publicJwk: publicJwkSchema.parse(row.next_public),
+        createdAt: row.next_created_at,
+        retiresAt: null,
+      });
+    }
+    if (
+      row.retiring_kid !== null &&
+      row.retiring_until !== null &&
+      row.retiring_until.getTime() > at.getTime()
+    ) {
+      keys.push({
+        kid: row.retiring_kid,
+        state: "retiring",
+        publicJwk: publicJwkSchema.parse(row.retiring_public),
+        createdAt: null,
+        retiresAt: row.retiring_until,
+      });
+    }
+    return keys;
+  }
+
+  /**
+   * Starts a client key rotation: a `next` key, published next to the active one and not yet
+   * used to sign. Give the upstream time to fetch the JWKS again, then {@link rotateClientKey}.
+   * Returns the new key's kid; a second `next` key is refused (ConflictError).
+   */
+  async prepareClientKeyRotation(tenantId: string, id: string): Promise<string> {
+    requireUuids({ tenantId, id });
+    if ((await this.ensureClientPublicJwk(tenantId, id)) === null) {
+      throw new NotFoundError("OIDC login method");
+    }
+    const key = this.#newClientKey(id);
+    const rows = await this.#db.query(
+      `UPDATE login_methods
+          SET client_next_key_kid = $3, client_next_public_jwk = $4::jsonb,
+              client_next_private_jwk_encrypted = $5, client_next_key_created_at = now()
+        WHERE tenant_id = $1 AND id = $2 AND protocol = 'oidc' AND client_next_key_kid IS NULL
+        RETURNING id`,
+      [tenantId, id, key.kid, key.publicJwk, key.privateJwkEncrypted],
+    );
+    if (rows.length === 0) throw new ConflictError("A next client key already exists");
+    return key.kid;
+  }
+
+  /**
+   * Completes a rotation: the next key becomes active (signs client assertions from now on) and
+   * the active one retiring: its private key is dropped and its public key stays published for
+   * `retireAfterSeconds`. A key still retiring from an earlier rotation is no longer published.
+   * Returns the kids, or `null` when there is no next key.
+   */
+  async rotateClientKey(
+    tenantId: string,
+    id: string,
+    retireAfterSeconds: number = CLIENT_KEY_RETIRE_AFTER_SECONDS,
+  ): Promise<{ readonly activeKid: string; readonly retiringKid: string } | null> {
+    requireUuids({ tenantId, id });
+    if (!Number.isInteger(retireAfterSeconds) || retireAfterSeconds < 0) {
+      throw new ValidationError(["retireAfterSeconds: must be a non-negative integer"]);
+    }
+    // SET expressions read the row as it was, so active -> retiring and next -> active swap.
+    const [row] = await this.#db.query<{ active: string; retiring: string }>(
+      `UPDATE login_methods
+          SET client_retiring_key_kid = client_key_kid,
+              client_retiring_public_jwk = client_public_jwk,
+              client_retiring_until = now() + make_interval(secs => $3),
+              client_key_kid = client_next_key_kid,
+              client_public_jwk = client_next_public_jwk,
+              client_private_jwk_encrypted = client_next_private_jwk_encrypted,
+              client_next_key_kid = NULL, client_next_public_jwk = NULL,
+              client_next_private_jwk_encrypted = NULL, client_next_key_created_at = NULL
+        WHERE tenant_id = $1 AND id = $2 AND protocol = 'oidc'
+          AND client_next_key_kid IS NOT NULL AND client_key_kid IS NOT NULL
+        RETURNING client_key_kid AS active, client_retiring_key_kid AS retiring`,
+      [tenantId, id, retireAfterSeconds],
+    );
+    return row === undefined ? null : { activeKid: row.active, retiringKid: row.retiring };
+  }
+
   /** How many identities link persons to the login method (a method with any cannot be deleted). */
   async identityCount(tenantId: string, id: string): Promise<number> {
     requireUuids({ tenantId, id });
@@ -900,5 +1048,22 @@ export async function rewrapLoginMethodSecrets(db: Db, secrets: SecretBox): Prom
       [row.id, rewrapped, row.client_private_jwk_encrypted],
     );
   }
-  return rows.length + keys.length;
+  const nextKeys = await db.query<{ id: string; client_next_private_jwk_encrypted: string }>(
+    `SELECT id, client_next_private_jwk_encrypted FROM login_methods
+      WHERE client_next_private_jwk_encrypted IS NOT NULL
+        AND split_part(client_next_private_jwk_encrypted, '.', 2) <> $1`,
+    [secrets.currentKeyId],
+  );
+  for (const row of nextKeys) {
+    const rewrapped = secrets.rewrap(
+      row.client_next_private_jwk_encrypted,
+      clientPrivateJwkContext(row.id),
+    );
+    await db.query(
+      `UPDATE login_methods SET client_next_private_jwk_encrypted = $2
+        WHERE id = $1 AND client_next_private_jwk_encrypted = $3`,
+      [row.id, rewrapped, row.client_next_private_jwk_encrypted],
+    );
+  }
+  return rows.length + keys.length + nextKeys.length;
 }

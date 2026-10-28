@@ -69,6 +69,13 @@ export const federationJwksPath = (slug: string, loginMethodId: string): string 
   `/t/${slug}/federation/${loginMethodId}/jwks`;
 
 /**
+ * Cache lifetime of the published client JWKS. Between preparing and promoting a client key,
+ * wait at least this long (plus the upstream's own JWKS cache time) so the upstream knows the
+ * next key before it signs.
+ */
+export const CLIENT_JWKS_MAX_AGE_SECONDS = 300;
+
+/**
  * Upstream federation. OIDC: sends the browser to the login method's IdP (authorization code
  * flow with PKCE S256, state and nonce), handles the callback (single-use state, token exchange,
  * full ID token validation, optional userinfo, claim mapping, JIT provisioning). SAML: see

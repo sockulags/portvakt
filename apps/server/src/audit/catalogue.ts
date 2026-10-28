@@ -531,6 +531,18 @@ export const AUDIT_EVENTS = {
       .strict(),
     "An administrator made the `next` SAML SP keys active (subject: the login method).",
   ),
+  "admin.login_method.client_key_prepare": event(
+    "success",
+    z.object({ actorTenantId, kid }).strict(),
+    "An administrator added a `next` upstream client key (private_key_jwt), published next to " +
+      "the active one (subject: the login method).",
+  ),
+  "admin.login_method.client_key_rotate": event(
+    "success",
+    z.object({ actorTenantId, kid, retiringKid: kid }).strict(),
+    "An administrator made the `next` upstream client key active; the former one is retiring " +
+      "(subject: the login method).",
+  ),
   "admin.role_rule.create": event(
     "success",
     z.object({ actorTenantId, applicationId: uuid, loginMethodId: uuid, role: roleName }).strict(),
