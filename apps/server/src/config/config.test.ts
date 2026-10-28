@@ -791,6 +791,9 @@ describe("first production deployment: settings that would fail later", () => {
     ["postgres://u:p@db:5432/portvakt?ssl=0", false],
     ["postgres://u:p@db:5432/portvakt", false],
     ["postgres:///portvakt?host=/var/run/postgresql", true],
+    ["postgres://u:p@db:5432/portvakt?sslrootcert=/etc/ca.pem", true],
+    ["postgres://u:p@db:5432/portvakt?sslnegotiation=direct", true],
+    ["postgres://u:p@db:5432/portvakt?sslmode=", false],
   ])("databaseUrlVerifiesTls(%s) is %s", (url, expected) => {
     expect(databaseUrlVerifiesTls(url)).toBe(expected);
   });
@@ -801,5 +804,8 @@ describe("first production deployment: settings that would fail later", () => {
     expect(databaseUrlVerifiesTls("postgres://u:p@db/portvakt?sslmode=disable", "require")).toBe(
       false,
     );
+    // pg compares PGSSLMODE case-sensitively: VERIFY-FULL is no TLS at all.
+    expect(databaseUrlVerifiesTls("postgres://u:p@db/portvakt", "VERIFY-FULL")).toBe(false);
+    expect(databaseUrlVerifiesTls("postgres://u:p@db/portvakt", "no-verify")).toBe(false);
   });
 });

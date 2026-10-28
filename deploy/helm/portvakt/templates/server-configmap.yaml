@@ -46,6 +46,9 @@ data:
   {{- with .idpAcr }}
   BOOTSTRAP_IDP_ACR: {{ . | quote }}
   {{- end }}
+  {{- with .idpAcrClaim }}
+  BOOTSTRAP_IDP_ACR_CLAIM: {{ . | quote }}
+  {{- end }}
   {{- with .adminSubject }}
   BOOTSTRAP_ADMIN_SUBJECT: {{ . | quote }}
   {{- end }}

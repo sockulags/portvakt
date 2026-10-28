@@ -772,9 +772,10 @@ function productionWarnings(
 /**
  * Whether `pg` verifies the database server's certificate for this URL: `sslmode=verify-full`
  * (or `prefer`, `require` and `verify-ca`, which `pg` treats as verify-full unless
- * `uselibpqcompat=true`), or `ssl=true`. A Unix socket needs no TLS. Without any TLS setting in
- * the URL, `pg` falls back to PGSSLMODE (`pgSslMode`). `disable`, `no-verify` and no setting at
- * all do not verify.
+ * `uselibpqcompat=true`), certificate files (`sslrootcert`, `sslcert`, `sslkey`),
+ * `ssl=true` or `sslnegotiation=direct`. A Unix socket needs no TLS. Without any TLS setting in
+ * the URL, `pg` falls back to PGSSLMODE (`pgSslMode`, read as written). `disable`, `no-verify`
+ * and no setting at all do not verify.
  */
 export function databaseUrlVerifiesTls(value: string, pgSslMode?: string): boolean {
   if (!URL.canParse(value)) return true; // reported as an issue by resolveDatabase
@@ -787,11 +788,18 @@ export function databaseUrlVerifiesTls(value: string, pgSslMode?: string): boole
     mode === "verify-full" ||
     (!libpq && (mode === "prefer" || mode === "require" || mode === "verify-ca"));
   const mode = params.get("sslmode")?.toLowerCase();
-  if (mode !== undefined) return verifies(mode);
-  const ssl = params.get("ssl")?.toLowerCase();
-  if (ssl !== undefined) return ssl === "true" || ssl === "1";
-  const fallback = pgSslMode?.trim().toLowerCase();
-  return fallback !== undefined && fallback !== "" && verifies(fallback);
+  if (mode !== undefined && mode !== "") return verifies(mode);
+  // Certificate files without sslmode: pg uses TLS with its default (verifying) options.
+  if (["sslcert", "sslkey", "sslrootcert"].some((name) => (params.get(name) ?? "") !== "")) {
+    return true;
+  }
+  const ssl = params.get("ssl");
+  if (ssl !== null) return ssl === "true" || ssl === "1";
+  if (params.get("sslnegotiation") === "direct") return true;
+  // pg reads PGSSLMODE as written (case-sensitive) and without libpq semantics.
+  return (
+    pgSslMode !== undefined && ["prefer", "require", "verify-ca", "verify-full"].includes(pgSslMode)
+  );
 }
 
 /** The RATE_LIMIT_* variable of each limit. */
