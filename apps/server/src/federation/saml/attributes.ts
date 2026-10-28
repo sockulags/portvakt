@@ -134,7 +134,12 @@ export function mapSamlAttributes(
       groups.push(value);
     }
   }
-  const hsaId = single(mapping.employeeHsaId);
+  // An empty or oversized value is not an HSA-id (the identity's attributes would refuse it).
+  const hsaIdValue = single(mapping.employeeHsaId)?.trim();
+  const hsaId =
+    hsaIdValue === undefined || hsaIdValue.length === 0 || hsaIdValue.length > 64
+      ? undefined
+      : hsaIdValue;
   if (ambiguous) return "ambiguous_attribute";
 
   const flagged =
@@ -159,7 +164,7 @@ export function mapSamlAttributes(
       ...mapped,
       attributes: {
         ...mapped.attributes,
-        ...(hsaId === undefined || hsaId.length > 64 ? {} : { hsaId }),
+        ...(hsaId === undefined ? {} : { hsaId }),
         ...(acceptedAffiliations.length === 0 ? {} : { orgAffiliation: acceptedAffiliations }),
       },
     },

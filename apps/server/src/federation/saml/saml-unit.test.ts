@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createKeyRing } from "../../crypto/keyring.js";
 import { certificateInfo, generateSelfSignedKeyPair, pemBody } from "../../crypto/x509.js";
+import { identityAttributesSchema } from "../../domain/person.js";
 import { SAML_ATTRIBUTES, samlAttributeMappingSchema } from "../../domain/saml.js";
 import { mapSamlAttributes, NAMEID_FORMATS } from "./attributes.js";
 import { MetadataError, parseIdpMetadata, restrictToHttps } from "./metadata.js";
@@ -171,6 +172,33 @@ describe("SAML attribute mapping", () => {
       protectedIdentity: false,
     });
     expect(result.mapped.attributes.upstreamAcr).toBe("http://id.elegnamnden.se/loa/1.0/loa3");
+  });
+
+  it("leaves out an empty or oversized employeeHsaId instead of failing the login", () => {
+    for (const value of ["", "   ", `SE${"1".repeat(70)}`]) {
+      const result = mapSamlAttributes(
+        settings(),
+        subject({
+          [SAML_ATTRIBUTES.personalIdentityNumber]: ["191212121212"],
+          [SAML_ATTRIBUTES.employeeHsaId]: [value],
+        }),
+        [],
+      );
+      if (typeof result === "string") throw new Error(result);
+      expect(result.mapped.attributes.hsaId).toBeUndefined();
+      // What JIT provisioning stores must pass the identity's attribute schema.
+      expect(identityAttributesSchema.safeParse(result.mapped.attributes).success).toBe(true);
+    }
+    const kept = mapSamlAttributes(
+      settings(),
+      subject({
+        [SAML_ATTRIBUTES.personalIdentityNumber]: ["191212121212"],
+        [SAML_ATTRIBUTES.employeeHsaId]: [" SE2321000016-1003 "],
+      }),
+      [],
+    );
+    if (typeof kept === "string") throw new Error(kept);
+    expect(kept.mapped.attributes.hsaId).toBe("SE2321000016-1003");
   });
 
   it("refuses invalid, missing and ambiguous identifiers and transient NameIDs as subjects", () => {
