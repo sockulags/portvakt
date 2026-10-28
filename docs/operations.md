@@ -89,11 +89,18 @@ What the chart creates:
 - **Ingress** with TLS for `ingress.host` (Portvakt) and `ingress.adminHost` (the portal).
   `PUBLIC_URL` and `ADMIN_PUBLIC_URL` default to `https://{host}`.
 - **Migration Jobs** as `pre-install,pre-upgrade` hooks: `migrate-cli` as the owner role, then
-  the admin session table as the session database's owner (both from the owner Secret). A failed migration stops the upgrade before any pod changes. Hooks
-  run before the chart's ServiceAccount exists, so they use the namespace's default one, without
-  a token.
+  the admin session table as the session database's owner (both from the owner Secret). A
+  failed migration stops the upgrade before any pod changes. Hooks run before the chart's
+  ServiceAccount and ConfigMaps exist, so the Jobs get their own, created as hooks just before
+  them (weight -10): a ServiceAccount `{release}-migrate` without a token
+  (`migrations.serviceAccount`; `create: false` uses an existing one) and a ConfigMap
+  `{release}-migrate` with their non-secret environment (`NODE_ENV` and `server.env`, so
+  database timeouts set there apply to the migrations too). Both are deleted with the Jobs once
+  the hooks succeeded.
 - **Audit retention CronJob** (`auditPrune.schedule`, default daily 03:17, `concurrencyPolicy:
-Forbid`), as the owner role (owner Secret).
+Forbid`), as the owner role (owner Secret), with its non-secret environment
+  (`AUDIT_RETENTION` from `auditPrune.retention`, `NODE_ENV`, `server.env`) from the ConfigMap
+  `{release}-audit-prune`.
 - **Metrics**: `METRICS_PORT` (9464) on a Service of its own (`-server-metrics`), never behind
   the Ingress; an optional ServiceMonitor that sends METRICS_TOKEN from the Secret
   (`metrics.serviceMonitor.tokenSecretKey`).
@@ -214,6 +221,7 @@ switched off, metrics on a separate port without a token, `ADMIN_MIN_ACR` unset,
 | `UPSTREAM_TIMEOUT`                     | `10s`                                   | Timeout of each request to an upstream IdP.                                                                                                                                                                                                                                  |
 | `UPSTREAM_METADATA_TTL`                | `1h`                                    | How long discovered upstream OIDC metadata is reused.                                                                                                                                                                                                                        |
 | `UPSTREAM_FAILURE_CACHE`               | `5s`                                    | A failed discovery is not retried for this long (0 disables).                                                                                                                                                                                                                |
+| `GRAPH_API_URL`                        | `https://graph.microsoft.com`           | Microsoft Graph (without `/v1.0`) for login methods with `resolveGroupsOverage`; a national cloud's Graph otherwise. https in production.                                                                                                                                    |
 | `SAML_METADATA_CHECK_INTERVAL`         | `5m`                                    | How often SAML metadata URLs are checked for a due refresh (each method refreshes after its own `metadataRefreshSeconds`).                                                                                                                                                   |
 | `SAML_METADATA_MAX_AGE`                | `7d`                                    | Cached SAML metadata without `validUntil` is used at most this long after its last successful refresh, then the method fails closed.                                                                                                                                         |
 | `SAML_XML_MAX_ELEMENTS`                | `20000`                                 | Largest element count of a SAML Response Portvakt parses (100 to 1,000,000).                                                                                                                                                                                                 |
@@ -367,11 +375,16 @@ One ES256 key set signs for every tenant; private keys are encrypted with MASTER
    environment plus `MIGRATION_DATABASE_URL` (it connects as the owner, like the other
    maintenance jobs; Kubernetes: a one-off Job mounting the server and owner Secrets; compose:
    `docker compose run --rm -e MIGRATION_DATABASE_URL=... server node dist/db/rewrap-cli.js`).
-   It re-encrypts signing keys, client secrets, upstream
-   client keys, SAML SP keys and personal identity numbers under the new key and re-indexes
-   blind indexes, and prints counts per kind.
-3. Keep the old key in `MASTER_KEY_PREVIOUS` for at least `SESSION_TTL` after step 1: sealed SAML
-   logout data in live sessions is not re-wrapped. Then remove it and roll out again.
+   It re-encrypts signing keys, client secrets, upstream client keys (active and prepared),
+   SAML SP keys, personal identity numbers and the sealed upstream SAML sessions of live broker
+   sessions (single logout data) under the new key, re-indexes blind indexes (with the index
+   rows IdP-initiated logout looks up), and prints counts per kind (`upstreamSessions` for the
+   SAML sessions). Running it again reports zero.
+3. Remove the old key from `MASTER_KEY_PREVIOUS` and roll out again. Only logins and logouts in
+   flight while the re-wrap ran still hold values under the old key (pending upstream requests,
+   at most `INTERACTION_TTL`, 15 minutes by default, and SAML logout states, 10 minutes): wait
+   the longer of the two after step 2 if they must not fail (a failed one shows an error and the person signs in
+   again).
 
 ## Backups and restore
 
@@ -528,8 +541,10 @@ Signs of it: a private key or a database dump together with MASTER_KEY may have 
    refetch.
 3. If MASTER_KEY may have leaked too, rotate it ([Master key rotation](#master-key-rotation)),
    then rotate every downstream client secret (`POST /applications/{id}/rotate-secret`), every
-   upstream client secret (at the IdP, then `PATCH` the login method) and the SAML SP keys
-   (`sp-keys/prepare`, re-register the SP metadata with the IdP, `sp-keys/rotate`).
+   upstream client secret (at the IdP, then `PATCH` the login method), every upstream client key
+   of a `private_key_jwt` method (`client-key/prepare`, let the IdP fetch the JWKS,
+   `client-key/rotate`) and the SAML SP keys (`sp-keys/prepare`, re-register the SP metadata
+   with the IdP, `sp-keys/rotate`).
 4. Review `audit_events` (`key.*`, `token.issued`) for the period.
 
 ### Compromised upstream IdP

@@ -133,8 +133,9 @@ export class UpstreamClients {
   }
 
   async setupFor(method: OidcLoginMethod): Promise<UpstreamSetup> {
-    // A changed login method (issuer, client, secret, auth method) has a new updatedAt.
-    const key = `${method.updatedAt.toISOString()}|${method.clientAuthMethod}`;
+    // A changed login method (issuer, client, secret, auth method, a promoted client key) has
+    // a new updatedAt; the active client key's kid is part of the key as well.
+    const key = `${method.updatedAt.toISOString()}|${method.clientAuthMethod}|${method.clientKeyKid ?? ""}`;
     const failure = this.#failures.get(method.id);
     if (failure !== undefined && failure.key === key && failure.until > Date.now()) {
       throw new UpstreamRecentlyFailedError();

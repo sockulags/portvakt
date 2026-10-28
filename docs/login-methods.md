@@ -42,6 +42,7 @@ Disabling or deleting a method ends every session and grant whose login came thr
 | `trustUpstreamEmail`       | Map `email` without `email_verified` (for providers that never send it)                                                                                                         |
 | `pinLoginHint`             | At a step-up, send the personal identity number as `login_hint`, only through PAR                                                                                               |
 | `allowedUpstreamTenants`   | Required for multi-tenant issuers (Entra `/common`, `/organizations`, `{tenantid}`): the allowed tenant ids                                                                     |
+| `resolveGroupsOverage`     | Entra ID groups overage: read the groups from Microsoft Graph (`GRAPH_API_URL`) with the upstream access token; a failed lookup fails the login. Needs `claimMapping.groups`    |
 
 The redirect URI to register at the upstream is
 `{PUBLIC_URL}/t/{tenantSlug}/federation/{loginMethodId}/callback` (shown in the portal after the
@@ -49,6 +50,16 @@ method is created). Upstream ID tokens are validated fully (issuer, audience, ex
 signature against the upstream JWKS with asymmetric algorithms only); every request to the
 upstream goes through the outbound guard (no private addresses, https, bounded redirects and
 sizes). Code: [`federation/upstream.ts`](../apps/server/src/federation/upstream.ts).
+
+Rotating the client key (`private_key_jwt`): `POST
+/tenants/{id}/login-methods/{id}/client-key/prepare` adds a `next` key, published at the
+method's `jwksUri` next to the active one and not used to sign yet. Wait until the upstream has
+fetched the JWKS again (Portvakt serves it with `max-age=300`; add the upstream's own cache
+time), or register the new public key there, then `POST .../client-key/rotate`: the next key
+signs the client assertions from then on, and the former key loses its private part and stays
+published as `retiring` for one hour, so assertions signed just before the promotion still
+verify. The view's `oidc.clientKeys` lists the keys with their state; both steps are audited
+(`admin.login_method.client_key_prepare`, `admin.login_method.client_key_rotate`).
 
 ### Entra ID (employees)
 
@@ -59,8 +70,11 @@ sizes). Code: [`federation/upstream.ts`](../apps/server/src/federation/upstream.
    JWKS URL)_.
 2. Token configuration: add the `groups` claim with **Groups assigned to the application** and
    assign the relevant groups to the enterprise application, so the token stays below the
-   groups overage limit (Portvakt does not call Microsoft Graph; an overage counts as no groups
-   and is audited as `login.groups_overage`). Add the optional claim `email` if you need it.
+   groups overage limit (by default an overage counts as no groups and is audited as
+   `login.groups_overage`). For users in more groups than that, set `resolveGroupsOverage: true`
+   and add `User.Read` to `scopes`: Portvakt then reads the user's transitive group memberships
+   (object ids) from Microsoft Graph with the upstream access token, and fails the login if
+   Graph cannot answer (docs/claims.md). Add the optional claim `email` if you need it.
 3. Create the method:
 
 ```json

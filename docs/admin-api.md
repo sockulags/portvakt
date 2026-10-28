@@ -189,7 +189,8 @@ client_credentials tokens for (empty by default: none, see docs/claims.md), `rot
 `removal-impact`) and
 `/tenants/{id}/applications` (attach, enable, disable, `usage`, `detach`);
 `/tenants/{id}/login-methods` (OIDC and SAML, `session-policy`, `sp-keys/prepare`,
-`sp-keys/rotate`, warnings, delete); `/tenants/{id}/roles`, `role-rules`, `role-assignments`,
+`sp-keys/rotate`, `client-key/prepare` and `client-key/rotate` for the upstream client key of
+`private_key_jwt` with an overlap (docs/login-methods.md), warnings, delete); `/tenants/{id}/roles`, `role-rules`, `role-assignments`,
 `attribute-assignments` (create, change value, remove; direct and pending);
 `/tenants/{id}/persons/search` and `/tenants/{id}/persons/{personId}`
 (`clear-protected-identity`, `identities/{identityId}/unlink`, `end-sessions`, delete); `/tenants/{id}/parties`

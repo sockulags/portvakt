@@ -25,6 +25,8 @@ export interface MappedIdentity {
    * it (`_claim_names` / `_claim_sources`). The groups are then treated as empty.
    */
   readonly groupsOverage: boolean;
+  /** The overage's groups were read from Microsoft Graph (`resolveGroupsOverage`). */
+  readonly groupsResolved?: boolean;
   readonly amr: string[];
 }
 

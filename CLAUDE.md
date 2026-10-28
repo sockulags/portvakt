@@ -226,7 +226,9 @@ Bolagsverket or Mina ombud as further `RepresentationSource`s in `server.ts` and
 tenant), and `createPortvakt({ auditSink })` (forwarding audit events to the starter kit's log
 service).
 
-Migration 0007 (`0007_security_review.sql`) adds `applications.service_audiences`. Migrations are
+Migration 0007 (`0007_security_review.sql`) adds `applications.service_audiences`; 0008
+(`0008_client_key_rotation.sql`) the next and retiring upstream client keys of login methods;
+0009 (`0009_groups_overage.sql`) `login_methods.resolve_groups_overage`. Migrations are
 plain SQL in `apps/server/migrations/NNNN_name.sql`, applied by our own runner
 (`src/db/migrate.ts`): it is ~150 lines, takes an advisory lock and keeps checksums, which a
 dependency would only wrap.
@@ -411,9 +413,12 @@ Secure and an http issuer refused unless the `local` profile is active
   `scripts/e2e.js --compose` builds the images, starts postgres first, runs the Java demo in the
   maven container with `--network container:portvakt-e2e-postgres-1` (no PortForward), follows
   `docker compose logs -f` per service into e2e/.artifacts/logs and runs `down -v` at the end.
-- Helm (`deploy/helm/portvakt`): hook Jobs (migrations) use the namespace's default service
-  account (the chart's does not exist yet at pre-install) and inline env (no ConfigMaps yet);
-  `values.schema.json` refuses secret variables in `server.env`/`admin.env`; templates are Go
+- Helm (`deploy/helm/portvakt`): non-secret env comes from ConfigMaps everywhere (server, admin,
+  the audit prune CronJob's `-audit-prune`); the hook Jobs (migrations) run before the chart's
+  ServiceAccount and ConfigMaps exist, so a hook ServiceAccount and a hook ConfigMap
+  (`{fullname}-migrate`, weight -10, before the Jobs at -5/-4; `portvakt.jobConfig`: NODE_ENV
+  plus `server.env`) are created for them (`migrations.serviceAccount`); secrets only through
+  `secretKeyRef`/`secretRef`; `values.schema.json` refuses secret variables in `server.env`/`admin.env`; templates are Go
   templates, so prettier ignores `deploy/helm/portvakt/templates`. `scripts/helm-check.js` runs
   helm and kubeconform from `deploy/images.Dockerfile`.
 - Releases: `.github/workflows/release.yml` on `v*` tags checks that the tag matches every
@@ -695,7 +700,12 @@ number>`.
 - Login methods authenticate upstream with `client_secret_basic`, `client_secret_post` or
   `private_key_jwt` (a per-login-method ES256 key, encrypted as
   `login_method:<id>:client_private_jwk`, public at `/t/{slug}/federation/{id}/jwks`).
-  `rewrap-secrets` re-wraps it with the secrets.
+  `rewrap-secrets` re-wraps it (and a prepared next key) with the secrets. Rotation (migration
+  0008, admin API `client-key/prepare` and `client-key/rotate`): a `next` key is published next to
+  the active one without signing; promotion moves its envelope (same context) to the active
+  columns, and the former key keeps only its public half, published as `retiring` until
+  `client_retiring_until` (`CLIENT_KEY_RETIRE_AFTER_SECONDS`, 1 h). The upstream setup cache is
+  keyed by `updatedAt` and the active kid, so a promotion takes effect at the next login.
 - Multi-tenant upstream issuers (Entra `/common`, `/organizations`, `/consumers`, or a
   discovered `{tenantid}` issuer) need `allowedUpstreamTenants` (refused at write time without).
   openid-client only accepts `{tenantid}` issuers for login.microsoftonline.com, so
@@ -710,11 +720,19 @@ number>`.
   logged and counted in `portvakt_federation_callback_rejected_total` (`metrics/registry.ts`,
   served at `/metrics`). One pending `federation_states` row per
   (interaction, login method) is reused while valid. Discovery failures are cached for
-  `UPSTREAM_FAILURE_CACHE`. Follow-up: rotation of the per-login-method upstream client key
-  (private_key_jwt) with an overlap; today a key is generated once.
-- Entra ID groups overage (`_claim_names` instead of `groups`) is not resolved through Graph:
-  the groups count as empty and `login.groups_overage` is audited. Configure the Entra app to
-  emit only groups assigned to the application (docs/claims.md).
+  `UPSTREAM_FAILURE_CACHE`.
+- Entra ID groups overage (`_claim_names` instead of `groups`): by default the groups count as
+  empty and `login.groups_overage` is audited. A method with `resolveGroupsOverage` (migration
+  0009, needs `claimMapping.groups`) reads them in the callback from Microsoft Graph
+  (`federation/graph-groups.ts`: `{GRAPH_API_URL}/v1.0/me/transitiveMemberOf?$select=id` with
+  the upstream access token, through the outbound guard with `redirect: "manual"`, paging links
+  only below the base, at most 1,000 groups / 10 pages / 1 MB a page, groups only) and audits
+  `login.groups_overage` with `resolved: true`; any failure fails the login closed
+  (`login.failure` with detail `groups_overage_unresolved`). The token's `_claim_sources`
+  endpoint is never called. The mock's Entra issuers serve `/graph/v1.0/me/transitiveMemberOf`
+  (page size 2, a directory role mixed in; `oidc(kind).failGraph(status)` in tests);
+  `groups-overage.test.ts` starts the mock first so GRAPH_API_URL can point at it. Configure the
+  Entra app to emit only groups assigned to the application anyway (docs/claims.md).
 - The login UI is `apps/login/dist` (or `LOGIN_UI_DIR`), served by the server: every page is its
   `index.html` plus a `<script type="application/json" id="pv-bootstrap">` block that selects
   the view. Production refuses to start without the build. oidc-provider's logout form is
@@ -844,8 +862,13 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
   Destination the SP's SLO URL, IssueInstant within 5 minutes plus skew, its ID accepted once)
   ends the matching sessions (their oidc-provider Session and grants are deleted,
   `logout.idp_initiated` is audited) and gets a signed LogoutResponse over HTTP-Redirect, or
-  HTTP-POST when the IdP has no Redirect SLO endpoint. Sealed sessions are not re-wrapped by
-  `rewrap-secrets`: keep the old key in MASTER_KEY_PREVIOUS until SESSION_TTL has passed.
+  HTTP-POST when the IdP has no Redirect SLO endpoint. `rewrap-secrets` re-wraps the sealed
+  upstreams of live session records and recomputes their blind indexes with the current key
+  (`federation/saml/upstream-session-rewrap.ts`, `reindexUpstreamSession`; the record is updated
+  only while its `upstreams` are unchanged, and the index rows are replaced with the record's
+  expiry), so MASTER_KEY_PREVIOUS can go right after it; only in-flight logins and logouts
+  (federation states, at most INTERACTION_TTL; SAML logout states, 10 minutes) still hold
+  old-key values.
 - The init script in `deploy/postgres-init` only runs on a fresh volume. To recreate the databases:
   `docker compose -f deploy/docker-compose.dev.yml down -v` then `npm run db:up`.
 - Person and service access tokens are told apart by the claims the server issues: person tokens

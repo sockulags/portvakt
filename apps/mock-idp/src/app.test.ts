@@ -65,6 +65,25 @@ describe("mock IdP", () => {
     expect(body.token_endpoint).toBe("http://idp.test/entra-mt/organizations/v2.0/token");
   });
 
+  it("serves Microsoft Graph's transitiveMemberOf for Entra access tokens only", async () => {
+    const path = "/entra/graph/v1.0/me/transitiveMemberOf";
+    const anonymous = await request(idp.app).get(path);
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.body).toMatchObject({ error: { code: "InvalidAuthenticationToken" } });
+    const unknown = await request(idp.app).get(path).set("Authorization", "Bearer not-a-token");
+    expect(unknown.status).toBe(401);
+    // BankID is no Graph.
+    expect(
+      (await request(idp.app).get("/bankid/graph/v1.0/me/transitiveMemberOf")).status,
+    ).not.toBe(200);
+    idp.oidc("entra").failGraph(503);
+    try {
+      expect((await request(idp.app).get(path)).status).toBe(503);
+    } finally {
+      idp.oidc("entra").failGraph(undefined);
+    }
+  });
+
   it("revokes only grant-bound models with a grant", async () => {
     const store = new MemoryStore();
     await store.adapterFor("AccessToken").upsert("at", { grantId: "g1" }, 60);

@@ -22,6 +22,10 @@ import { SP_CERTIFICATE_WARNING_SECONDS } from "../../../federation/saml/admin.j
 import { samlBasePath } from "../../../federation/saml/service.js";
 import { federationCallbackPath, federationJwksPath } from "../../../federation/service.js";
 import { OutboundRefusedError } from "../../../net/outbound.js";
+import {
+  CLIENT_KEY_RETIRE_AFTER_SECONDS,
+  type ClientKeyInfo,
+} from "../../../repositories/login-methods.js";
 import { SP_KEY_PURPOSES, type SpKey } from "../../../repositories/saml.js";
 import type { Caller } from "../auth.js";
 import {
@@ -96,6 +100,18 @@ const spKeySchema = z.object({
   createdAt: isoDateTime,
 });
 
+const clientKeySchema = z.object({
+  kid: z.string(),
+  state: z
+    .enum(["active", "next", "retiring"])
+    .describe(
+      "active signs the client assertions; next is published and not used yet; retiring is " +
+        "published until retiresAt and never signs again.",
+    ),
+  createdAt: isoDateTime.nullable(),
+  retiresAt: isoDateTime.nullable(),
+});
+
 const oidcViewSchema = z.object({
   issuer: z.string(),
   clientId: z.string(),
@@ -106,10 +122,12 @@ const oidcViewSchema = z.object({
   allowedUpstreamTenants: z.array(z.string()),
   trustUpstreamEmail: z.boolean(),
   pinLoginHint: z.boolean(),
+  resolveGroupsOverage: z.boolean(),
   scopes: z.array(z.string()),
   claimMapping: z.record(z.string(), z.string()),
   redirectUri: z.string().describe("Register this redirect URI at the upstream IdP."),
-  jwksUri: z.string().describe("The public key for private_key_jwt client authentication."),
+  jwksUri: z.string().describe("The public keys for private_key_jwt client authentication."),
+  clientKeys: z.array(clientKeySchema).describe("The keys published at jwksUri."),
 });
 
 const samlViewSchema = z.object({
@@ -199,19 +217,40 @@ function audited(method: LoginMethod, secretChanged = false): Record<string, unk
     allowedUpstreamTenants: [...method.allowedUpstreamTenants],
     trustUpstreamEmail: method.trustUpstreamEmail,
     pinLoginHint: method.pinLoginHint,
+    resolveGroupsOverage: method.resolveGroupsOverage,
     scopes: [...method.scopes],
     claimMapping: { ...method.claimMapping },
   };
 }
 const REDACTED = ["clientSecret", "saml.metadataXml", "saml.metadataSigningCertificate"];
 
-/** Configuration and SP keys: what the entity tag covers (not the refresh state or warnings). */
-const tagOf = (method: LoginMethod, spKeys: readonly SpKey[]): string =>
+/**
+ * Configuration, SP keys and client keys: what the entity tag covers (not the refresh state or
+ * warnings).
+ */
+const tagOf = (
+  method: LoginMethod,
+  spKeys: readonly SpKey[],
+  clientKeys: readonly ClientKeyInfo[] = [],
+): string =>
   etagOf({
     updatedAt: iso(method.updatedAt),
     config: audited(method),
     spKeys: spKeys.map((key) => `${key.id}:${key.state}`),
+    ...(clientKeys.length === 0
+      ? {}
+      : { clientKeys: clientKeys.map((key) => `${key.kid}:${key.state}`) }),
   });
+
+/** The published client keys of an OIDC login method (none for SAML). */
+async function clientKeysOf(
+  repos: Tx["repos"],
+  method: LoginMethod,
+  now = new Date(),
+): Promise<ClientKeyInfo[]> {
+  if (method.protocol !== "oidc") return [];
+  return (await repos.loginMethods.listClientKeys(method.tenantId, method.id, now)) ?? [];
+}
 
 export async function loginMethodView(
   deps: AdminDeps,
@@ -258,6 +297,7 @@ export async function loginMethodView(
     updatedAt: iso(method.updatedAt),
   };
   if (method.protocol === "oidc") {
+    const clientKeys = await clientKeysOf(repos, method, now);
     return {
       ...base,
       oidc: {
@@ -270,13 +310,20 @@ export async function loginMethodView(
         allowedUpstreamTenants: [...method.allowedUpstreamTenants],
         trustUpstreamEmail: method.trustUpstreamEmail,
         pinLoginHint: method.pinLoginHint,
+        resolveGroupsOverage: method.resolveGroupsOverage,
         scopes: [...method.scopes],
         claimMapping: { ...method.claimMapping },
         redirectUri: `${publicUrl}${federationCallbackPath(tenant.slug, method.id)}`,
         jwksUri: `${publicUrl}${federationJwksPath(tenant.slug, method.id)}`,
+        clientKeys: clientKeys.map((key) => ({
+          kid: key.kid,
+          state: key.state,
+          createdAt: isoOrNull(key.createdAt),
+          retiresAt: isoOrNull(key.retiresAt),
+        })),
       },
       warnings,
-      etag: tagOf(method, []),
+      etag: tagOf(method, [], clientKeys),
     };
   }
 
@@ -397,6 +444,7 @@ const OIDC_ONLY = [
   "allowedUpstreamTenants",
   "trustUpstreamEmail",
   "pinLoginHint",
+  "resolveGroupsOverage",
   "scopes",
   "claimMapping",
   "secretExpiresAt",
@@ -437,7 +485,7 @@ async function lockedMethod(
   const current = await tx.repos.loginMethods.findById(tenant.id, id);
   if (current === null) throw notFound();
   const spKeys = current.protocol === "saml" ? await tx.repos.saml.listSpKeys(tenant.id, id) : [];
-  requireMatch(ifMatch, tagOf(current, spKeys));
+  requireMatch(ifMatch, tagOf(current, spKeys, await clientKeysOf(tx.repos, current)));
   void deps;
   return current;
 }
@@ -775,6 +823,82 @@ export function loginMethodRoutes(deps: AdminDeps): AdminRoute[] {
             details: { actorTenantId: caller.tenant.id, purposes: rotated },
           });
           return loginMethodView(deps, tx, tenant, current);
+        });
+        return { body: view };
+      },
+    }),
+    route({
+      method: "post",
+      path: "/tenants/{tenantId}/login-methods/{loginMethodId}/client-key/prepare",
+      operationId: "prepareClientKeyRotation",
+      summary: "Add a next upstream client key (private_key_jwt), published next to the active one",
+      description:
+        "OIDC login methods only. The next key is published at the method's jwksUri at once " +
+        "and signs nothing yet. Wait until the upstream has fetched the JWKS again (at least " +
+        "its cache time, and the JWKS max-age of 5 minutes), or register the new key upstream, " +
+        "then rotate. A second next key is refused (409 conflict).",
+      tag: "Login methods",
+      ifMatch: true,
+      params: methodParams,
+      response: loginMethodSchema,
+      errors: ["conflict"],
+      handler: async ({ caller, params, ifMatch }) => {
+        const tenant = await targetTenant(deps, caller, params.tenantId);
+        const view = await inTransaction(deps, async (tx) => {
+          const current = await lockedMethod(tx, deps, tenant, params.loginMethodId, ifMatch);
+          if (current.protocol !== "oidc") {
+            throw fieldError("protocol", "not an OIDC login method");
+          }
+          const kid = await tx.repos.loginMethods.prepareClientKeyRotation(tenant.id, current.id);
+          await tx.record({
+            action: "admin.login_method.client_key_prepare",
+            tenantId: tenant.id,
+            actor: actorOf(caller),
+            subject: { type: "login_method", id: current.id },
+            details: { actorTenantId: caller.tenant.id, kid },
+          });
+          const updated = await tx.repos.loginMethods.findById(tenant.id, current.id);
+          return loginMethodView(deps, tx, tenant, updated ?? current);
+        });
+        return { body: view };
+      },
+    }),
+    route({
+      method: "post",
+      path: "/tenants/{tenantId}/login-methods/{loginMethodId}/client-key/rotate",
+      operationId: "rotateClientKey",
+      summary: "Make the next upstream client key active",
+      description:
+        "The next key signs the client assertions from now on. The former active key loses its " +
+        `private key and stays published as retiring for ${CLIENT_KEY_RETIRE_AFTER_SECONDS / 60} ` +
+        "minutes. Without a next key: 400 (prepare first).",
+      tag: "Login methods",
+      ifMatch: true,
+      params: methodParams,
+      response: loginMethodSchema,
+      handler: async ({ caller, params, ifMatch }) => {
+        const tenant = await targetTenant(deps, caller, params.tenantId);
+        const view = await inTransaction(deps, async (tx) => {
+          const current = await lockedMethod(tx, deps, tenant, params.loginMethodId, ifMatch);
+          if (current.protocol !== "oidc") {
+            throw fieldError("protocol", "not an OIDC login method");
+          }
+          const rotated = await tx.repos.loginMethods.rotateClientKey(tenant.id, current.id);
+          if (rotated === null)
+            throw fieldError("clientKeys", "no next key to activate; prepare first");
+          await tx.record({
+            action: "admin.login_method.client_key_rotate",
+            tenantId: tenant.id,
+            actor: actorOf(caller),
+            subject: { type: "login_method", id: current.id },
+            details: {
+              actorTenantId: caller.tenant.id,
+              kid: rotated.activeKid,
+              retiringKid: rotated.retiringKid,
+            },
+          });
+          const updated = await tx.repos.loginMethods.findById(tenant.id, current.id);
+          return loginMethodView(deps, tx, tenant, updated ?? current);
         });
         return { body: view };
       },

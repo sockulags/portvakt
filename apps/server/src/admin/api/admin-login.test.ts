@@ -193,6 +193,21 @@ describe.skipIf(ts === undefined)("admin sign-in through upstream IdPs", () => {
       "signing:active",
       "signing:previous",
     ]);
+    // Upstream client keys (private_key_jwt) exist for OIDC methods only.
+    expect(rotated.body).not.toHaveProperty("oidc");
+    for (const step of ["prepare", "rotate"]) {
+      const refused = await adminCall(
+        ts!,
+        platform,
+        "POST",
+        `${path}/${method.id}/client-key/${step}`,
+        { ifMatch: rotated.body.etag },
+      );
+      expect(refused.status, step).toBe(400);
+    }
+    expect(
+      (await fetch(`${ts!.baseUrl}/t/${tenant.slug}/federation/${method.id}/jwks`)).status,
+    ).toBe(404);
     const events = await ts!.db.repos.audit.query(
       { tenantId: tenant.id },
       { subjectId: method.id },
@@ -201,6 +216,110 @@ describe.skipIf(ts === undefined)("admin sign-in through upstream IdPs", () => {
       "admin.login_method.sp_keys_rotate",
       "admin.login_method.sp_keys_prepare",
       "admin.login_method.create",
+    ]);
+  });
+
+  it("rotates the upstream client key (private_key_jwt) with an overlap", async () => {
+    interface OidcView {
+      readonly id: string;
+      readonly etag: string;
+      readonly oidc: {
+        readonly jwksUri: string;
+        readonly clientKeys: readonly { readonly kid: string; readonly state: string }[];
+      };
+    }
+    const method = await createFederatedLoginMethod(ts!, idp!, tenant, "entra", {
+      displayName: "Entra (private_key_jwt)",
+      clientAuthMethod: "private_key_jwt",
+    });
+    const path = `/tenants/${tenant.id}/login-methods/${method.id}`;
+    const jwks = async (): Promise<string[]> => {
+      const response = await fetch(`${ts!.baseUrl}/t/${tenant.slug}/federation/${method.id}/jwks`);
+      const body = (await response.json()) as { keys: { kid: string; d?: string }[] };
+      expect(body.keys.every((key) => key.d === undefined)).toBe(true);
+      return body.keys.map((key) => key.kid);
+    };
+    const initial = (await adminCall<OidcView>(ts!, platform, "GET", path)).body;
+    expect(initial.oidc.clientKeys).toEqual([
+      expect.objectContaining({ kid: method.clientKeyKid, state: "active" }),
+    ]);
+    expect(await jwks()).toEqual([method.clientKeyKid]);
+
+    // Nothing to promote yet.
+    const early = await adminCall(ts!, platform, "POST", `${path}/client-key/rotate`, {
+      ifMatch: initial.etag,
+    });
+    expect(early.status).toBe(400);
+
+    const prepared = await adminCall<OidcView>(
+      ts!,
+      platform,
+      "POST",
+      `${path}/client-key/prepare`,
+      {
+        ifMatch: initial.etag,
+      },
+    );
+    expect(prepared.status).toBe(200);
+    const next = prepared.body.oidc.clientKeys.find((key) => key.state === "next");
+    expect(next).toBeDefined();
+    expect(await jwks()).toEqual([method.clientKeyKid, next!.kid]);
+    // A second next key is refused; a stale entity tag too.
+    expect(
+      (
+        await adminCall(ts!, platform, "POST", `${path}/client-key/prepare`, {
+          ifMatch: prepared.body.etag,
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await adminCall(ts!, platform, "POST", `${path}/client-key/rotate`, {
+          ifMatch: initial.etag,
+        })
+      ).status,
+    ).toBe(412);
+
+    const rotated = await adminCall<OidcView>(ts!, platform, "POST", `${path}/client-key/rotate`, {
+      ifMatch: prepared.body.etag,
+    });
+    expect(rotated.status).toBe(200);
+    expect(rotated.body.oidc.clientKeys.map((key) => `${key.kid}:${key.state}`)).toEqual([
+      `${next!.kid}:active`,
+      `${method.clientKeyKid}:retiring`,
+    ]);
+    expect(await jwks()).toEqual([next!.kid, method.clientKeyKid]);
+    const key = await ts!.db.repos.loginMethods.getClientKey(tenant.id, method.id);
+    expect(key?.kid).toBe(next!.kid);
+
+    // The upstream verifies the client assertion with the promoted key.
+    const token = await signIn(
+      (await ts!.db.repos.loginMethods.findById(tenant.id, method.id)) as OidcLoginMethod,
+      "anna-handlaggare",
+    );
+    expect(decodeJwt(token).idp).toBe(method.id);
+
+    // After the overlap only the active key is published.
+    await ts!.db.db.query(
+      `UPDATE login_methods SET client_retiring_until = now() - interval '1 second'
+        WHERE tenant_id = $1 AND id = $2`,
+      [tenant.id, method.id],
+    );
+    expect(await jwks()).toEqual([next!.kid]);
+
+    const events = await ts!.db.repos.audit.query(
+      { tenantId: tenant.id },
+      {
+        subjectId: method.id,
+        actions: ["admin.login_method.client_key_rotate", "admin.login_method.client_key_prepare"],
+      },
+    );
+    expect(events.events.map((event) => [event.action, event.details])).toEqual([
+      [
+        "admin.login_method.client_key_rotate",
+        { actorTenantId: world.system.id, kid: next!.kid, retiringKid: method.clientKeyKid },
+      ],
+      ["admin.login_method.client_key_prepare", { actorTenantId: world.system.id, kid: next!.kid }],
     ]);
   });
 

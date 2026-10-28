@@ -2,6 +2,7 @@ import type { BlindIndexPurpose } from "../crypto/blind-index.js";
 import type { KeyRing } from "../crypto/keyring.js";
 import type { Db } from "../db/database.js";
 import { PIN_INDEX_SUBJECT_PREFIX } from "../domain/person.js";
+import { rewrapUpstreamSessions } from "../federation/saml/upstream-session-rewrap.js";
 import { rewrapApplicationSecrets } from "./applications.js";
 import { rewrapLoginMethodSecrets } from "./login-methods.js";
 import { pendingAttributePinContext, pendingRolePinContext } from "./pending.js";
@@ -19,6 +20,8 @@ export interface RewrapResult {
   readonly partyIdentifiers: number;
   readonly grantAgentIdentifiers: number;
   readonly pendingAssignmentPins: number;
+  /** Upstream SAML sessions of live broker sessions (sealed values and blind indexes). */
+  readonly upstreamSessions: number;
 }
 
 interface IndexedColumn {
@@ -150,6 +153,7 @@ export async function rewrapAllSecrets(db: Db, keys: KeyRing): Promise<RewrapRes
       partyIdentifiers,
       grantAgentIdentifiers,
       pendingAssignmentPins,
+      upstreamSessions: await rewrapUpstreamSessions(tx, keys),
     };
   });
 }

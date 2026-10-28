@@ -1,8 +1,44 @@
 {{- if .Values.migrations.enabled }}
+{{- if .Values.migrations.serviceAccount.create }}
+# The migration Jobs' ServiceAccount. The chart's own ServiceAccount does not exist yet at
+# pre-install, so this one is a hook too, created before the Jobs (lower weight). No token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "portvakt.migrationServiceAccountName" . }}
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- with .Values.migrations.serviceAccount.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+automountServiceAccountToken: false
+---
+{{- end }}
+# The migration Jobs' non-secret environment (NODE_ENV, server.env). Hooks run before the chart's
+# regular ConfigMaps exist, so this one is a hook too, created before the Jobs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "portvakt.fullname" . }}-migrate
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+data:
+  {{- include "portvakt.jobConfig" (dict "root" . "except" (list)) | nindent 2 }}
+---
 # Runs before the release's pods on install and upgrade (hook): migrations as the owner role
 # (MIGRATION_DATABASE_URL), then the runtime role's grants (the DATABASE_URL user). A failure
-# stops the upgrade before any pod changes. Hooks run before the chart's ConfigMaps exist, so the
-# environment is set here.
+# stops the upgrade before any pod changes. Non-secret settings come from the hook ConfigMap
+# above, the database URLs from the Secrets.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -31,6 +67,9 @@ spec:
           command: ["node", "dist/db/migrate-cli.js"]
           securityContext:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "portvakt.fullname" . }}-migrate
           env:
             {{- include "portvakt.jobDatabaseEnv" . | nindent 12 }}
           resources:

@@ -29,6 +29,8 @@ interface IssuerPersona {
   /** Personal identity number (citizens): `login_hint` with it signs the persona in. */
   readonly pin: string | undefined;
   readonly maxAcr: string | undefined;
+  /** Employees: the groups the mock's Microsoft Graph reports (also with a groups overage). */
+  readonly groups: readonly string[] | undefined;
   readonly claims: () => Record<string, unknown>;
 }
 
@@ -41,6 +43,7 @@ function employeePersona(employee: Employee): IssuerPersona {
     email: employee.email,
     pin: undefined,
     maxAcr: undefined,
+    groups: employee.groups,
     claims: () => ({
       sub: employee.oid,
       oid: employee.oid,
@@ -73,6 +76,7 @@ function citizenPersona(citizen: Citizen): IssuerPersona {
     email: undefined,
     pin: citizen.pin,
     maxAcr: citizen.acr,
+    groups: undefined,
     claims: () => ({
       sub: citizen.sub,
       [PERSONAL_IDENTITY_NUMBER_CLAIM]: citizen.pin,
@@ -124,7 +128,15 @@ export interface MockIssuer {
    * `bankid` issuer does by default; the Entra issuers have no PAR at all).
    */
   advertisePushedAuthorizationRequests(advertised: boolean): void;
+  /**
+   * Test switch (Entra issuers): the mock's Microsoft Graph answers every request with this
+   * status (`undefined`: it answers normally).
+   */
+  failGraph(status: number | undefined): void;
 }
+
+/** Page size of the mock's `transitiveMemberOf` (small, so paging is exercised). */
+const GRAPH_PAGE_SIZE = 2;
 
 export interface ReceivedPushedRequest {
   readonly clientId: string;
@@ -458,6 +470,47 @@ export async function createMockIssuer(options: {
   router.post("/interaction/:uid/cancel", (req, res, next) => {
     finish(req, res, "cancel").catch(next);
   });
+  // Microsoft Graph for groups overages (Entra issuers): `/me/transitiveMemberOf` with the
+  // access token this issuer issued, paged through `@odata.nextLink`.
+  let graphFailure: number | undefined;
+  if (entraLike) {
+    router.get("/graph/v1.0/me/transitiveMemberOf", (req, res, next) => {
+      void (async () => {
+        if (graphFailure !== undefined) {
+          res.status(graphFailure).json({ error: { code: "MockFailure", message: "test switch" } });
+          return;
+        }
+        const header = req.get("authorization") ?? "";
+        const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+        const found = token === "" ? undefined : await provider.AccessToken.find(token);
+        const persona = found === undefined ? undefined : bySubject.get(found.accountId);
+        if (persona?.groups === undefined) {
+          res.status(401).json({
+            error: { code: "InvalidAuthenticationToken", message: "Access token is invalid" },
+          });
+          return;
+        }
+        const objects = [
+          ...persona.groups.map((id) => ({ "@odata.type": "#microsoft.graph.group", id })),
+          // Graph lists directory roles too; Portvakt keeps groups only.
+          { "@odata.type": "#microsoft.graph.directoryRole", id: "mock-directory-role" },
+        ];
+        const skip = Number(typeof req.query.$skiptoken === "string" ? req.query.$skiptoken : 0);
+        const offset = Number.isInteger(skip) && skip >= 0 ? skip : 0;
+        const page = objects.slice(offset, offset + GRAPH_PAGE_SIZE);
+        const nextOffset = offset + GRAPH_PAGE_SIZE;
+        res.json({
+          "@odata.context": `${issuer}/graph/v1.0/$metadata#directoryObjects(id)`,
+          value: page,
+          ...(nextOffset < objects.length
+            ? {
+                "@odata.nextLink": `${options.publicUrl}${basePath}/graph/v1.0/me/transitiveMemberOf?$select=id&$skiptoken=${String(nextOffset)}`,
+              }
+            : {}),
+        });
+      })().catch(next);
+    });
+  }
   const callback = provider.callback();
   router.use((req, res) => {
     void callback(req, res);
@@ -474,6 +527,9 @@ export async function createMockIssuer(options: {
     pushedAuthorizationRequests: () => [...pushed],
     advertisePushedAuthorizationRequests(advertised) {
       parAdvertised = advertised;
+    },
+    failGraph(status) {
+      graphFailure = status;
     },
     registerClient(client) {
       if (client.issuer !== kind) throw new Error(`client for ${client.issuer}, not ${kind}`);

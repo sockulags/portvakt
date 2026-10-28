@@ -274,6 +274,7 @@ describe.skipIf(testDb === undefined)("SigningKeyRepository", () => {
       partyIdentifiers: 0,
       grantAgentIdentifiers: 0,
       pendingAssignmentPins: 0,
+      upstreamSessions: 0,
     });
   });
 });

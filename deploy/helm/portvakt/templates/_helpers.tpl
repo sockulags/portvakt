@@ -47,6 +47,18 @@ app.kubernetes.io/part-of: portvakt
 {{- end -}}
 {{- end -}}
 
+{{/*
+The migration hook Jobs' ServiceAccount: one created as a hook before them
+(templates/migration-job.yaml), or an existing one (migrations.serviceAccount.create false).
+*/}}
+{{- define "portvakt.migrationServiceAccountName" -}}
+{{- if .Values.migrations.serviceAccount.create -}}
+{{- default (printf "%s-migrate" (include "portvakt.fullname" .)) .Values.migrations.serviceAccount.name -}}
+{{- else -}}
+{{- default "default" .Values.migrations.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}
+
 {{/* Image reference: (dict "root" . "image" .Values.server.image). */}}
 {{- define "portvakt.image" -}}
 {{- $repository := printf "%s%s" .root.Values.imageRegistry .image.repository -}}
@@ -104,14 +116,15 @@ rolling update one extra pod of each Deployment runs (maxSurge 1).
 
 {{/*
 Pod-level settings shared by every Portvakt pod: (dict "root" . "hook" false). Hook Jobs run
-before the chart's ServiceAccount exists on the first install, so they use the namespace's
-default one, without a token either way.
+before the chart's ServiceAccount exists on the first install, so they use the migration
+ServiceAccount, itself a hook created before them; never with a token.
 */}}
 {{- define "portvakt.podSecurity" -}}
 {{- if not .hook }}
 serviceAccountName: {{ include "portvakt.serviceAccountName" .root }}
 automountServiceAccountToken: {{ .root.Values.serviceAccount.automountServiceAccountToken }}
 {{- else }}
+serviceAccountName: {{ include "portvakt.migrationServiceAccountName" .root }}
 automountServiceAccountToken: false
 {{- end }}
 securityContext:
@@ -138,6 +151,20 @@ topologySpreadConstraints:
     labelSelector:
       matchLabels:
         {{- include "portvakt.selectorLabels" (dict "root" .root "component" .component) | nindent 8 }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Non-secret environment of the server's one-off jobs, as ConfigMap data: NODE_ENV and
+server.env (the database timeouts and anything else the job CLIs read), minus the names in
+.except: (dict "root" . "except" (list "AUDIT_RETENTION")).
+*/}}
+{{- define "portvakt.jobConfig" -}}
+NODE_ENV: "production"
+{{- range $name, $value := .root.Values.server.env }}
+{{- if not (has $name $.except) }}
+{{ $name }}: {{ $value | toString | quote }}
+{{- end }}
 {{- end }}
 {{- end -}}
 

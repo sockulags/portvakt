@@ -1,4 +1,17 @@
 {{- if .Values.auditPrune.enabled }}
+# The retention job's non-secret environment: AUDIT_RETENTION (auditPrune.retention), NODE_ENV
+# and server.env (the database timeouts).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "portvakt.fullname" . }}-audit-prune
+  labels:
+    {{- include "portvakt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: audit-prune
+data:
+  AUDIT_RETENTION: {{ .Values.auditPrune.retention | quote }}
+  {{- include "portvakt.jobConfig" (dict "root" . "except" (list "AUDIT_RETENTION")) | nindent 2 }}
+---
 # Audit retention: deletes audit events older than AUDIT_RETENTION (at least 90 days) in batches,
 # as the owner role (only it may run audit_events_prune), and audits `audit.pruned`.
 apiVersion: batch/v1
@@ -31,9 +44,10 @@ spec:
               command: ["node", "dist/audit/prune-cli.js"]
               securityContext:
                 {{- toYaml .Values.containerSecurityContext | nindent 16 }}
+              envFrom:
+                - configMapRef:
+                    name: {{ include "portvakt.fullname" . }}-audit-prune
               env:
-                - name: AUDIT_RETENTION
-                  value: {{ .Values.auditPrune.retention | quote }}
                 {{- include "portvakt.jobDatabaseEnv" . | nindent 16 }}
               resources:
                 {{- toYaml .Values.auditPrune.resources | nindent 16 }}

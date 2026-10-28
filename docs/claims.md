@@ -233,12 +233,22 @@ later than the request; with `max_age` it must also be recent enough.
 
 Group rules map upstream group values of a login method to application roles; they are evaluated
 for every token. For Entra ID, a user in more groups than fit in a token gets a groups overage
-(`_claim_names` / `_claim_sources` instead of `groups`). Portvakt does not call Microsoft Graph:
-the groups are then treated as empty (no rule matches), an audit event `login.groups_overage` is
-written and a warning logged. Recommended Entra ID setting: in the app registration, under
-Token configuration, emit the groups claim for "Groups assigned to the application" only (and
-assign the relevant groups to the enterprise application), so the token stays below the overage
-limit.
+(`_claim_names` / `_claim_sources` instead of `groups`). By default the groups are then treated
+as empty (no rule matches), an audit event `login.groups_overage` is written and a warning
+logged. A login method with `resolveGroupsOverage` reads them from Microsoft Graph instead
+(`GRAPH_API_URL`, `GET /v1.0/me/transitiveMemberOf?$select=id` with the upstream access token,
+which needs a Graph scope such as `User.Read` among the method's scopes): every group the user
+is a transitive member of, as group object ids (directory roles and other objects are dropped).
+The lookup is bounded (at most 1,000 groups and 10 pages, paging links only below
+`GRAPH_API_URL`, no redirects, 1 MB per page) and fails closed: any failure fails the login
+(`upstream_unavailable` or `upstream_error`, audited as `login.failure` with detail
+`groups_overage_unresolved`), so rules never see a partial list. A resolved overage is audited
+as `login.groups_overage` with `resolved: true`. The upstream `_claim_sources` endpoint is never
+called. Graph returns every transitive group, not only those assigned to the application, so
+write rules against group object ids. Recommended Entra ID setting either way: in the app
+registration, under Token configuration, emit the groups claim for "Groups assigned to the
+application" only (and assign the relevant groups to the enterprise application), so the token
+stays below the overage limit.
 
 ## Examples
 

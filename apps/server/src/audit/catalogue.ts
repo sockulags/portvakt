@@ -174,6 +174,7 @@ const LOGIN_METHOD_FIELDS = [
   "allowedUpstreamTenants",
   "trustUpstreamEmail",
   "pinLoginHint",
+  "resolveGroupsOverage",
   "scopes",
   "claimMapping",
   "saml",
@@ -227,8 +228,16 @@ export const AUDIT_EVENTS = {
   ),
   "login.groups_overage": event(
     "success",
-    z.object({ loginMethodId: uuid }).strict(),
-    "Entra ID groups overage: the groups of this login were treated as empty.",
+    z
+      .object({
+        loginMethodId: uuid,
+        /** The groups were read from Microsoft Graph (`resolveGroupsOverage`). */
+        resolved: z.boolean().optional(),
+      })
+      .strict(),
+    "Entra ID groups overage: the groups of this login were read from Microsoft Graph " +
+      "(`resolved`), or else treated as empty. A failed Graph lookup is a `login.failure` with " +
+      "detail `groups_overage_unresolved` instead.",
   ),
   "person.created": event(
     "success",
@@ -530,6 +539,18 @@ export const AUDIT_EVENTS = {
       .object({ actorTenantId, purposes: z.array(z.enum(["signing", "encryption"])).max(2) })
       .strict(),
     "An administrator made the `next` SAML SP keys active (subject: the login method).",
+  ),
+  "admin.login_method.client_key_prepare": event(
+    "success",
+    z.object({ actorTenantId, kid }).strict(),
+    "An administrator added a `next` upstream client key (private_key_jwt), published next to " +
+      "the active one (subject: the login method).",
+  ),
+  "admin.login_method.client_key_rotate": event(
+    "success",
+    z.object({ actorTenantId, kid, retiringKid: kid }).strict(),
+    "An administrator made the `next` upstream client key active; the former one is retiring " +
+      "(subject: the login method).",
   ),
   "admin.role_rule.create": event(
     "success",

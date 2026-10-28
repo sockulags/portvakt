@@ -27,6 +27,7 @@ import type { Repositories } from "../repositories/index.js";
 import { asOidc } from "../repositories/login-methods.js";
 import { PersonRepository } from "../repositories/persons.js";
 import { mapUpstreamClaims } from "./claim-mapping.js";
+import { fetchOverageGroups, GraphGroupsError } from "./graph-groups.js";
 import { FederationError, type FailureContext, type UpstreamLoginResult } from "./flow.js";
 import { SamlFederation, type SamlBeginOptions } from "./saml/service.js";
 import {
@@ -67,6 +68,13 @@ export const federationCallbackPath = (slug: string, loginMethodId: string): str
 /** Public JWKS of a login method's client key (for upstream private_key_jwt). */
 export const federationJwksPath = (slug: string, loginMethodId: string): string =>
   `/t/${slug}/federation/${loginMethodId}/jwks`;
+
+/**
+ * Cache lifetime of the published client JWKS. Between preparing and promoting a client key,
+ * wait at least this long (plus the upstream's own JWKS cache time) so the upstream knows the
+ * next key before it signs.
+ */
+export const CLIENT_JWKS_MAX_AGE_SECONDS = 300;
 
 /**
  * Upstream federation. OIDC: sends the browser to the login method's IdP (authorization code
@@ -378,7 +386,7 @@ export class FederationService {
       }
     }
 
-    const mapped = mapUpstreamClaims(method.claimMapping, claims, {
+    let mapped = mapUpstreamClaims(method.claimMapping, claims, {
       trustEmail: method.trustUpstreamEmail,
     });
     if (typeof mapped === "string") {
@@ -391,6 +399,33 @@ export class FederationService {
         !this.#options.acrRanking.satisfies(mapped.upstreamAcr, method.assertedAcr))
     ) {
       return fail("insufficient_assurance");
+    }
+    if (mapped.groupsOverage && method.resolveGroupsOverage) {
+      // Groups overage: read the groups from Microsoft Graph, or fail the login (fail closed:
+      // rules never see a partial or missing list for a method that asked for them).
+      try {
+        const groups = await withOutboundContext({ loginMethodId, purpose: "graph_groups" }, () =>
+          fetchOverageGroups(
+            {
+              outbound: this.#options.outbound,
+              graphApiUrl: this.#options.config.federation.graphApiUrl,
+            },
+            tokens.access_token,
+          ),
+        );
+        mapped = {
+          ...mapped,
+          attributes: { ...mapped.attributes, groups },
+          groupsResolved: true,
+        };
+      } catch (error) {
+        const reason = error instanceof GraphGroupsError ? error.reason : "invalid_response";
+        this.#log.info({ loginMethodId, reason }, "groups overage could not be resolved");
+        return fail(reason === "unavailable" ? "upstream_unavailable" : "upstream_error", {
+          ...failure,
+          detail: "groups_overage_unresolved",
+        });
+      }
     }
 
     return this.#completeUpstream({
@@ -472,8 +507,8 @@ export class FederationService {
   async #completeUpstream(result: UpstreamLoginResult): Promise<string> {
     const { tenant, method, mapped } = result;
     const { db, keys, auditLog } = this.#options;
-    if (mapped.groupsOverage) {
-      // Groups are not fetched from Microsoft Graph: rules see no groups for this login.
+    if (mapped.groupsOverage && mapped.groupsResolved !== true) {
+      // The method does not resolve overages through Graph: rules see no groups for this login.
       this.#log.warn(
         { loginMethodId: method.id, event: "groups_overage" },
         "upstream groups overage: groups treated as empty (configure group filtering upstream)",
@@ -504,7 +539,10 @@ export class FederationService {
           tenantId: tenant.id,
           actor: { type: "person", id: person.id },
           subject: { type: "person", id: person.id },
-          details: { loginMethodId: method.id },
+          details: {
+            loginMethodId: method.id,
+            ...(mapped.groupsResolved === true ? { resolved: true } : {}),
+          },
         });
       }
       if (jit.created || jit.linked) {

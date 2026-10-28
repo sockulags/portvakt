@@ -206,6 +206,23 @@ describe("loadConfig", () => {
     const config = loadConfig(productionEnv);
     expect(config.isProduction).toBe(true);
     expect(config.publicUrl).toBe("https://login.example.org");
+    expect(config.federation.graphApiUrl).toBe("https://graph.microsoft.com");
+  });
+
+  it("takes GRAPH_API_URL without a trailing slash, and https only in production", () => {
+    expect(
+      loadConfig({ ...devEnv, GRAPH_API_URL: "http://127.0.0.1:4500/entra/graph/" }).federation
+        .graphApiUrl,
+    ).toBe("http://127.0.0.1:4500/entra/graph");
+    expect(issuesOf({ ...devEnv, GRAPH_API_URL: "graph.example" })).toEqual([
+      "GRAPH_API_URL: must be an absolute URL",
+    ]);
+    expect(issuesOf({ ...devEnv, GRAPH_API_URL: "https://graph.example/?x=1" })).toEqual([
+      "GRAPH_API_URL: must not contain credentials, a query or a fragment",
+    ]);
+    expect(issuesOf({ ...productionEnv, GRAPH_API_URL: "http://graph.example" })).toContain(
+      "GRAPH_API_URL: must use https in production",
+    );
   });
 
   it.each([
@@ -433,6 +450,7 @@ describe("loadConfig: federation settings", () => {
       failureCacheSeconds: 5,
       samlMetadataMaxAgeSeconds: 604800,
       allowPrivateUpstreamHosts: [],
+      graphApiUrl: "https://graph.microsoft.com",
       samlXmlMaxElements: 20000,
     });
     expect(config.loginUiDir).toBeUndefined();

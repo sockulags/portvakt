@@ -22,6 +22,8 @@ export const DEV_COOKIE_KEYS: readonly string[] = [
 ];
 /** The admin portal's development client secret (.env.example); refused in production. */
 export const DEV_ADMIN_CLIENT_SECRET = "dev-only-admin-client-secret-0123456789abcdef";
+/** Microsoft Graph (global cloud) unless GRAPH_API_URL names a national cloud or a mock. */
+export const DEFAULT_GRAPH_API_URL = "https://graph.microsoft.com";
 /** Where the admin portal runs outside production unless ADMIN_PUBLIC_URL says otherwise. */
 export const DEFAULT_DEV_ADMIN_PUBLIC_URL = "http://localhost:3400";
 /** Database credentials used by deploy/docker-compose.dev.yml. */
@@ -237,6 +239,11 @@ export interface Config {
      * (development and tests only; refused in production).
      */
     readonly allowPrivateUpstreamHosts: readonly string[];
+    /**
+     * GRAPH_API_URL: Microsoft Graph's base URL (without `/v1.0`), for login methods that
+     * resolve an Entra ID groups overage (`resolveGroupsOverage`). No trailing slash.
+     */
+    readonly graphApiUrl: string;
     /** Largest element count of a SAML Response Portvakt parses (bounded parsing). */
     readonly samlXmlMaxElements: number;
   };
@@ -477,6 +484,7 @@ const envSchema = z.object({
   UPSTREAM_TIMEOUT: duration("10s"),
   UPSTREAM_METADATA_TTL: duration("1h"),
   UPSTREAM_FAILURE_CACHE: duration("5s", { allowZero: true }),
+  GRAPH_API_URL: optionalString,
   SAML_METADATA_MAX_AGE: duration("7d"),
   SAML_XML_MAX_ELEMENTS: z.preprocess(
     emptyToUndefined,
@@ -953,6 +961,15 @@ export function loadConfig(
     issues.push("MASTER_KEY_PREVIOUS: must not repeat MASTER_KEY or another previous key");
   }
 
+  const graphApiUrl = parseHttpUrl(
+    env.GRAPH_API_URL ?? DEFAULT_GRAPH_API_URL,
+    "GRAPH_API_URL",
+    issues,
+  );
+  if (isProduction && graphApiUrl !== undefined && graphApiUrl.protocol !== "https:") {
+    issues.push("GRAPH_API_URL: must use https in production");
+  }
+
   if (publicUrl !== undefined && publicUrl.pathname !== "/") {
     issues.push("PUBLIC_URL: must be an origin without a path (issuers are {PUBLIC_URL}/t/{slug})");
   }
@@ -968,7 +985,12 @@ export function loadConfig(
   const bootstrap = bootstrapConfig(env, issues);
   const admin = adminConfig(env, isProduction, issues);
   if (isProduction) issues.push(...productionIssues(env, publicUrl));
-  if (issues.length > 0 || publicUrl === undefined || database === undefined) {
+  if (
+    issues.length > 0 ||
+    publicUrl === undefined ||
+    database === undefined ||
+    graphApiUrl === undefined
+  ) {
     throw new ConfigError(issues, isProduction ? productionWarnings(env, warningOptions) : []);
   }
 
@@ -1035,6 +1057,7 @@ export function loadConfig(
       failureCacheSeconds: env.UPSTREAM_FAILURE_CACHE,
       samlMetadataMaxAgeSeconds: env.SAML_METADATA_MAX_AGE,
       allowPrivateUpstreamHosts: env.ALLOW_PRIVATE_UPSTREAM_HOSTS,
+      graphApiUrl: graphApiUrl.href.replace(/\/+$/, ""),
       samlXmlMaxElements: env.SAML_XML_MAX_ELEMENTS,
     },
     loginUiDir: env.LOGIN_UI_DIR,
