@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
+import { createKeyRing } from "../../crypto/keyring.js";
 import { certificateInfo, generateSelfSignedKeyPair, pemBody } from "../../crypto/x509.js";
+import { identityAttributesSchema } from "../../domain/person.js";
 import { SAML_ATTRIBUTES, samlAttributeMappingSchema } from "../../domain/saml.js";
 import { mapSamlAttributes, NAMEID_FORMATS } from "./attributes.js";
-import { MetadataError, parseIdpMetadata } from "./metadata.js";
+import { MetadataError, parseIdpMetadata, restrictToHttps } from "./metadata.js";
+import {
+  nameIdIndexCandidates,
+  sealUpstreamSession,
+  sessionIndexCandidates,
+  unsealUpstreamSession,
+} from "./upstream-session.js";
 import { signEnveloped } from "./xml.js";
 
 const pair = await generateSelfSignedKeyPair("unit test", 3600);
@@ -88,6 +96,44 @@ describe("IdP metadata", () => {
     );
     expect(await reasonOf(parseIdpMetadata(noKeys, options()))).toBe("no_signing_certificate");
   });
+
+  it("keeps only https endpoints when https is required (production)", async () => {
+    const httpIdp = "http://idp.example.test/saml";
+    const httpOnly = entity(IDP).replaceAll(`${IDP}/`, `${httpIdp}/`);
+    // Outside production plain http endpoints are used (local mocks).
+    expect((await parseIdpMetadata(httpOnly, options())).sso.redirect).toBe(`${httpIdp}/sso`);
+    expect(await reasonOf(parseIdpMetadata(httpOnly, options({ requireHttps: true })))).toBe(
+      "insecure_endpoint",
+    );
+
+    // An https SSO endpoint with an http SLO endpoint: the SLO endpoint counts as absent.
+    const mixed = entity(IDP).replace(`${IDP}/slo`, `${httpIdp}/slo`);
+    const secure = await parseIdpMetadata(mixed, options({ requireHttps: true }));
+    expect(secure.sso.redirect).toBe(`${IDP}/sso`);
+    expect(secure.slo).toEqual({ redirect: null, post: null });
+    expect(
+      (await parseIdpMetadata(entity(IDP), options({ requireHttps: true }))).slo.redirect,
+    ).not.toBeNull();
+  });
+
+  it("restricts cached metadata to https endpoints", async () => {
+    const metadata = await parseIdpMetadata(entity(IDP), options());
+    const httpPost = {
+      ...metadata,
+      sso: { redirect: metadata.sso.redirect, post: "http://x.example/sso" },
+    };
+    expect(restrictToHttps(httpPost)?.sso).toEqual({ redirect: `${IDP}/sso`, post: null });
+    const onlyHttp = { ...metadata, sso: { redirect: "http://x.example/sso", post: null } };
+    expect(restrictToHttps(onlyHttp)).toBeNull();
+    const httpResponse = {
+      ...metadata,
+      slo: {
+        redirect: { location: `${IDP}/slo`, responseLocation: "http://x.example/slo" },
+        post: null,
+      },
+    };
+    expect(restrictToHttps(httpResponse)?.slo.redirect).toBeNull();
+  });
 });
 
 describe("SAML attribute mapping", () => {
@@ -126,6 +172,33 @@ describe("SAML attribute mapping", () => {
       protectedIdentity: false,
     });
     expect(result.mapped.attributes.upstreamAcr).toBe("http://id.elegnamnden.se/loa/1.0/loa3");
+  });
+
+  it("leaves out an empty or oversized employeeHsaId instead of failing the login", () => {
+    for (const value of ["", "   ", `SE${"1".repeat(70)}`]) {
+      const result = mapSamlAttributes(
+        settings(),
+        subject({
+          [SAML_ATTRIBUTES.personalIdentityNumber]: ["191212121212"],
+          [SAML_ATTRIBUTES.employeeHsaId]: [value],
+        }),
+        [],
+      );
+      if (typeof result === "string") throw new Error(result);
+      expect(result.mapped.attributes.hsaId).toBeUndefined();
+      // What JIT provisioning stores must pass the identity's attribute schema.
+      expect(identityAttributesSchema.safeParse(result.mapped.attributes).success).toBe(true);
+    }
+    const kept = mapSamlAttributes(
+      settings(),
+      subject({
+        [SAML_ATTRIBUTES.personalIdentityNumber]: ["191212121212"],
+        [SAML_ATTRIBUTES.employeeHsaId]: [" SE2321000016-1003 "],
+      }),
+      [],
+    );
+    if (typeof kept === "string") throw new Error(kept);
+    expect(kept.mapped.attributes.hsaId).toBe("SE2321000016-1003");
   });
 
   it("refuses invalid, missing and ambiguous identifiers and transient NameIDs as subjects", () => {
@@ -183,5 +256,50 @@ describe("SP certificates", () => {
     expect(info.keyType).toBe("rsa");
     expect(info.notAfter.getTime()).toBeGreaterThan(Date.now());
     expect(pair.privateKey).toContain("BEGIN PRIVATE KEY");
+  });
+});
+
+describe("upstream SAML sessions", () => {
+  const keys = createKeyRing({ current: Buffer.alloc(32, 7), previous: [] });
+  const methodId = "7d0b5a52-6a43-4f4e-9b8a-0f1d2c3b4a59";
+
+  it("seals a session whose optional values are empty attributes as if they were absent", () => {
+    // IdPs may send NameQualifier="" or SessionIndex="": the login must not fail on it.
+    const session = sealUpstreamSession(keys, methodId, {
+      nameId: "pseudonym-1",
+      nameIdFormat: "",
+      nameQualifier: "",
+      spNameQualifier: "",
+      sessionIndex: "",
+    });
+    expect(session.sessionIndexIndex).toBeUndefined();
+    expect(session.nameIdIndex).toBe(nameIdIndexCandidates(keys, methodId, "pseudonym-1")[0]);
+    expect(unsealUpstreamSession(keys, methodId, session)).toEqual({
+      nameId: "pseudonym-1",
+      nameIdFormat: undefined,
+      nameQualifier: undefined,
+      spNameQualifier: undefined,
+      sessionIndex: undefined,
+    });
+  });
+
+  it("keeps the values that are present, sealed to the login method", () => {
+    const session = sealUpstreamSession(keys, methodId, {
+      nameId: "pseudonym-2",
+      nameIdFormat: NAMEID_FORMATS.persistent,
+      nameQualifier: IDP,
+      spNameQualifier: undefined,
+      sessionIndex: "s-1",
+    });
+    expect(session.sealed).not.toContain("pseudonym-2");
+    expect(session.sessionIndexIndex).toBe(sessionIndexCandidates(keys, methodId, "s-1")[0]);
+    expect(unsealUpstreamSession(keys, methodId, session)).toMatchObject({
+      nameId: "pseudonym-2",
+      nameQualifier: IDP,
+      sessionIndex: "s-1",
+    });
+    expect(() =>
+      unsealUpstreamSession(keys, "8d0b5a52-6a43-4f4e-9b8a-0f1d2c3b4a59", session),
+    ).toThrow();
   });
 });

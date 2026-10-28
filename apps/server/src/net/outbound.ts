@@ -234,7 +234,10 @@ export class OutboundGuard {
       ) {
         await response.body?.cancel();
         if (hop >= MAX_REDIRECTS) throw new OutboundRefusedError("too_many_redirects");
-        url = new URL(location, url);
+        const next = new URL(location, url);
+        // Credentials never follow a redirect to another origin (as fetch drops Authorization).
+        if (next.origin !== url.origin) request = withoutCredentials(request);
+        url = next;
         // A redirect turns the request into a GET without a body (as fetch does for 301-303).
         if (response.status !== 307 && response.status !== 308) {
           const { body: _body, method: _method, ...withoutBody } = request;
@@ -247,6 +250,16 @@ export class OutboundGuard {
       return capped(response, maxBytes);
     }
   }
+}
+
+/** Request headers that carry credentials: dropped on a redirect to another origin. */
+const CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"] as const;
+
+function withoutCredentials(request: RequestInit): RequestInit {
+  if (request.headers === undefined) return request;
+  const headers = new Headers(request.headers);
+  for (const name of CREDENTIAL_HEADERS) headers.delete(name);
+  return { ...request, headers };
 }
 
 /** A fixed reason for the failures metric (never a message or URL). */

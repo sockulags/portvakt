@@ -292,6 +292,19 @@ export class UpstreamClients {
     const metadata: client.ServerMetadata = templated
       ? { ...discovered, issuer: discovered.issuer.replace(/\{tenantid\}/i, TENANT_PLACEHOLDER) }
       : discovered;
+    // The back channel goes through the outbound guard (https only in production), but browsers
+    // are sent to the authorization endpoint directly: an https issuer may not hand them a plain
+    // http one.
+    const authorizationEndpoint = metadata.authorization_endpoint;
+    if (
+      this.#options.production &&
+      (typeof authorizationEndpoint !== "string" ||
+        URL.parse(authorizationEndpoint)?.protocol !== "https:")
+    ) {
+      throw new UpstreamMisconfiguredError(
+        "upstream authorization endpoint must use https in production",
+      );
+    }
     if (templated) {
       // For authorization URLs only; tokens are validated per tenant (exchangeCode).
       config = new client.Configuration(

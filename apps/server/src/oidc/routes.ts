@@ -67,6 +67,15 @@ const CLIENT_ENDPOINTS = new Set([
 ]);
 
 /**
+ * The provider endpoint a path below `/t/{slug}` addresses, as oidc-provider's router matches
+ * it: that router ignores the case of ASCII letters (`/TOKEN` is the token endpoint) and a
+ * trailing slash, so the rate limits in front of it compare this form, never the raw path.
+ * (Lower-casing also folds a few non-ASCII letters the router does not; such paths only ever
+ * get a 404 there, so limiting them too is harmless.)
+ */
+export const providerPath = (path: string): string => path.replace(/\/+$/, "").toLowerCase();
+
+/**
  * Pins what oidc-provider (Koa, with `proxy` on) derives from the request to `PUBLIC_URL`:
  * endpoint URLs in discovery and redirects must never follow a client-supplied `Host` or
  * `X-Forwarded-Host`, and whether cookies are Secure must not depend on `X-Forwarded-Proto`.
@@ -180,7 +189,7 @@ export function tenantRoutes(options: TenantRoutesOptions): Router {
     }
     const slug = (req.params as { slug?: string }).slug ?? "";
     const ip = clientIpKey(req);
-    const path = req.path.replace(/\/+$/, "");
+    const path = providerPath(req.path);
     const bodyTooLarge = (error: unknown): void => {
       if (error instanceof BodyTooLargeError) {
         res.status(413).set("Cache-Control", "no-store").json({

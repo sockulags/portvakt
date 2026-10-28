@@ -691,7 +691,9 @@ number>`.
   error view and a `login.failure` audit event written on its own (never inside a transaction).
 - Upstream ID tokens: openid-client validates iss, aud, exp, nonce and the alg against the
   issuer's metadata, `enableNonRepudiationChecks` verifies the signature against the upstream
-  JWKS, and Portvakt adds an asymmetric-only alg allowlist. Production refuses http issuers.
+  JWKS, and Portvakt adds an asymmetric-only alg allowlist. Production refuses http issuers
+  and http authorization endpoints (browsers go there directly), and uses only the https SSO
+  and SLO endpoints of SAML metadata (`restrictToHttps`, also on cached copies).
 - Login methods authenticate upstream with `client_secret_basic`, `client_secret_post` or
   `private_key_jwt` (a per-login-method ES256 key, encrypted as
   `login_method:<id>:client_private_jwk`, public at `/t/{slug}/federation/{id}/jwks`).
@@ -817,7 +819,8 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
   userinfo, downstream client `jwks_uri`) go through `net/outbound.ts`: the connection's DNS
   lookup refuses loopback, private, link-local (169.254.169.254), unique-local, unspecified,
   multicast, IPv4-compatible (::/96) and NAT64/6to4 (64:ff9b::/96, 64:ff9b:1::/48, 2002::/16) addresses (also after DNS rebinding), literal IP hosts are checked first, redirects are
-  followed by hand (3 hops, each checked), bodies are capped, and production requires https.
+  followed by hand (3 hops, each checked; Authorization, Proxy-Authorization and Cookie are
+  dropped on a hop to another origin), bodies are capped, and production requires https.
   The guard uses `undici` (a direct dependency, `~7.29.1`) for its `Agent` and `fetch`, so the
   connect-time lookup does not depend on the undici version bundled in Node.
   Development and tests list exceptions in ALLOW_PRIVATE_UPSTREAM_HOSTS (refused in production);
@@ -964,7 +967,9 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
 - Rate limits (`http/rate-limits.ts`, RATE_LIMIT_*): token buckets per replica, keyed by the
   client IP (`clientIpKey`: `req.ip` under TRUST_PROXY; IPv6 by its /64, `ipRateLimitKey` in
   http-kit), `{slug}:{client_id}` or the admin caller; a refused request is counted by limit
-  name only. The per-client bucket of the token, introspection, revocation and PAR endpoints is
+  name only. Provider endpoints are recognised as oidc-provider's router matches them
+  (`providerPath` in `oidc/routes.ts`: any letter case, trailing slashes ignored), so `/TOKEN`
+  is limited like `/token`. The per-client bucket of the token, introspection, revocation and PAR endpoints is
   charged only for failed client authentication, after the provider answered
   (`chargeFailedClientAuthentication` wraps `res.end`: a 401 takes a token, and with the bucket
   empty the 401 becomes 429), so successful authentications are never blocked by others'

@@ -68,6 +68,40 @@ export interface ParseMetadataOptions {
   /** When set, the document must carry a valid signature by this certificate (PEM). */
   readonly signingCertificate: string | null;
   readonly now: Date;
+  /**
+   * Production: browsers are sent to the IdP's endpoints with AuthnRequests (a PrincipalSelection
+   * may carry a personal identity number) and LogoutRequests (the NameID), so only https
+   * endpoints are kept ({@link restrictToHttps}); without an https SSO endpoint the metadata is
+   * refused (`insecure_endpoint`).
+   */
+  readonly requireHttps?: boolean;
+}
+
+const isHttps = (url: string): boolean => url.startsWith("https://");
+
+/**
+ * The metadata without its plain-http endpoints (production): an http SingleSignOnService or
+ * SingleLogoutService counts as absent. `null` when no https SSO endpoint is left, so the login
+ * method cannot be used.
+ */
+export function restrictToHttps(metadata: IdpMetadata): IdpMetadata | null {
+  const sso = {
+    redirect:
+      metadata.sso.redirect !== null && isHttps(metadata.sso.redirect)
+        ? metadata.sso.redirect
+        : null,
+    post: metadata.sso.post !== null && isHttps(metadata.sso.post) ? metadata.sso.post : null,
+  };
+  if (sso.redirect === null && sso.post === null) return null;
+  const slo = (endpoint: IdpMetadata["slo"]["redirect"]): IdpMetadata["slo"]["redirect"] =>
+    endpoint !== null && isHttps(endpoint.location) && isHttps(endpoint.responseLocation)
+      ? endpoint
+      : null;
+  return {
+    ...metadata,
+    sso,
+    slo: { redirect: slo(metadata.slo.redirect), post: slo(metadata.slo.post) },
+  };
 }
 
 function epochOf(value: string | undefined): number | null {
@@ -252,5 +286,10 @@ export async function parseIdpMetadata(
   };
   const parsed = idpMetadataSchema.safeParse(metadata);
   if (!parsed.success) throw new MetadataError("invalid_metadata", "metadata values out of range");
-  return parsed.data;
+  if (options.requireHttps !== true) return parsed.data;
+  const secure = restrictToHttps(parsed.data);
+  if (secure === null) {
+    throw new MetadataError("insecure_endpoint", "no https SSO endpoint (required in production)");
+  }
+  return secure;
 }

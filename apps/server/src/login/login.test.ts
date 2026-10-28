@@ -1,9 +1,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import express from "express";
+import request from "supertest";
 import { afterAll, describe, expect, it } from "vitest";
 import { createLogger } from "../logging/logger.js";
-import { csrfToken, verifyCsrfToken } from "./csrf.js";
+import { csrfGuard, csrfToken, verifyCsrfToken } from "./csrf.js";
 import { LoginUiShell, localeHints } from "./ui-shell.js";
 
 const logger = createLogger({ level: "silent" });
@@ -30,6 +32,52 @@ describe("CSRF tokens", () => {
     expect(verifyCsrfToken(keys, tenant, "uid-1", old)).toBe(true);
     expect(verifyCsrfToken([keys[0]!], tenant, "uid-1", old)).toBe(false);
     expect(verifyCsrfToken(keys, tenant, "uid-1", "short")).toBe(false);
+  });
+
+  describe("csrfGuard", () => {
+    const origin = "https://login.example.org";
+    const app = express();
+    app.post(
+      "/interaction/:uid/login",
+      csrfGuard({ keys, origin, tenantIdOf: () => tenant }),
+      (_req, res) => {
+        res.json({ ok: true });
+      },
+    );
+    const token = csrfToken(keys, tenant, "uid-1");
+    const post = (headers: Record<string, string>, uid = "uid-1") => {
+      let call = request(app).post(`/interaction/${uid}/login`);
+      for (const [name, value] of Object.entries(headers)) call = call.set(name, value);
+      return call.send("{}");
+    };
+    const json = { "content-type": "application/json" };
+
+    it("passes a same-origin JSON request with the interaction's token", async () => {
+      expect((await post({ ...json, "x-csrf-token": token })).status).toBe(200);
+      expect(
+        (await post({ ...json, "x-csrf-token": token, origin, "sec-fetch-site": "same-origin" }))
+          .status,
+      ).toBe(200);
+    });
+
+    it("refuses other sites, other content types and missing or foreign tokens", async () => {
+      const refused = async (headers: Record<string, string>, uid?: string) => {
+        const res = await post(headers, uid);
+        expect(res.status).toBe(403);
+        expect(res.body).toEqual({ error: "csrf" });
+      };
+      await refused({ ...json });
+      await refused({ ...json, "x-csrf-token": token }, "uid-2");
+      await refused({ ...json, "x-csrf-token": "x" });
+      await refused({ ...json, "x-csrf-token": token, origin: "https://evil.example" });
+      // An opaque origin (sandboxed frame, cross-origin redirect) is not this server.
+      await refused({ ...json, "x-csrf-token": token, origin: "null" });
+      for (const site of ["cross-site", "same-site", "none"]) {
+        await refused({ ...json, "x-csrf-token": token, "sec-fetch-site": site });
+      }
+      await refused({ "content-type": "text/plain", "x-csrf-token": token });
+      await refused({ "content-type": "application/x-www-form-urlencoded", "x-csrf-token": token });
+    });
   });
 });
 

@@ -18,6 +18,18 @@ beforeAll(async () => {
       res.writeHead(302, { location: `http://127.0.0.1:${port}/ok` }).end();
     } else if (req.url === "/loop") {
       res.writeHead(302, { location: "/loop" }).end();
+    } else if (req.url === "/to-other-origin") {
+      res.writeHead(307, { location: `http://127.0.0.1:${port}/echo-credentials` }).end();
+    } else if (req.url === "/to-same-origin") {
+      res.writeHead(307, { location: "/echo-credentials" }).end();
+    } else if (req.url === "/echo-credentials") {
+      res.writeHead(200, { "content-type": "application/json" }).end(
+        JSON.stringify({
+          authorization: req.headers.authorization ?? null,
+          cookie: req.headers.cookie ?? null,
+          accept: req.headers.accept ?? null,
+        }),
+      );
     } else if (req.url === "/big") {
       res.writeHead(200).end("x".repeat(2048));
     } else {
@@ -107,6 +119,22 @@ describe("outbound guard", () => {
       redirect: "manual",
     });
     expect(manual.status).toBe(302);
+  });
+
+  it("drops credentials on a redirect to another origin, and keeps them on the same origin", async () => {
+    const local = guard(["localhost", "127.0.0.1"]);
+    const headers = { authorization: "Basic c2VjcmV0", cookie: "a=b", accept: "application/json" };
+    // localhost and 127.0.0.1 are different origins.
+    const other = await local.fetch(`http://localhost:${port}/to-other-origin`, { headers });
+    expect(await other.json()).toEqual({
+      authorization: null,
+      cookie: null,
+      accept: "application/json",
+    });
+    const same = await local.fetch(`http://localhost:${port}/to-same-origin`, {
+      headers: new Headers(headers),
+    });
+    expect(await same.json()).toEqual(headers);
   });
 
   it("requires https and no private allowlist in production", async () => {
