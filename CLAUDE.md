@@ -691,7 +691,9 @@ number>`.
   error view and a `login.failure` audit event written on its own (never inside a transaction).
 - Upstream ID tokens: openid-client validates iss, aud, exp, nonce and the alg against the
   issuer's metadata, `enableNonRepudiationChecks` verifies the signature against the upstream
-  JWKS, and Portvakt adds an asymmetric-only alg allowlist. Production refuses http issuers.
+  JWKS, and Portvakt adds an asymmetric-only alg allowlist. Production refuses http issuers
+  and http authorization endpoints (browsers go there directly), and uses only the https SSO
+  and SLO endpoints of SAML metadata (`restrictToHttps`, also on cached copies).
 - Login methods authenticate upstream with `client_secret_basic`, `client_secret_post` or
   `private_key_jwt` (a per-login-method ES256 key, encrypted as
   `login_method:<id>:client_private_jwk`, public at `/t/{slug}/federation/{id}/jwks`).

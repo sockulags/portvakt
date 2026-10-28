@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { certificateInfo, generateSelfSignedKeyPair, pemBody } from "../../crypto/x509.js";
 import { SAML_ATTRIBUTES, samlAttributeMappingSchema } from "../../domain/saml.js";
 import { mapSamlAttributes, NAMEID_FORMATS } from "./attributes.js";
-import { MetadataError, parseIdpMetadata } from "./metadata.js";
+import { MetadataError, parseIdpMetadata, restrictToHttps } from "./metadata.js";
 import { signEnveloped } from "./xml.js";
 
 const pair = await generateSelfSignedKeyPair("unit test", 3600);
@@ -87,6 +87,44 @@ describe("IdP metadata", () => {
       "",
     );
     expect(await reasonOf(parseIdpMetadata(noKeys, options()))).toBe("no_signing_certificate");
+  });
+
+  it("keeps only https endpoints when https is required (production)", async () => {
+    const httpIdp = "http://idp.example.test/saml";
+    const httpOnly = entity(IDP).replaceAll(`${IDP}/`, `${httpIdp}/`);
+    // Outside production plain http endpoints are used (local mocks).
+    expect((await parseIdpMetadata(httpOnly, options())).sso.redirect).toBe(`${httpIdp}/sso`);
+    expect(await reasonOf(parseIdpMetadata(httpOnly, options({ requireHttps: true })))).toBe(
+      "insecure_endpoint",
+    );
+
+    // An https SSO endpoint with an http SLO endpoint: the SLO endpoint counts as absent.
+    const mixed = entity(IDP).replace(`${IDP}/slo`, `${httpIdp}/slo`);
+    const secure = await parseIdpMetadata(mixed, options({ requireHttps: true }));
+    expect(secure.sso.redirect).toBe(`${IDP}/sso`);
+    expect(secure.slo).toEqual({ redirect: null, post: null });
+    expect(
+      (await parseIdpMetadata(entity(IDP), options({ requireHttps: true }))).slo.redirect,
+    ).not.toBeNull();
+  });
+
+  it("restricts cached metadata to https endpoints", async () => {
+    const metadata = await parseIdpMetadata(entity(IDP), options());
+    const httpPost = {
+      ...metadata,
+      sso: { redirect: metadata.sso.redirect, post: "http://x.example/sso" },
+    };
+    expect(restrictToHttps(httpPost)?.sso).toEqual({ redirect: `${IDP}/sso`, post: null });
+    const onlyHttp = { ...metadata, sso: { redirect: "http://x.example/sso", post: null } };
+    expect(restrictToHttps(onlyHttp)).toBeNull();
+    const httpResponse = {
+      ...metadata,
+      slo: {
+        redirect: { location: `${IDP}/slo`, responseLocation: "http://x.example/slo" },
+        post: null,
+      },
+    };
+    expect(restrictToHttps(httpResponse)?.slo.redirect).toBeNull();
   });
 });
 

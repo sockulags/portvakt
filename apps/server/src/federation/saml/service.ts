@@ -31,7 +31,7 @@ import type { Repositories } from "../../repositories/index.js";
 import type { SpKeyPair } from "../../repositories/saml.js";
 import { FederationError, type FailureContext, type UpstreamLoginResult } from "../flow.js";
 import { mapSamlAttributes } from "./attributes.js";
-import { MetadataError, parseIdpMetadata, type IdpMetadata } from "./metadata.js";
+import { MetadataError, parseIdpMetadata, restrictToHttps, type IdpMetadata } from "./metadata.js";
 import {
   buildAuthnRequest,
   buildLogoutRequest,
@@ -866,7 +866,17 @@ export class SamlFederation {
         );
         return null;
       }
-      return cache.metadata;
+      if (!config.isProduction) return cache.metadata;
+      // A copy cached before plain-http endpoints were refused in production (inline metadata is
+      // never refreshed): its http endpoints are not used either.
+      const secure = restrictToHttps(cache.metadata);
+      if (secure === null) {
+        this.#log.warn(
+          { loginMethodId: method.id, reason: "insecure_endpoint" },
+          "cached IdP metadata has no https SSO endpoint; the login method is unavailable",
+        );
+      }
+      return secure;
     }
     if (cache.cachedAt !== null || cache.error === "entity_not_found") return null;
     const result = await this.refreshMetadata(method.tenantId, method.id, {
@@ -943,6 +953,7 @@ export class SamlFederation {
       entityId: source.idpEntityId,
       signingCertificate: source.signingCertificate,
       now: new Date(),
+      requireHttps: this.#options.config.isProduction,
     });
   }
 

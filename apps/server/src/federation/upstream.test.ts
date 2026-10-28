@@ -5,7 +5,12 @@ import type { OidcLoginMethod } from "../domain/login-method.js";
 import { createLogger } from "../logging/logger.js";
 import { OutboundGuard } from "../net/outbound.js";
 import type { LoginMethodRepository } from "../repositories/login-methods.js";
-import { classifyUpstreamError, UpstreamClients, UpstreamRecentlyFailedError } from "./upstream.js";
+import {
+  classifyUpstreamError,
+  UpstreamClients,
+  UpstreamMisconfiguredError,
+  UpstreamRecentlyFailedError,
+} from "./upstream.js";
 
 // A local upstream that is down: every request answers 503.
 let hits = 0;
@@ -62,6 +67,41 @@ describe("UpstreamClients discovery failures", () => {
     // Another login method is not affected.
     await upstream.setupFor(method("b2")).catch(() => undefined);
     expect(hits).toBe(2);
+  });
+
+  it("refuses a plain http authorization endpoint of an https issuer in production", async () => {
+    const httpsIssuer = "https://idp.example.test/realm";
+    const discovery = (authorizationEndpoint: string) =>
+      new UpstreamClients({
+        loginMethods,
+        logger: createLogger({ level: "silent" }),
+        production: true,
+        timeoutSeconds: 2,
+        metadataTtlSeconds: 3600,
+        failureCacheSeconds: 0,
+        // The discovery document as the outbound guard would return it.
+        outbound: {
+          fetch: () =>
+            Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  issuer: httpsIssuer,
+                  authorization_endpoint: authorizationEndpoint,
+                  token_endpoint: `${httpsIssuer}/token`,
+                  jwks_uri: `${httpsIssuer}/jwks`,
+                }),
+                { status: 200, headers: { "content-type": "application/json" } },
+              ),
+            ),
+        } as unknown as OutboundGuard,
+      });
+    const httpsMethod = { ...method("d4"), issuer: httpsIssuer } as OidcLoginMethod;
+    const refused = await discovery("http://idp.example.test/realm/auth")
+      .setupFor(httpsMethod)
+      .catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(UpstreamMisconfiguredError);
+    const setup = await discovery(`${httpsIssuer}/auth`).setupFor(httpsMethod);
+    expect(setup.metadata.authorization_endpoint).toBe(`${httpsIssuer}/auth`);
   });
 
   it("asks again every time with the failure cache disabled", async () => {

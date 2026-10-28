@@ -48,7 +48,9 @@ The redirect URI to register at the upstream is
 method is created). Upstream ID tokens are validated fully (issuer, audience, expiry, nonce,
 signature against the upstream JWKS with asymmetric algorithms only); every request to the
 upstream goes through the outbound guard (no private addresses, https, bounded redirects and
-sizes). Code: [`federation/upstream.ts`](../apps/server/src/federation/upstream.ts).
+sizes). In production the discovered `authorization_endpoint`, where browsers are sent, must be
+https too (otherwise the method fails as `upstream_error`). Code:
+[`federation/upstream.ts`](../apps/server/src/federation/upstream.ts).
 
 ### Entra ID (employees)
 
@@ -164,6 +166,7 @@ or let the federation pick up the metadata; then `sp-keys/rotate`.
 | `metadataUrl` / `metadataXml` | Where the IdP's metadata comes from (a federation aggregate or the IdP's own); exactly one                                                        |
 | `metadataSigningCertificate`  | Certificate the metadata must be signed with (required for a URL in production unless `allowUnsignedMetadata`, which is audited)                  |
 | `metadataRefreshSeconds`      | Refresh interval (default 3600); logins never fetch metadata while a cached copy is valid; stale metadata fails closed                            |
+| (endpoints)                   | In production only https SSO and SLO endpoints of the metadata are used; without an https SSO endpoint it is refused (`insecure_endpoint`)        |
 | `requestedLoa`                | RequestedAuthnContext URIs, for example `http://id.elegnamnden.se/loa/1.0/loa3`                                                                   |
 | `authnContextComparison`      | `exact` (the framework's rule; default) or `minimum` (IdPs outside the framework)                                                                 |
 | `entityCategories`            | Service entity categories in the SP metadata, for example `http://id.elegnamnden.se/ec/1.0/loa3-pnr`                                              |
