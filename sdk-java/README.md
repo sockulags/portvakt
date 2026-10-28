@@ -225,7 +225,8 @@ String token = clientCredentials.forAudience("archive-service").getToken();
 
 Tokens (`resource=urn:portvakt:app:{audience}`) are cached until shortly before they expire (10%
 of the lifetime, at least 30 s) and fetched once at a time. A network error, timeout or 5xx is
-`PortvaktUnavailableException`; a 429 or the OAuth error `temporarily_unavailable` is
+`PortvaktUnavailableException`; a 429 or the OAuth error `temporarily_unavailable` (with any
+status) is
 `PortvaktRetryLaterException` (a `PortvaktUnavailableException` with Portvakt's `Retry-After`);
 any other refusal is a `PortvaktException` with Portvakt's OAuth error code (502). The target must be enabled in the same tenant and listed in the calling application's
 `serviceAudiences` in Portvakt (empty by default: no service tokens for other applications).

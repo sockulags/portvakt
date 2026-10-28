@@ -57,6 +57,18 @@ class ClientCredentialsTest {
     assertThatThrownBy(tokens::getToken)
         .isInstanceOf(PortvaktRetryLaterException.class)
         .satisfies(error -> assertThat(((PortvaktRetryLaterException) error).retryAfter()).isNull());
+    // Also from a 5xx: the body still says temporarily_unavailable, and Retry-After is kept.
+    op.tokenErrorStatus = 503;
+    op.tokenErrorRetryAfter = "5";
+    assertThatThrownBy(tokens::getToken)
+        .isInstanceOf(PortvaktRetryLaterException.class)
+        .satisfies(
+            error -> assertThat(((PortvaktRetryLaterException) error).retryAfter()).isEqualTo(Duration.ofSeconds(5)));
+    // Any other 5xx stays an outage without Retry-After.
+    op.tokenError = "server_error";
+    assertThatThrownBy(tokens::getToken)
+        .isInstanceOf(PortvaktUnavailableException.class)
+        .isNotInstanceOf(PortvaktRetryLaterException.class);
     op.tokenError = null;
     assertThat(tokens.getToken()).startsWith("token-");
   }
