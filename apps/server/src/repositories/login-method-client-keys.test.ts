@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createKeyRing } from "../crypto/keyring.js";
 import { createLoginMethod, createTenant } from "../testing/fixtures.js";
@@ -70,13 +71,18 @@ describe.skipIf(testDb === undefined)("login method client key rotation", () => 
     ).toEqual([next]);
   });
 
-  it("refuses SAML and unknown methods and a negative overlap", async () => {
+  it("refuses a method of another tenant, an unknown one and a negative overlap", async () => {
     const tenant = await createTenant(repos, "client-keys-refused");
     const method = await createLoginMethod(repos, tenant.id);
     const other = await createTenant(repos, "client-keys-other");
     expect(await repos.loginMethods.listClientKeys(other.id, method.id)).toBeNull();
     await expect(
       repos.loginMethods.prepareClientKeyRotation(other.id, method.id),
+    ).rejects.toBeInstanceOf(NotFoundError);
+    expect(await repos.loginMethods.rotateClientKey(other.id, method.id)).toBeNull();
+    expect(await repos.loginMethods.listClientKeys(tenant.id, randomUUID())).toBeNull();
+    await expect(
+      repos.loginMethods.prepareClientKeyRotation(tenant.id, randomUUID()),
     ).rejects.toBeInstanceOf(NotFoundError);
     await expect(
       repos.loginMethods.rotateClientKey(tenant.id, method.id, -1),

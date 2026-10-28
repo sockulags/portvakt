@@ -867,7 +867,8 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
   (`federation/saml/upstream-session-rewrap.ts`, `reindexUpstreamSession`; the record is updated
   only while its `upstreams` are unchanged, and the index rows are replaced with the record's
   expiry), so MASTER_KEY_PREVIOUS can go right after it; only in-flight logins and logouts
-  (federation states, logout states: at most INTERACTION_TTL) still hold old-key values.
+  (federation states, at most INTERACTION_TTL; SAML logout states, 10 minutes) still hold
+  old-key values.
 - The init script in `deploy/postgres-init` only runs on a fresh volume. To recreate the databases:
   `docker compose -f deploy/docker-compose.dev.yml down -v` then `npm run db:up`.
 - Person and service access tokens are told apart by the claims the server issues: person tokens

@@ -193,6 +193,21 @@ describe.skipIf(ts === undefined)("admin sign-in through upstream IdPs", () => {
       "signing:active",
       "signing:previous",
     ]);
+    // Upstream client keys (private_key_jwt) exist for OIDC methods only.
+    expect(rotated.body).not.toHaveProperty("oidc");
+    for (const step of ["prepare", "rotate"]) {
+      const refused = await adminCall(
+        ts!,
+        platform,
+        "POST",
+        `${path}/${method.id}/client-key/${step}`,
+        { ifMatch: rotated.body.etag },
+      );
+      expect(refused.status, step).toBe(400);
+    }
+    expect(
+      (await fetch(`${ts!.baseUrl}/t/${tenant.slug}/federation/${method.id}/jwks`)).status,
+    ).toBe(404);
     const events = await ts!.db.repos.audit.query(
       { tenantId: tenant.id },
       { subjectId: method.id },

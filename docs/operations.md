@@ -381,9 +381,9 @@ One ES256 key set signs for every tenant; private keys are encrypted with MASTER
    rows IdP-initiated logout looks up), and prints counts per kind (`upstreamSessions` for the
    SAML sessions). Running it again reports zero.
 3. Remove the old key from `MASTER_KEY_PREVIOUS` and roll out again. Only logins and logouts in
-   flight while the re-wrap ran still hold values under the old key (pending upstream requests
-   and SAML logout states, at most `INTERACTION_TTL`, 15 minutes by default): wait that long
-   after step 2 if they must not fail (a failed one shows an error and the person signs in
+   flight while the re-wrap ran still hold values under the old key (pending upstream requests,
+   at most `INTERACTION_TTL`, 15 minutes by default, and SAML logout states, 10 minutes): wait
+   the longer of the two after step 2 if they must not fail (a failed one shows an error and the person signs in
    again).
 
 ## Backups and restore
