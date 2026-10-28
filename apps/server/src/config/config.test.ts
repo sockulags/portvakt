@@ -7,6 +7,7 @@ import { parseDurationSeconds } from "./duration.js";
 import { report } from "./report.js";
 import {
   checkConfig,
+  databaseUrlVerifiesTls,
   ConfigError,
   DEFAULT_ACR_RANKING,
   DEV_COOKIE_KEYS,
@@ -28,7 +29,7 @@ const strongKey = () => randomBytes(32).toString("base64");
 const productionEnv = {
   NODE_ENV: "production",
   PUBLIC_URL: "https://login.example.org",
-  DATABASE_URL: "postgres://portvakt_app:s3cure-Pa55@db.internal:5432/portvakt",
+  DATABASE_URL: "postgres://portvakt_app:s3cure-Pa55@db.internal:5432/portvakt?sslmode=verify-full",
   MASTER_KEY: strongKey(),
   COOKIE_KEYS: `${randomBytes(32).toString("base64url")},${randomBytes(32).toString("base64url")}`,
   METRICS_TOKEN: randomBytes(32).toString("base64url"),
@@ -36,7 +37,8 @@ const productionEnv = {
 };
 
 /** The owner role's URL: only the migration, prune and re-wrap jobs (and MIGRATE_ON_START) get it. */
-const OWNER_URL = "postgres://portvakt_owner:an0ther-Pa55@db.internal:5432/portvakt";
+const OWNER_URL =
+  "postgres://portvakt_owner:an0ther-Pa55@db.internal:5432/portvakt?sslmode=verify-full";
 /** The environment of the owner-role jobs in production. */
 const jobEnv = { ...productionEnv, MIGRATION_DATABASE_URL: OWNER_URL };
 
@@ -674,5 +676,130 @@ describe("config:check report", () => {
     // Never a value.
     expect(bad.text).not.toContain(productionEnv.METRICS_TOKEN);
     expect(bad.text).not.toContain(productionEnv.MASTER_KEY);
+  });
+});
+
+describe("first production deployment: settings that would fail later", () => {
+  const loa2 = "http://id.elegnamnden.se/loa/1.0/loa2";
+  const loa3 = "http://id.elegnamnden.se/loa/1.0/loa3";
+  const bootstrapEnv = {
+    ...productionEnv,
+    BOOTSTRAP_IDP_ISSUER:
+      "https://login.microsoftonline.com/5b0f6a0e-1c2d-4e3f-8a9b-0c1d2e3f4a5b/v2.0",
+    BOOTSTRAP_IDP_CLIENT_ID: "portvakt",
+    BOOTSTRAP_ADMIN_SUBJECT: "admin-oid",
+    ADMIN_PUBLIC_URL: "https://admin.example.org",
+    ADMIN_CLIENT_SECRET: randomBytes(32).toString("base64url"),
+  };
+
+  it("refuses a multi-tenant bootstrap issuer, which the bootstrap cannot restrict", () => {
+    expect(loadConfig(bootstrapEnv).bootstrap.idp?.issuer).toBe(bootstrapEnv.BOOTSTRAP_IDP_ISSUER);
+    for (const segment of ["common", "organizations", "consumers"]) {
+      expect(
+        issuesOf({
+          ...bootstrapEnv,
+          BOOTSTRAP_IDP_ISSUER: `https://login.microsoftonline.com/${segment}/v2.0`,
+        }),
+      ).toContainEqual(expect.stringMatching(/^BOOTSTRAP_IDP_ISSUER: a multi-tenant issuer/));
+    }
+  });
+
+  it("requires the upstream acr claim when the bootstrap method asserts a ranked level", () => {
+    const ranked = { ...bootstrapEnv, ADMIN_MIN_ACR: loa2, BOOTSTRAP_IDP_ACR: loa2 };
+    expect(issuesOf(ranked)).toEqual([
+      "BOOTSTRAP_IDP_ACR_CLAIM: required when BOOTSTRAP_IDP_ACR is a level of ACR_RANKING (the upstream must prove it)",
+    ]);
+    expect(loadConfig({ ...ranked, BOOTSTRAP_IDP_ACR_CLAIM: "acr" }).bootstrap.idp).toMatchObject({
+      acr: loa2,
+      claims: { acr: "acr" },
+    });
+    // An unranked (self-asserted) level, the default, needs no acr claim.
+    expect(issuesOf({ ...bootstrapEnv, ADMIN_MIN_ACR: undefined })).toEqual([]);
+  });
+
+  it("warns when the bootstrap administrator could not pass ADMIN_MIN_ACR", () => {
+    const tooLow = /^BOOTSTRAP_IDP_ACR: ranks below ADMIN_MIN_ACR/;
+    // The default BOOTSTRAP_IDP_ACR is unranked; productionEnv sets ADMIN_MIN_ACR to loa3.
+    expect(loadConfig(bootstrapEnv).warnings).toEqual([expect.stringMatching(tooLow)]);
+    expect(
+      loadConfig({ ...bootstrapEnv, BOOTSTRAP_IDP_ACR: loa2, BOOTSTRAP_IDP_ACR_CLAIM: "acr" })
+        .warnings,
+    ).toEqual([expect.stringMatching(tooLow)]);
+    expect(
+      loadConfig({ ...bootstrapEnv, BOOTSTRAP_IDP_ACR: loa3, BOOTSTRAP_IDP_ACR_CLAIM: "acr" })
+        .warnings,
+    ).toEqual([]);
+    // Without a bootstrap the variables are not read: no warning.
+    expect(loadConfig(productionEnv).warnings).toEqual([]);
+  });
+
+  it("refuses a SAML metadata check interval that outlasts the metadata's maximum age", () => {
+    const message = "SAML_METADATA_CHECK_INTERVAL: must be shorter than SAML_METADATA_MAX_AGE";
+    expect(issuesOf({ ...devEnv, SAML_METADATA_CHECK_INTERVAL: "7d" })).toContain(message);
+    expect(
+      issuesOf({ ...devEnv, SAML_METADATA_CHECK_INTERVAL: "1h", SAML_METADATA_MAX_AGE: "30m" }),
+    ).toContain(message);
+    expect(() =>
+      loadConfig({ ...devEnv, SAML_METADATA_CHECK_INTERVAL: "1h", SAML_METADATA_MAX_AGE: "1d" }),
+    ).not.toThrow();
+  });
+
+  it("warns about logs that hide errors and a shutdown without a drain delay", () => {
+    for (const level of ["silent", "fatal"]) {
+      expect(loadConfig({ ...productionEnv, LOG_LEVEL: level }).warnings).toEqual([
+        expect.stringMatching(/^LOG_LEVEL: silent and fatal hide errors/),
+      ]);
+    }
+    expect(loadConfig({ ...productionEnv, LOG_LEVEL: "warn" }).warnings).toEqual([]);
+    expect(loadConfig({ ...productionEnv, SHUTDOWN_DRAIN_DELAY: "0" }).warnings).toEqual([
+      expect.stringMatching(/^SHUTDOWN_DRAIN_DELAY: 0 closes the listener/),
+    ]);
+    expect(loadConfig({ ...devEnv, SHUTDOWN_DRAIN_DELAY: "0" }).warnings).toEqual([]);
+  });
+
+  it("warns about database connections without verified TLS", () => {
+    const plain = "postgres://portvakt_app:s3cure-Pa55@db.internal:5432/portvakt";
+    const { warnings } = loadConfig(
+      {
+        ...jobEnv,
+        DATABASE_URL: plain,
+        MIGRATION_DATABASE_URL: OWNER_URL.replace("verify-full", "no-verify"),
+      },
+      { requireMigrationUrl: true },
+    );
+    expect(warnings).toEqual([
+      expect.stringMatching(/^DATABASE_URL: the database connection is not verified TLS/),
+      expect.stringMatching(/^MIGRATION_DATABASE_URL: the database connection is not verified TLS/),
+    ]);
+    // Names only, never the URL or its password.
+    expect(warnings.join("\n")).not.toContain("s3cure-Pa55");
+    // PGSSLMODE applies when the URL says nothing about TLS.
+    expect(
+      loadConfig({ ...productionEnv, DATABASE_URL: plain, PGSSLMODE: "verify-full" }).warnings,
+    ).toEqual([]);
+  });
+
+  it.each([
+    ["postgres://u:p@db:5432/portvakt?sslmode=verify-full", true],
+    ["postgres://u:p@db:5432/portvakt?sslmode=verify-full&sslrootcert=/etc/ca.pem", true],
+    ["postgres://u:p@db:5432/portvakt?sslmode=require", true],
+    ["postgres://u:p@db:5432/portvakt?sslmode=require&uselibpqcompat=true", false],
+    ["postgres://u:p@db:5432/portvakt?sslmode=verify-full&uselibpqcompat=true", true],
+    ["postgres://u:p@db:5432/portvakt?sslmode=disable", false],
+    ["postgres://u:p@db:5432/portvakt?sslmode=no-verify", false],
+    ["postgres://u:p@db:5432/portvakt?ssl=true", true],
+    ["postgres://u:p@db:5432/portvakt?ssl=0", false],
+    ["postgres://u:p@db:5432/portvakt", false],
+    ["postgres:///portvakt?host=/var/run/postgresql", true],
+  ])("databaseUrlVerifiesTls(%s) is %s", (url, expected) => {
+    expect(databaseUrlVerifiesTls(url)).toBe(expected);
+  });
+
+  it("databaseUrlVerifiesTls falls back to PGSSLMODE only without TLS settings in the URL", () => {
+    expect(databaseUrlVerifiesTls("postgres://u:p@db/portvakt", "verify-full")).toBe(true);
+    expect(databaseUrlVerifiesTls("postgres://u:p@db/portvakt", "disable")).toBe(false);
+    expect(databaseUrlVerifiesTls("postgres://u:p@db/portvakt?sslmode=disable", "require")).toBe(
+      false,
+    );
   });
 });

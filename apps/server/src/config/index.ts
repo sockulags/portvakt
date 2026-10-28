@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  isMultiTenantIssuer,
   LOGIN_METHOD_KINDS,
   PIN_REPRESENTATION_MIN_ACR,
   type LoginMethodKind,
@@ -699,7 +700,10 @@ function reusedSecretIssues(env: Env): string[] {
  * Settings that are allowed in production but deserve an operator's attention (printed by
  * `npm run config:check` and logged at start).
  */
-function productionWarnings(env: Env, options: { readonly ownerCli: boolean }): string[] {
+function productionWarnings(
+  env: Env,
+  options: { readonly ownerCli: boolean; readonly pgSslMode: string | undefined },
+): string[] {
   const warnings: string[] = [];
   if (env.TRUST_PROXY === true) {
     warnings.push(
@@ -708,6 +712,35 @@ function productionWarnings(env: Env, options: { readonly ownerCli: boolean }): 
   }
   if (env.LOG_LEVEL === "debug" || env.LOG_LEVEL === "trace") {
     warnings.push("LOG_LEVEL: debug and trace are verbose; use info in production");
+  } else if (env.LOG_LEVEL === "silent" || env.LOG_LEVEL === "fatal") {
+    warnings.push(
+      "LOG_LEVEL: silent and fatal hide errors (failed upstream requests, failed jobs); use info in production",
+    );
+  }
+  if (env.SHUTDOWN_DRAIN_DELAY === 0) {
+    warnings.push(
+      "SHUTDOWN_DRAIN_DELAY: 0 closes the listener at SIGTERM, so requests a load balancer still routes to the replica fail",
+    );
+  }
+  for (const [name, value] of [
+    ["DATABASE_URL", env.DATABASE_URL],
+    ["MIGRATION_DATABASE_URL", env.MIGRATION_DATABASE_URL],
+  ] as const) {
+    if (value !== undefined && !databaseUrlVerifiesTls(value, options.pgSslMode)) {
+      warnings.push(
+        `${name}: the database connection is not verified TLS (set sslmode=verify-full, with sslrootcert for a private CA); acceptable only on a host-local network`,
+      );
+    }
+  }
+  if (
+    env.ADMIN_MIN_ACR !== undefined &&
+    env.BOOTSTRAP_IDP_ISSUER !== undefined &&
+    env.ACR_RANKING.indexOf(env.BOOTSTRAP_IDP_ACR ?? "") <
+      env.ACR_RANKING.indexOf(env.ADMIN_MIN_ACR)
+  ) {
+    warnings.push(
+      "BOOTSTRAP_IDP_ACR: ranks below ADMIN_MIN_ACR (or is unranked), so the bootstrap administrator's tokens are refused by the admin API (acr_too_low)",
+    );
   }
   for (const variable of Object.keys(RATE_LIMIT_ENV) as (keyof typeof RATE_LIMIT_ENV)[]) {
     if (env[variable] === null) {
@@ -734,6 +767,31 @@ function productionWarnings(env: Env, options: { readonly ownerCli: boolean }): 
     );
   }
   return warnings;
+}
+
+/**
+ * Whether `pg` verifies the database server's certificate for this URL: `sslmode=verify-full`
+ * (or `prefer`, `require` and `verify-ca`, which `pg` treats as verify-full unless
+ * `uselibpqcompat=true`), or `ssl=true`. A Unix socket needs no TLS. Without any TLS setting in
+ * the URL, `pg` falls back to PGSSLMODE (`pgSslMode`). `disable`, `no-verify` and no setting at
+ * all do not verify.
+ */
+export function databaseUrlVerifiesTls(value: string, pgSslMode?: string): boolean {
+  if (!URL.canParse(value)) return true; // reported as an issue by resolveDatabase
+  const url = new URL(value);
+  const params = url.searchParams;
+  const host = params.get("host") ?? decodeURIComponent(url.hostname);
+  if (host.startsWith("/")) return true;
+  const libpq = params.get("uselibpqcompat") === "true";
+  const verifies = (mode: string): boolean =>
+    mode === "verify-full" ||
+    (!libpq && (mode === "prefer" || mode === "require" || mode === "verify-ca"));
+  const mode = params.get("sslmode")?.toLowerCase();
+  if (mode !== undefined) return verifies(mode);
+  const ssl = params.get("ssl")?.toLowerCase();
+  if (ssl !== undefined) return ssl === "true" || ssl === "1";
+  const fallback = pgSslMode?.trim().toLowerCase();
+  return fallback !== undefined && fallback !== "" && verifies(fallback);
 }
 
 /** The RATE_LIMIT_* variable of each limit. */
@@ -802,9 +860,26 @@ function bootstrapConfig(env: Env, issues: string[]): Config["bootstrap"] {
     if (env.BOOTSTRAP_IDP_ACR_CLAIM === undefined) {
       issues.push("BOOTSTRAP_IDP_ACR_CLAIM: required with BOOTSTRAP_ADMIN_PIN");
     }
+  } else if (
+    env.BOOTSTRAP_IDP_ACR !== undefined &&
+    env.ACR_RANKING.includes(env.BOOTSTRAP_IDP_ACR) &&
+    env.BOOTSTRAP_IDP_ACR_CLAIM === undefined
+  ) {
+    // A login method asserting a ranked level must map the upstream acr (the repositories refuse
+    // it at write time), so the bootstrap would fail at the first start.
+    issues.push(
+      "BOOTSTRAP_IDP_ACR_CLAIM: required when BOOTSTRAP_IDP_ACR is a level of ACR_RANKING (the upstream must prove it)",
+    );
   }
   if (env.BOOTSTRAP_IDP_ISSUER !== undefined) {
-    parseHttpUrl(env.BOOTSTRAP_IDP_ISSUER, "BOOTSTRAP_IDP_ISSUER", issues);
+    const issuer = parseHttpUrl(env.BOOTSTRAP_IDP_ISSUER, "BOOTSTRAP_IDP_ISSUER", issues);
+    // A multi-tenant issuer needs allowedUpstreamTenants, which the bootstrap cannot set: the
+    // repositories would refuse the login method at the first start.
+    if (issuer !== undefined && isMultiTenantIssuer(env.BOOTSTRAP_IDP_ISSUER)) {
+      issues.push(
+        "BOOTSTRAP_IDP_ISSUER: a multi-tenant issuer (common, organizations, consumers) cannot be bootstrapped; use the issuer of your own Entra ID tenant (https://login.microsoftonline.com/{tenant id}/v2.0)",
+      );
+    }
   }
   const claimVariables = [
     ["BOOTSTRAP_IDP_SUBJECT_CLAIM", env.BOOTSTRAP_IDP_SUBJECT_CLAIM],
@@ -902,7 +977,10 @@ export function loadConfig(
   const env = parsed.data;
   const issues: string[] = [];
   const isProduction = env.NODE_ENV === "production";
-  const warningOptions = { ownerCli: options.requireMigrationUrl === true };
+  const warningOptions = {
+    ownerCli: options.requireMigrationUrl === true,
+    pgSslMode: source.PGSSLMODE,
+  };
 
   const publicUrlValue =
     env.PUBLIC_URL ?? (isProduction ? undefined : `http://localhost:${env.PORT}`);
@@ -939,6 +1017,11 @@ export function loadConfig(
   }
   if (env.KEY_MANUAL_PUBLISH_AHEAD >= env.KEY_ROTATION_INTERVAL) {
     issues.push("KEY_MANUAL_PUBLISH_AHEAD: must be shorter than KEY_ROTATION_INTERVAL");
+  }
+  // Cached SAML metadata without validUntil fails closed SAML_METADATA_MAX_AGE after its last
+  // successful refresh, and refreshes only happen at these checks.
+  if (env.SAML_METADATA_CHECK_INTERVAL >= env.SAML_METADATA_MAX_AGE) {
+    issues.push("SAML_METADATA_CHECK_INTERVAL: must be shorter than SAML_METADATA_MAX_AGE");
   }
   // Node refuses a headers timeout above the request timeout.
   if (env.HTTP_HEADERS_TIMEOUT > env.HTTP_REQUEST_TIMEOUT) {
