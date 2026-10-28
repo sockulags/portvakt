@@ -811,12 +811,14 @@ export class SamlFederation {
       return { kind: "refused", status: 400 };
     }
     const keys = this.#options.keys;
+    // An empty SessionIndex names no session (as at login, where it is not stored).
+    const sessionIndexes = message.sessionIndexes.filter((index) => index !== "");
     const ended = await tenantProvider.loginState.endSessionsOfUpstream(
       method.id,
       nameIdIndexCandidates(keys, method.id, message.nameId),
-      message.sessionIndexes.length === 0
+      sessionIndexes.length === 0
         ? undefined
-        : message.sessionIndexes.flatMap((index) => sessionIndexCandidates(keys, method.id, index)),
+        : sessionIndexes.flatMap((index) => sessionIndexCandidates(keys, method.id, index)),
     );
     this.#logouts.inc({ direction: "idp_initiated", outcome: "success" });
     await this.#options.auditLog.record({

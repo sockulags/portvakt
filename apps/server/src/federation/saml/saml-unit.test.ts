@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { createKeyRing } from "../../crypto/keyring.js";
 import { certificateInfo, generateSelfSignedKeyPair, pemBody } from "../../crypto/x509.js";
 import { SAML_ATTRIBUTES, samlAttributeMappingSchema } from "../../domain/saml.js";
 import { mapSamlAttributes, NAMEID_FORMATS } from "./attributes.js";
 import { MetadataError, parseIdpMetadata, restrictToHttps } from "./metadata.js";
+import {
+  nameIdIndexCandidates,
+  sealUpstreamSession,
+  sessionIndexCandidates,
+  unsealUpstreamSession,
+} from "./upstream-session.js";
 import { signEnveloped } from "./xml.js";
 
 const pair = await generateSelfSignedKeyPair("unit test", 3600);
@@ -221,5 +228,50 @@ describe("SP certificates", () => {
     expect(info.keyType).toBe("rsa");
     expect(info.notAfter.getTime()).toBeGreaterThan(Date.now());
     expect(pair.privateKey).toContain("BEGIN PRIVATE KEY");
+  });
+});
+
+describe("upstream SAML sessions", () => {
+  const keys = createKeyRing({ current: Buffer.alloc(32, 7), previous: [] });
+  const methodId = "7d0b5a52-6a43-4f4e-9b8a-0f1d2c3b4a59";
+
+  it("seals a session whose optional values are empty attributes as if they were absent", () => {
+    // IdPs may send NameQualifier="" or SessionIndex="": the login must not fail on it.
+    const session = sealUpstreamSession(keys, methodId, {
+      nameId: "pseudonym-1",
+      nameIdFormat: "",
+      nameQualifier: "",
+      spNameQualifier: "",
+      sessionIndex: "",
+    });
+    expect(session.sessionIndexIndex).toBeUndefined();
+    expect(session.nameIdIndex).toBe(nameIdIndexCandidates(keys, methodId, "pseudonym-1")[0]);
+    expect(unsealUpstreamSession(keys, methodId, session)).toEqual({
+      nameId: "pseudonym-1",
+      nameIdFormat: undefined,
+      nameQualifier: undefined,
+      spNameQualifier: undefined,
+      sessionIndex: undefined,
+    });
+  });
+
+  it("keeps the values that are present, sealed to the login method", () => {
+    const session = sealUpstreamSession(keys, methodId, {
+      nameId: "pseudonym-2",
+      nameIdFormat: NAMEID_FORMATS.persistent,
+      nameQualifier: IDP,
+      spNameQualifier: undefined,
+      sessionIndex: "s-1",
+    });
+    expect(session.sealed).not.toContain("pseudonym-2");
+    expect(session.sessionIndexIndex).toBe(sessionIndexCandidates(keys, methodId, "s-1")[0]);
+    expect(unsealUpstreamSession(keys, methodId, session)).toMatchObject({
+      nameId: "pseudonym-2",
+      nameQualifier: IDP,
+      sessionIndex: "s-1",
+    });
+    expect(() =>
+      unsealUpstreamSession(keys, "8d0b5a52-6a43-4f4e-9b8a-0f1d2c3b4a59", session),
+    ).toThrow();
   });
 });

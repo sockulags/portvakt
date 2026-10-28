@@ -26,27 +26,35 @@ const nameIdValue = (loginMethodId: string, nameId: string): string =>
 const sessionIndexValue = (loginMethodId: string, sessionIndex: string): string =>
   `${loginMethodId}:session:${sessionIndex}`;
 
+/** An optional value of the assertion; an empty attribute (`SPNameQualifier=""`) is absent. */
+const present = (value: string | undefined): string | undefined =>
+  value === undefined || value === "" ? undefined : value;
+
 export function sealUpstreamSession(
   keys: KeyRing,
   loginMethodId: string,
   subject: LogoutSubject,
 ): UpstreamSession {
+  const nameIdFormat = present(subject.nameIdFormat);
+  const nameQualifier = present(subject.nameQualifier);
+  const spNameQualifier = present(subject.spNameQualifier);
+  const sessionIndex = present(subject.sessionIndex);
   const sealed = sealedSchema.parse({
     nameId: subject.nameId,
-    ...(subject.nameIdFormat === undefined ? {} : { nameIdFormat: subject.nameIdFormat }),
-    ...(subject.nameQualifier === undefined ? {} : { nameQualifier: subject.nameQualifier }),
-    ...(subject.spNameQualifier === undefined ? {} : { spNameQualifier: subject.spNameQualifier }),
-    ...(subject.sessionIndex === undefined ? {} : { sessionIndex: subject.sessionIndex }),
+    ...(nameIdFormat === undefined ? {} : { nameIdFormat }),
+    ...(nameQualifier === undefined ? {} : { nameQualifier }),
+    ...(spNameQualifier === undefined ? {} : { spNameQualifier }),
+    ...(sessionIndex === undefined ? {} : { sessionIndex }),
   });
   return {
     protocol: "saml",
     nameIdIndex: keys.index.compute("saml", nameIdValue(loginMethodId, subject.nameId)).index,
-    ...(subject.sessionIndex === undefined
+    ...(sessionIndex === undefined
       ? {}
       : {
           sessionIndexIndex: keys.index.compute(
             "saml",
-            sessionIndexValue(loginMethodId, subject.sessionIndex),
+            sessionIndexValue(loginMethodId, sessionIndex),
           ).index,
         }),
     sealed: keys.secrets.encrypt(JSON.stringify(sealed), context(loginMethodId)),
