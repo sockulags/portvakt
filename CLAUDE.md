@@ -819,8 +819,8 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
   userinfo, downstream client `jwks_uri`) go through `net/outbound.ts`: the connection's DNS
   lookup refuses loopback, private, link-local (169.254.169.254), unique-local, unspecified,
   multicast, IPv4-compatible (::/96) and NAT64/6to4 (64:ff9b::/96, 64:ff9b:1::/48, 2002::/16) addresses (also after DNS rebinding), literal IP hosts are checked first, redirects are
-  followed by hand (3 hops, each checked; Authorization and Cookie are dropped on a hop to
-  another origin), bodies are capped, and production requires https.
+  followed by hand (3 hops, each checked; Authorization, Proxy-Authorization and Cookie are
+  dropped on a hop to another origin), bodies are capped, and production requires https.
   The guard uses `undici` (a direct dependency, `~7.29.1`) for its `Agent` and `fetch`, so the
   connect-time lookup does not depend on the undici version bundled in Node.
   Development and tests list exceptions in ALLOW_PRIVATE_UPSTREAM_HOSTS (refused in production);

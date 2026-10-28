@@ -299,7 +299,7 @@ export class UpstreamClients {
     if (
       this.#options.production &&
       (typeof authorizationEndpoint !== "string" ||
-        new URL(authorizationEndpoint).protocol !== "https:")
+        URL.parse(authorizationEndpoint)?.protocol !== "https:")
     ) {
       throw new UpstreamMisconfiguredError(
         "upstream authorization endpoint must use https in production",

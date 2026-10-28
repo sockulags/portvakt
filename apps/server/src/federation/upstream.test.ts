@@ -100,6 +100,11 @@ describe("UpstreamClients discovery failures", () => {
       .setupFor(httpsMethod)
       .catch((error: unknown) => error);
     expect(refused).toBeInstanceOf(UpstreamMisconfiguredError);
+    // A malformed endpoint is a misconfiguration too, not an unclassified TypeError.
+    const malformed = await discovery("not a url")
+      .setupFor(httpsMethod)
+      .catch((error: unknown) => error);
+    expect(malformed).toBeInstanceOf(UpstreamMisconfiguredError);
     const setup = await discovery(`${httpsIssuer}/auth`).setupFor(httpsMethod);
     expect(setup.metadata.authorization_endpoint).toBe(`${httpsIssuer}/auth`);
   });
