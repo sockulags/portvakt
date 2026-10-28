@@ -307,10 +307,14 @@ function Portal({
   // clicked item: focus moves to the new page's heading (or the content). Not at the first
   // render, and not for the tenant switcher (a select that changes while it is operated).
   const view = `${page}/${location.id ?? ""}`;
-  const shownView = useRef(view);
+  const tenantId = location.tenant;
+  const shown = useRef({ view, tenantId });
   useEffect(() => {
-    if (shownView.current === view) return;
-    shownView.current = view;
+    const previous = shown.current;
+    if (previous.view === view && previous.tenantId === tenantId) return;
+    shown.current = { view, tenantId };
+    // A tenant switch (which also leaves a detail page) keeps focus on the switcher.
+    if (previous.tenantId !== tenantId) return;
     const content = contentRef.current;
     if (content === null) return;
     const heading = content.querySelector<HTMLElement>("h1");
@@ -320,7 +324,7 @@ function Portal({
     }
     if (!heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
     heading.focus();
-  }, [view]);
+  }, [view, tenantId]);
 
   // The design system's navbar and breadcrumbs carry fixed English labels ("Open menu",
   // "Breadcrumb", an empty "Main" navigation since the portal's links live in the sidebar).

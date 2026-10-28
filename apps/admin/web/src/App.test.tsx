@@ -83,6 +83,39 @@ describe("portal navigation", () => {
     expect(document.title).toBe(`${t.nav.pages.persons} – ${t.brand}`);
   });
 
+  it("keeps focus on the tenant switcher when it leaves a detail page", async () => {
+    const system: Tenant = {
+      ...TENANT,
+      id: "0b1c2d3e-4f50-4617-8a9b-0c1d2e3f4a5b",
+      slug: "system",
+    };
+    const other: Tenant = { ...TENANT, id: "1c2d3e4f-5061-4728-9b0c-1d2e3f4a5b6c", slug: "other" };
+    const me: Me = { personId: "p-1", tenant: system, platform: true, roles: ["platform-admin"] };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.endsWith("/auth/session")) return Promise.resolve(json(SIGNED_IN));
+        if (url.endsWith("/api/me")) return Promise.resolve(json(me));
+        if (url.endsWith("/api/tenants")) {
+          return Promise.resolve(json({ items: [system, TENANT, other] }));
+        }
+        return new Promise<Response>(() => undefined);
+      }),
+    );
+    window.history.replaceState(
+      null,
+      "",
+      `/t/system/persons/2d3e4f50-6172-4839-8c1d-2e3f4a5b6c7d?tenant=${TENANT.id}`,
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    const switcher = await screen.findByTestId<HTMLSelectElement>("tenant-switcher");
+    await user.selectOptions(switcher, other.id);
+    await waitFor(() => expect(window.location.search).toBe(`?tenant=${other.id}`));
+    expect(window.location.pathname).toBe("/t/system/persons");
+    expect(document.activeElement).toBe(screen.getByTestId("tenant-switcher"));
+  });
+
   it("offers a skip link to the content as the first stop", async () => {
     stubBff();
     const user = userEvent.setup();
