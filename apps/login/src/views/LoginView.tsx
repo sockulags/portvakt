@@ -1,9 +1,10 @@
-import { Alert, Button, Spinner } from "@portvakt/design-system/components";
+import { Alert, Button } from "@portvakt/design-system/components";
 import { useEffect, useRef, useState } from "react";
 import type { InteractionDetails, LoginApi, LoginChoice, LoginErrorCode } from "../api";
 import { HomeRealmForm, type HomeRealmOutcome } from "../components/HomeRealmForm";
 import { MethodList } from "../components/MethodList";
 import { Page } from "../components/Page";
+import { QuietSpinner } from "../components/QuietSpinner";
 import { format, useI18n } from "../i18n";
 import { ErrorView } from "./ErrorView";
 
@@ -40,6 +41,9 @@ export function LoginView({ api, error, navigate }: LoginViewProps) {
   const [state, setState] = useState<State>({ status: "loading" });
   const [actionError, setActionError] = useState<string | undefined>();
   const statusRef = useRef<HTMLDivElement>(null);
+  // One request at a time: a second click (or Enter in the email field) while the first
+  // is answered would start a second upstream login. A ref, not `disabled`, so focus stays.
+  const pending = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -65,7 +69,7 @@ export function LoginView({ api, error, navigate }: LoginViewProps) {
     return (
       <Page heading={t.signIn.heading} viewKey="loading" testId="login-loading">
         <div className="pv-status" role="status">
-          <Spinner />
+          <QuietSpinner />
           <span>{t.loading}</span>
         </div>
       </Page>
@@ -75,7 +79,7 @@ export function LoginView({ api, error, navigate }: LoginViewProps) {
     return (
       <Page heading={t.redirecting.title} viewKey="redirecting" testId="redirecting">
         <div className="pv-status" role="status" aria-live="polite" tabIndex={-1} ref={statusRef}>
-          <Spinner />
+          <QuietSpinner />
           <span>{t.redirecting.body}</span>
         </div>
       </Page>
@@ -83,7 +87,18 @@ export function LoginView({ api, error, navigate }: LoginViewProps) {
   }
 
   const { details } = state;
-  const choose = async (choice: LoginChoice): Promise<string> => {
+  /** Asks again for the methods (one was disabled meanwhile); the error alert stays. */
+  const refresh = async (): Promise<void> => {
+    const result = await api.details();
+    setState(
+      result.ok
+        ? { status: "ready", details: result.details }
+        : { status: "failed", error: result.error },
+    );
+  };
+  const choose = async (choice: LoginChoice): Promise<string | undefined> => {
+    if (pending.current) return undefined;
+    pending.current = true;
     setActionError(undefined);
     const result = await api.login(choice, details.csrfToken);
     if (result.ok) {
@@ -91,25 +106,33 @@ export function LoginView({ api, error, navigate }: LoginViewProps) {
       navigate(result.redirectTo);
       return "redirecting";
     }
+    if (result.error === "login_method_unavailable") await refresh();
+    pending.current = false;
     return result.error;
   };
   const chooseMethod = (loginMethodId: string): void => {
     void choose({ loginMethodId }).then((outcome) => {
-      if (outcome !== "redirecting") setActionError(outcome);
+      if (outcome !== undefined && outcome !== "redirecting") setActionError(outcome);
     });
   };
   const chooseEmail = async (email: string): Promise<HomeRealmOutcome> => {
     const outcome = await choose({ email });
+    if (outcome === undefined) return "busy";
     if (outcome === "redirecting") return "redirecting";
     if (outcome === "rate_limited") return "rate_limited";
     return outcome === "no_home_realm" ? "not_found" : "failed";
   };
   const cancel = (): void => {
+    if (pending.current) return;
+    pending.current = true;
     void api.abort(details.csrfToken).then((result) => {
       if (result.ok) {
         setState({ status: "redirecting" });
         navigate(result.redirectTo);
-      } else setActionError(result.error);
+      } else {
+        pending.current = false;
+        setActionError(result.error);
+      }
     });
   };
 

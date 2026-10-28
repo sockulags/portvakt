@@ -5,7 +5,8 @@ import { useI18n } from "../i18n";
 /** A plausible email address: something@domain.tld, no spaces. */
 export const isEmail = (value: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 
-export type HomeRealmOutcome = "redirecting" | "not_found" | "rate_limited" | "failed";
+/** `busy`: another login request of the page is still being answered; nothing was sent. */
+export type HomeRealmOutcome = "redirecting" | "not_found" | "rate_limited" | "failed" | "busy";
 
 interface HomeRealmFormProps {
   readonly initialEmail?: string | null;
@@ -38,6 +39,7 @@ export function HomeRealmForm({ initialEmail, onSubmit, disabled = false }: Home
     const outcome = await onSubmit(email.trim());
     if (outcome === "redirecting") return;
     setBusy(false);
+    if (outcome === "busy") return;
     setError(
       outcome === "not_found"
         ? t.hrd.notFound

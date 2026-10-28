@@ -7,7 +7,7 @@ import {
   type IconName,
   type SidebarNavSection,
 } from "@portvakt/design-system/patterns";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiError, createApi, type ApiClient } from "./api";
 import {
   format,
@@ -103,23 +103,37 @@ function LanguageToggle({ i18n }: { readonly i18n: I18n }) {
   );
 }
 
-/** A centred page for the states before the portal itself (sign in, no access). */
+/**
+ * A centred page for the states before the portal itself (sign in, no access). It names the
+ * document after `title`; without a visible heading of its own (`hasHeading`), the title is
+ * also the page's (visually hidden) h1, so every page has one.
+ */
 function Gate({
   i18n,
+  title,
+  hasHeading = false,
   children,
   testId,
 }: {
   readonly i18n: I18n;
+  readonly title: string;
+  readonly hasHeading?: boolean;
   readonly children: ReactNode;
   readonly testId: string;
 }) {
+  useEffect(() => {
+    document.title = `${title} – ${i18n.t.brand}`;
+  }, [title, i18n.t.brand]);
   return (
     <div className="pv-gate" data-testid={testId}>
       <div className="pv-gate-bar">
         <span className="pv-brand">{i18n.t.brand}</span>
         <LanguageToggle i18n={i18n} />
       </div>
-      <main className="pv-gate-main">{children}</main>
+      <main className="pv-gate-main">
+        {!hasHeading && <h1 className="pv-visually-hidden">{title}</h1>}
+        {children}
+      </main>
     </div>
   );
 }
@@ -184,20 +198,20 @@ export function App() {
   let content: ReactNode;
   if (location === undefined || api === undefined) {
     content = (
-      <Gate i18n={i18n} testId="unknown-tenant">
+      <Gate i18n={i18n} title={t.errors.notFound} testId="unknown-tenant">
         <EmptyState icon="alert" title={t.errors.notFound} description={t.auth.unknownTenant} />
       </Gate>
     );
   } else if (boot.state === "loading") {
     content = (
-      <Gate i18n={i18n} testId="booting">
+      <Gate i18n={i18n} title={t.common.loading} testId="booting">
         <Loading />
       </Gate>
     );
   } else if (boot.state === "signed_out") {
     const returnTo = `${window.location.pathname}${window.location.search}`;
     content = (
-      <Gate i18n={i18n} testId="sign-in-page">
+      <Gate i18n={i18n} title={t.auth.signInTitle} hasHeading testId="sign-in-page">
         <h1 className="pv-gate-title">{t.auth.signInTitle}</h1>
         <p className="pv-gate-text">{format(t.auth.signInBody, { tenant: location.slug })}</p>
         <Button
@@ -215,7 +229,7 @@ export function App() {
     );
   } else if (boot.state === "no_access") {
     content = (
-      <Gate i18n={i18n} testId="no-access-page">
+      <Gate i18n={i18n} title={t.auth.noAccessTitle} testId="no-access-page">
         <EmptyState
           icon="alert"
           title={t.auth.noAccessTitle}
@@ -230,7 +244,7 @@ export function App() {
     );
   } else if (boot.state === "error") {
     content = (
-      <Gate i18n={i18n} testId="boot-error">
+      <Gate i18n={i18n} title={t.errors.title} testId="boot-error">
         <ErrorState error={boot.error} onRetry={() => void load(api).then(setBoot)} />
       </Gate>
     );
@@ -280,10 +294,88 @@ function Portal({
   const [menuOpen, setMenuOpen] = useState(false);
   const { location, me } = admin;
   const page = location.page;
+  const portalRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  const drawerId = useId();
 
   useEffect(() => {
     document.title = `${t.nav.pages[page]} – ${t.brand}`;
   }, [page, t]);
+
+  // Navigation without a page load says nothing to screen readers and leaves focus on the
+  // clicked item: focus moves to the new page's heading (or the content). Not at the first
+  // render, and not for the tenant switcher (a select that changes while it is operated).
+  const view = `${page}/${location.id ?? ""}`;
+  const tenantId = location.tenant;
+  const shown = useRef({ view, tenantId });
+  useEffect(() => {
+    const previous = shown.current;
+    if (previous.view === view && previous.tenantId === tenantId) return;
+    shown.current = { view, tenantId };
+    // A tenant switch (which also leaves a detail page) keeps focus on the switcher.
+    if (previous.tenantId !== tenantId) return;
+    const content = contentRef.current;
+    if (content === null) return;
+    const heading = content.querySelector<HTMLElement>("h1");
+    if (heading === null) {
+      content.focus();
+      return;
+    }
+    if (!heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
+    heading.focus();
+  }, [view, tenantId]);
+
+  // The design system's navbar and breadcrumbs carry fixed English labels ("Open menu",
+  // "Breadcrumb", an empty "Main" navigation since the portal's links live in the sidebar).
+  // They are translated here, as `Modal` completes the dialog's semantics, and kept so when
+  // React re-renders them.
+  useEffect(() => {
+    const root = portalRef.current;
+    if (root === null) return;
+    const set = (element: Element, name: string, value: string) => {
+      if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+    };
+    const apply = () => {
+      for (const nav of root.querySelectorAll('nav[data-ds="breadcrumbs"]')) {
+        set(nav, "aria-label", t.nav.breadcrumbs);
+      }
+      for (const nav of root.querySelectorAll('[data-ds="navbar"] nav')) {
+        set(nav, "aria-hidden", "true");
+      }
+      const button = root.querySelector('[data-ds="navbar"] button[aria-expanded]');
+      if (button !== null) {
+        const open = button.getAttribute("aria-expanded") === "true";
+        set(button, "aria-label", open ? t.nav.closeMenu : t.nav.openMenu);
+        set(button, "aria-controls", drawerId);
+      }
+    };
+    apply();
+    const observer = new MutationObserver(apply);
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["aria-label", "aria-expanded", "aria-controls"],
+    });
+    return () => observer.disconnect();
+  }, [t, drawerId]);
+
+  // The drawer (narrow screens): focus moves into it, Escape closes it and focus returns to
+  // the menu button.
+  useEffect(() => {
+    if (!narrow || !menuOpen) return;
+    drawerRef.current?.querySelector<HTMLElement>("select, button")?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setMenuOpen(false);
+      portalRef.current
+        ?.querySelector<HTMLElement>('[data-ds="navbar"] button[aria-expanded]')
+        ?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [narrow, menuOpen]);
 
   const sections: SidebarNavSection[] = [
     {
@@ -373,7 +465,23 @@ function Portal({
   );
 
   return (
-    <div className="pv-portal" data-testid="portal" data-narrow={narrow || undefined}>
+    <div
+      className="pv-portal"
+      data-testid="portal"
+      data-narrow={narrow || undefined}
+      ref={portalRef}
+    >
+      <a
+        className="pv-skip-link"
+        href="#main-content"
+        data-testid="skip-to-content"
+        onClick={(event) => {
+          event.preventDefault();
+          contentRef.current?.focus();
+        }}
+      >
+        {t.nav.skipToContent}
+      </a>
       <AppShell
         navbar={
           <Navbar
@@ -388,11 +496,17 @@ function Portal({
         sidebar={narrow ? undefined : sidebar}
       >
         {narrow && menuOpen && (
-          <div className="pv-drawer" data-testid="nav-drawer">
+          <div className="pv-drawer" id={drawerId} data-testid="nav-drawer" ref={drawerRef}>
             {sidebar}
           </div>
         )}
-        <div className="pv-content" data-testid={`page-${page}`}>
+        <div
+          className="pv-content"
+          id="main-content"
+          tabIndex={-1}
+          ref={contentRef}
+          data-testid={`page-${page}`}
+        >
           <PageContent page={page} />
         </div>
       </AppShell>

@@ -444,6 +444,7 @@ function Registry() {
           title={t.applications.create}
           onClose={() => setCreating(false)}
           testId="application-dialog"
+          errors={errors}
           footer={
             <div className="pv-dialog-actions">
               <Button variant="ghost" onClick={() => setCreating(false)}>
@@ -498,6 +499,7 @@ function Registry() {
             </Field>
             <Field label={t.applications.postLogoutUris} error={errors.postLogoutRedirectUris}>
               <Textarea
+                invalid={errors.postLogoutRedirectUris !== undefined}
                 rows={2}
                 value={draft.postLogoutRedirectUris}
                 onChange={(event) => set("postLogoutRedirectUris", event.target.value)}
@@ -509,6 +511,7 @@ function Registry() {
               error={errors.roles}
             >
               <Textarea
+                invalid={errors.roles !== undefined}
                 rows={3}
                 value={draft.roles}
                 onChange={(event) => set("roles", event.target.value)}

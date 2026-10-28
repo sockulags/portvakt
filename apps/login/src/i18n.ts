@@ -14,7 +14,6 @@ interface ErrorText {
 export interface Messages {
   readonly languageName: string;
   readonly switchLanguage: string;
-  readonly pageTitle: string;
   readonly loading: string;
   readonly signIn: { readonly heading: string; readonly introApp: string; readonly intro: string };
   readonly groups: Readonly<Record<"employee" | "citizen", string>>;
@@ -58,7 +57,6 @@ export interface Messages {
 const sv: Messages = {
   languageName: "Svenska",
   switchLanguage: "Byt språk till svenska",
-  pageTitle: "Logga in",
   loading: "Laddar …",
   signIn: {
     heading: "Logga in",
@@ -185,7 +183,6 @@ const sv: Messages = {
 const en: Messages = {
   languageName: "English",
   switchLanguage: "Switch language to English",
-  pageTitle: "Sign in",
   loading: "Loading …",
   signIn: {
     heading: "Sign in",

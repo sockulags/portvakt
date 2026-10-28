@@ -1,4 +1,4 @@
-import { Alert, Button, Spinner, StatusIcon } from "@portvakt/design-system/components";
+import { Alert, Button, StatusIcon } from "@portvakt/design-system/components";
 import { useEffect, useRef, useState } from "react";
 import type {
   LoginErrorCode,
@@ -8,6 +8,7 @@ import type {
 } from "../api";
 import { PartyList } from "../components/PartyList";
 import { Page } from "../components/Page";
+import { QuietSpinner } from "../components/QuietSpinner";
 import { format, useI18n } from "../i18n";
 import { ErrorView } from "./ErrorView";
 
@@ -36,6 +37,7 @@ export function RepresentationView({ api, error, navigate }: RepresentationViewP
   const [actionError, setActionError] = useState<LoginErrorCode | undefined>();
   const [busy, setBusy] = useState(false);
   const statusRef = useRef<HTMLDivElement>(null);
+  const alertRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -56,12 +58,18 @@ export function RepresentationView({ api, error, navigate }: RepresentationViewP
     if (state.status === "redirecting") statusRef.current?.focus();
   }, [state.status]);
 
+  // The chosen button was disabled while the choice was checked, which drops its focus: a
+  // refused choice moves focus to the alert, so keyboard users continue from there.
+  useEffect(() => {
+    if (actionError !== undefined) alertRef.current?.focus();
+  }, [actionError]);
+
   if (state.status === "failed") return <ErrorView code={state.error} />;
   if (state.status === "loading") {
     return (
       <Page heading={r.heading} viewKey="loading" testId="representation-loading">
         <div className="pv-status" role="status">
-          <Spinner />
+          <QuietSpinner />
           <span>{t.loading}</span>
         </div>
       </Page>
@@ -71,7 +79,7 @@ export function RepresentationView({ api, error, navigate }: RepresentationViewP
     return (
       <Page heading={t.redirecting.title} viewKey="redirecting" testId="redirecting">
         <div className="pv-status" role="status" aria-live="polite" tabIndex={-1} ref={statusRef}>
-          <Spinner />
+          <QuietSpinner />
           <span>{r.continuing}</span>
         </div>
       </Page>
@@ -79,12 +87,28 @@ export function RepresentationView({ api, error, navigate }: RepresentationViewP
   }
 
   const { details } = state;
-  const leave = (result: { ok: true; redirectTo: string } | { ok: false; error: string }) => {
-    setBusy(false);
+  const leave = async (
+    result: { ok: true; redirectTo: string } | { ok: false; error: string },
+  ): Promise<void> => {
     if (result.ok) {
+      setBusy(false);
       setState({ status: "redirecting" });
       navigate(result.redirectTo);
-    } else setActionError(actionErrorCode(result.error));
+      return;
+    }
+    const code = actionErrorCode(result.error);
+    if (code === "representation_not_allowed") {
+      // The list was out of date (an authorisation ended meanwhile): show the current one, so
+      // the refused party is not offered again.
+      const fresh = await api.details();
+      setState(
+        fresh.ok
+          ? { status: "ready", details: fresh.details }
+          : { status: "failed", error: fresh.error },
+      );
+    }
+    setBusy(false);
+    setActionError(code);
   };
   const choose = (choice: RepresentationChoice): void => {
     setActionError(undefined);
@@ -132,7 +156,13 @@ export function RepresentationView({ api, error, navigate }: RepresentationViewP
     >
       <p className="pv-intro">{format(r.intro, { app: details.application.name })}</p>
       {shownError !== undefined && (
-        <div className="pv-alert" data-testid="representation-error" data-error={shownError}>
+        <div
+          className="pv-alert"
+          data-testid="representation-error"
+          data-error={shownError}
+          tabIndex={-1}
+          ref={alertRef}
+        >
           <Alert tone="danger" title={t.errors[shownError].title}>
             {t.errors[shownError].body}
           </Alert>

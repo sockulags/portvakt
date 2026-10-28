@@ -230,6 +230,7 @@ function Rules({
           title={t.roles.createRule}
           onClose={() => setOpen(false)}
           testId="rule-dialog"
+          errors={errors}
           footer={
             <div className="pv-dialog-actions">
               <Button variant="ghost" onClick={() => setOpen(false)}>
@@ -244,6 +245,7 @@ function Rules({
           <div className="pv-form">
             <Field label={t.roles.application} error={errors.applicationId}>
               <Select
+                invalid={errors.applicationId !== undefined}
                 value={draft.applicationId}
                 onChange={(event) =>
                   setDraft({ ...draft, applicationId: event.target.value, role: "" })
@@ -259,6 +261,7 @@ function Rules({
             </Field>
             <Field label={t.roles.role} error={errors.role}>
               <Select
+                invalid={errors.role !== undefined}
                 value={draft.role}
                 onChange={(event) => setDraft({ ...draft, role: event.target.value })}
               >
@@ -272,6 +275,7 @@ function Rules({
             </Field>
             <Field label={t.roles.loginMethod} error={errors.loginMethodId}>
               <Select
+                invalid={errors.loginMethodId !== undefined}
                 value={draft.loginMethodId}
                 onChange={(event) => setDraft({ ...draft, loginMethodId: event.target.value })}
               >
@@ -492,6 +496,7 @@ function Assignments({
           title={t.roles.createAssignment}
           onClose={() => setOpen(false)}
           testId="assignment-dialog"
+          errors={errors}
           footer={
             <div className="pv-dialog-actions">
               <Button variant="ghost" onClick={() => setOpen(false)}>
@@ -506,6 +511,7 @@ function Assignments({
           <div className="pv-form">
             <Field label={t.roles.application} error={errors.applicationId}>
               <Select
+                invalid={errors.applicationId !== undefined}
                 value={draft.applicationId}
                 data-testid="assignment-application"
                 onChange={(event) =>
@@ -522,6 +528,7 @@ function Assignments({
             </Field>
             <Field label={t.roles.role} error={errors.role}>
               <Select
+                invalid={errors.role !== undefined}
                 value={draft.role}
                 data-testid="assignment-role"
                 onChange={(event) => setDraft({ ...draft, role: event.target.value })}
@@ -559,6 +566,7 @@ function Assignments({
               <>
                 <Field label={t.roles.loginMethod} error={errors.loginMethodId}>
                   <Select
+                    invalid={errors.loginMethodId !== undefined}
                     value={draft.loginMethodId}
                     onChange={(event) => setDraft({ ...draft, loginMethodId: event.target.value })}
                   >
@@ -572,6 +580,7 @@ function Assignments({
                 </Field>
                 <Field label={t.roles.subject} error={errors.subject}>
                   <TextInput
+                    invalid={errors.subject !== undefined}
                     value={draft.subject}
                     autoComplete="off"
                     onChange={(event) => setDraft({ ...draft, subject: event.target.value })}
@@ -582,6 +591,7 @@ function Assignments({
             {kind === "pin" && (
               <Field label={t.roles.targetPin} error={errors.pin}>
                 <TextInput
+                  invalid={errors.pin !== undefined}
                   value={draft.pin}
                   autoComplete="off"
                   inputMode="numeric"
@@ -592,6 +602,7 @@ function Assignments({
             {kind === "person" && (
               <Field label={t.roles.targetPerson} error={errors.personId}>
                 <TextInput
+                  invalid={errors.personId !== undefined}
                   value={draft.personId}
                   autoComplete="off"
                   onChange={(event) => setDraft({ ...draft, personId: event.target.value })}
@@ -679,6 +690,7 @@ function TargetFields({
         <>
           <Field label={t.roles.loginMethod} error={errors.loginMethodId}>
             <Select
+              invalid={errors.loginMethodId !== undefined}
               value={draft.loginMethodId}
               onChange={(event) => onDraft({ ...draft, loginMethodId: event.target.value })}
             >
@@ -692,6 +704,7 @@ function TargetFields({
           </Field>
           <Field label={t.roles.subject} error={errors.subject}>
             <TextInput
+              invalid={errors.subject !== undefined}
               value={draft.subject}
               autoComplete="off"
               onChange={(event) => onDraft({ ...draft, subject: event.target.value })}
@@ -702,6 +715,7 @@ function TargetFields({
       {kind === "pin" && (
         <Field label={t.roles.targetPin} error={errors.pin}>
           <TextInput
+            invalid={errors.pin !== undefined}
             value={draft.pin}
             autoComplete="off"
             inputMode="numeric"
@@ -712,6 +726,7 @@ function TargetFields({
       {kind === "person" && (
         <Field label={t.roles.targetPerson} error={errors.personId}>
           <TextInput
+            invalid={errors.personId !== undefined}
             value={draft.personId}
             autoComplete="off"
             onChange={(event) => onDraft({ ...draft, personId: event.target.value })}
@@ -933,6 +948,7 @@ function Attributes({
           }
           onClose={close}
           testId="attribute-dialog"
+          errors={errors}
           footer={
             <div className="pv-dialog-actions">
               <Button variant="ghost" onClick={close}>
@@ -954,6 +970,7 @@ function Attributes({
               <>
                 <Field label={t.roles.application} error={errors.applicationId}>
                   <Select
+                    invalid={errors.applicationId !== undefined}
                     value={draft.applicationId}
                     data-testid="attribute-application"
                     onChange={(event) =>
@@ -970,6 +987,7 @@ function Attributes({
                 </Field>
                 <Field label={t.roles.key} error={errors.key}>
                   <Select
+                    invalid={errors.key !== undefined}
                     value={draft.key}
                     data-testid="attribute-key"
                     onChange={(event) => setDraft({ ...draft, key: event.target.value })}
@@ -986,6 +1004,7 @@ function Attributes({
             )}
             <Field label={t.roles.value} hint={t.roles.valueHint} error={errors.value}>
               <TextInput
+                invalid={errors.value !== undefined}
                 value={draft.value}
                 autoComplete="off"
                 data-testid="attribute-value"

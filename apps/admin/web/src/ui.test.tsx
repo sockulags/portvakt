@@ -158,11 +158,28 @@ describe("optimistic concurrency in the UI", () => {
     await userEvent.click(screen.getByTestId("save-login-method"));
     expect(send).not.toHaveBeenCalled();
     expect(await screen.findByText(MESSAGES.en.validation.idle_exceeds_max)).toBeTruthy();
+    // Focus moves to the refused field, which says it is invalid.
+    expect(document.activeElement).toBe(idle);
+    expect(idle.getAttribute("aria-invalid")).toBe("true");
 
     await userEvent.clear(idle);
     await userEvent.type(idle, "10");
     await userEvent.click(screen.getByTestId("save-login-method"));
     expect(await screen.findByText(/refused by the outbound policy/)).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("field-issuer")));
+  });
+
+  it("moves focus to the first invalid field of a dialog", async () => {
+    const get = vi.fn().mockResolvedValue({ items: [TENANT] });
+    const send = vi.fn();
+    renderPage("tenants", undefined, { get, send });
+    await userEvent.click(await screen.findByTestId("create-tenant"));
+    await userEvent.type(screen.getByTestId("tenant-name-input"), "Ny kommun");
+    await userEvent.click(screen.getByTestId("tenant-save"));
+    expect(send).not.toHaveBeenCalled();
+    const slug = screen.getByTestId("tenant-slug");
+    expect(slug.getAttribute("aria-invalid")).toBe("true");
+    expect(document.activeElement).toBe(slug);
   });
 
   it("shows the conflict notice in the tenant dialog", async () => {
@@ -242,6 +259,43 @@ describe("CopyValue", () => {
     expect(group.contains(code)).toBe(true);
     expect(code.hasAttribute("aria-labelledby")).toBe(false);
     expect(code.textContent).toBe("https://example.test/metadata");
+  });
+
+  it("says once in a status that the value was copied", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(
+      <I18nContext.Provider value={{ locale: "sv", t: MESSAGES.sv, setLocale: () => undefined }}>
+        <CopyValue label="SP-metadata" value="https://example.test/metadata" testId="sp" />
+      </I18nContext.Provider>,
+    );
+    const status = screen.getByTestId("sp-copy-status");
+    expect(status.getAttribute("role")).toBe("status");
+    expect(status.textContent).toBe("");
+    await userEvent.click(screen.getByTestId("sp-copy"));
+    expect(writeText).toHaveBeenCalledWith("https://example.test/metadata");
+    await waitFor(() => expect(status.textContent).toBe(MESSAGES.sv.common.copied));
+  });
+});
+
+describe("empty tables", () => {
+  it("say so in the portal's language, not the design system's English default", async () => {
+    const person: Person = {
+      id: "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      displayName: "Anna Andersson",
+      email: null,
+      protectedIdentity: false,
+      createdAt: "2026-10-01T00:00:00.000Z",
+      lastLoginAt: null,
+      identities: [],
+      roleAssignments: [],
+      attributeAssignments: [],
+      grants: [],
+      etag: '"p1"',
+    };
+    renderPage("persons", person.id, { get: vi.fn().mockResolvedValue(person) });
+    expect(await screen.findByText(MESSAGES.sv.common.nothing)).toBeTruthy();
+    expect(screen.queryByText("Nothing here yet.")).toBeNull();
   });
 });
 
