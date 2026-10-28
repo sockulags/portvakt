@@ -966,7 +966,9 @@ true })`): expiry decisions use the app clock, and database expiry by its own cl
 - Rate limits (`http/rate-limits.ts`, RATE_LIMIT_*): token buckets per replica, keyed by the
   client IP (`clientIpKey`: `req.ip` under TRUST_PROXY; IPv6 by its /64, `ipRateLimitKey` in
   http-kit), `{slug}:{client_id}` or the admin caller; a refused request is counted by limit
-  name only. The per-client bucket of the token, introspection, revocation and PAR endpoints is
+  name only. Provider endpoints are recognised as oidc-provider's router matches them
+  (`providerPath` in `oidc/routes.ts`: any letter case, trailing slashes ignored), so `/TOKEN`
+  is limited like `/token`. The per-client bucket of the token, introspection, revocation and PAR endpoints is
   charged only for failed client authentication, after the provider answered
   (`chargeFailedClientAuthentication` wraps `res.end`: a 401 takes a token, and with the bucket
   empty the 401 becomes 429), so successful authentications are never blocked by others'

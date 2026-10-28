@@ -177,6 +177,36 @@ describe.skipIf(ts === undefined)("production hardening (M8)", () => {
       expect((await tokenRequest(world.tenant.slug, freshIp(), auth)).status).toBe(200);
     });
 
+    it("limits the provider endpoints whatever the case of their path", async () => {
+      // oidc-provider's router ignores the case of the path: /TOKEN is the token endpoint.
+      const world = await createTenantWorld(repos, "rl-case");
+      const clientId = world.app.application.clientId;
+      const send = (path: string, ip: string, secret: string) =>
+        fetch(`${baseUrl}/t/${world.tenant.slug}${path}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-forwarded-for": ip,
+            authorization: basic(clientId, secret),
+          },
+          body: new URLSearchParams({ grant_type: "client_credentials" }).toString(),
+        });
+      const ip = freshIp();
+      const first = await send("/TOKEN", ip, world.app.secret);
+      expect(first.status).toBe(200);
+      expect(((await first.json()) as { access_token?: string }).access_token).toBeTypeOf("string");
+      expect((await send("/Token/", ip, world.app.secret)).status).toBe(200);
+      expect((await send("/token", ip, world.app.secret)).status).toBe(200);
+      expect((await send("/tOkEn", ip, world.app.secret)).status).toBe(429);
+
+      // Failed client authentication charges the client's bucket under any spelling too.
+      const forged = "guessed-secret-0123456789abcdef";
+      for (let i = 0; i < 4; i += 1) {
+        expect((await send(i % 2 === 0 ? "/TOKEN" : "/token", freshIp(), forged)).status).toBe(401);
+      }
+      expect((await send("/ToKeN", freshIp(), forged)).status).toBe(429);
+    });
+
     it("charges the per-client token bucket only for failed client authentication (Basic and form body)", async () => {
       const world = await createTenantWorld(repos, "rl-client");
       const clientId = world.app.application.clientId;

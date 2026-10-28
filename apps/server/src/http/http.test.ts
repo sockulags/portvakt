@@ -11,7 +11,20 @@ import {
   PROVIDER_BODY_LIMIT,
   readReplayableForm,
 } from "./client-id.js";
+import { providerPath } from "../oidc/routes.js";
 import { routeTemplate } from "./route-template.js";
+
+describe("provider paths of the rate limits", () => {
+  it("match the provider's case-insensitive router and ignore trailing slashes", () => {
+    expect(providerPath("/token")).toBe("/token");
+    expect(providerPath("/TOKEN")).toBe("/token");
+    expect(providerPath("/Token/Introspection/")).toBe("/token/introspection");
+    expect(providerPath("/AUTH//")).toBe("/auth");
+    expect(providerPath("/ReQuEsT")).toBe("/request");
+    // Encoded letters are not decoded (the provider's router does not match them either).
+    expect(providerPath("/t%6Fken")).toBe("/t%6fken");
+  });
+});
 
 describe("route templates", () => {
   it.each([
