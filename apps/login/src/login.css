@@ -302,3 +302,18 @@ body {
   color: var(--color-text-muted);
   font-size: var(--text-sm);
 }
+
+.pv-spinner {
+  display: inline-flex;
+}
+
+/* A refused choice moves focus to its alert (tabindex=-1): a ring only for keyboard focus. */
+.pv-alert:focus {
+  outline: none;
+}
+
+.pv-alert:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--radius-md);
+}

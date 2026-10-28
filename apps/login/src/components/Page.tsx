@@ -14,7 +14,7 @@ interface PageProps {
 
 /** The frame of every login page: language switch, a focused heading and the content card. */
 export function Page({ heading, viewKey, context, children, testId }: PageProps) {
-  const { locale, t, setLocale } = useI18n();
+  const { locale, setLocale } = useI18n();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const other = LOCALES.find((candidate) => candidate !== locale) ?? locale;
 
@@ -22,9 +22,11 @@ export function Page({ heading, viewKey, context, children, testId }: PageProps)
     headingRef.current?.focus();
   }, [viewKey]);
 
+  // The heading names the page ("Du är utloggad", "Inloggningen har gått ut"), so the title
+  // never claims "Logga in" on a page that is not the sign-in.
   useEffect(() => {
-    document.title = `${heading} – ${t.pageTitle === heading ? "Portvakt" : t.pageTitle}`;
-  }, [heading, t.pageTitle]);
+    document.title = `${heading} – Portvakt`;
+  }, [heading]);
 
   return (
     <div className="pv-page">

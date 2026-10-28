@@ -159,6 +159,78 @@ describe("login view", () => {
     expect(await screen.findByText("Sign in as an employee")).toBeDefined();
   });
 
+  it("announces loading in the page's language only (no English spinner label)", async () => {
+    let answer: (result: { ok: true; details: InteractionDetails }) => void = () => undefined;
+    const api = fakeApi({
+      details: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+    render(<App bootstrap={loginBootstrap()} api={api} />);
+    const statuses = screen.getAllByRole("status");
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]!.textContent).toBe("Laddar …");
+    // The design system's spinner (an English "Loading" status) is hidden from screen readers.
+    expect(screen.getByLabelText("Loading").closest('[aria-hidden="true"]')).not.toBeNull();
+    answer({ ok: true, details });
+    await screen.findByTestId("method-list");
+  });
+
+  it("sends one login request at a time and keeps focus on the chosen button", async () => {
+    let answer: (result: ActionResult) => void = () => undefined;
+    const slow = vi.fn(
+      () =>
+        new Promise<ActionResult>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    render(<App bootstrap={loginBootstrap()} api={fakeApi({ login: slow })} />);
+    const bankid = await screen.findByTestId("method-bankid");
+    await user.click(bankid);
+    await user.click(bankid);
+    await user.click(screen.getByTestId("method-entra"));
+    await user.click(screen.getByTestId("cancel-login"));
+    await user.type(screen.getByTestId("hrd-email"), "anna@kommun.example{Enter}");
+    expect(slow).toHaveBeenCalledTimes(1);
+    expect(abort).not.toHaveBeenCalled();
+    // The email form was not answered with an error: nothing was sent for it.
+    expect(screen.getByTestId("hrd-error").textContent).toBe("");
+
+    answer({ ok: false, error: "upstream_unavailable" });
+    expect((await screen.findByTestId("login-error")).getAttribute("data-error")).toBe(
+      "upstream_unavailable",
+    );
+    await user.click(screen.getByTestId("method-bankid"));
+    expect(slow).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(screen.getByTestId("method-bankid"));
+  });
+
+  it("shows the current methods after the chosen one became unavailable", async () => {
+    const detailsCalls = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, details })
+      .mockResolvedValueOnce({
+        ok: true,
+        details: { ...details, methods: details.methods.filter((m) => m.id !== "bankid") },
+      });
+    const refused = vi.fn((): Promise<ActionResult> =>
+      Promise.resolve({ ok: false, error: "login_method_unavailable" }),
+    );
+    const user = userEvent.setup();
+    render(
+      <App bootstrap={loginBootstrap()} api={fakeApi({ details: detailsCalls, login: refused })} />,
+    );
+    await user.click(await screen.findByTestId("method-bankid"));
+    expect((await screen.findByTestId("login-error")).getAttribute("data-error")).toBe(
+      "login_method_unavailable",
+    );
+    await waitFor(() => expect(screen.queryByTestId("method-bankid")).toBeNull());
+    expect(detailsCalls).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("method-entra")).toBeDefined();
+  });
+
   it("looks the home realm up from the email field", async () => {
     const api = fakeApi();
     const navigate = vi.fn();
@@ -200,6 +272,8 @@ describe("other views", () => {
   it("renders the signed-out page and a generic error without a bootstrap", () => {
     const { unmount } = render(<App bootstrap={{ view: "logged_out", locale: noHints }} />);
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Du är utloggad");
+    // The title names the page, not "Logga in".
+    expect(document.title).toBe("Du är utloggad – Portvakt");
     unmount();
     render(<App bootstrap={null} />);
     expect(screen.getByTestId("error-code").getAttribute("data-error")).toBe("request_failed");
@@ -272,6 +346,31 @@ describe("representation view", () => {
     const alert = await screen.findByTestId("representation-error");
     expect(alert.getAttribute("data-error")).toBe("representation_not_allowed");
     expect(screen.getByTestId("party-list")).toBeDefined();
+  });
+
+  it("lists the current parties after a refused one and moves focus to the alert", async () => {
+    const party = chooserDetails.parties[0]!;
+    const detailsCalls = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, details: chooserDetails })
+      .mockResolvedValueOnce({ ok: true, details: { ...chooserDetails, parties: [] } });
+    const api = chooserApi({
+      details: detailsCalls,
+      choose: () => Promise.resolve({ ok: false, error: "representation_not_allowed" }),
+    });
+    const user = userEvent.setup();
+    render(<App bootstrap={bootstrap()} representationApi={api} />);
+    await user.click(await screen.findByTestId(`representation-option-${party.id}`));
+    const alert = await screen.findByTestId("representation-error");
+    await waitFor(() =>
+      expect(screen.queryByTestId(`representation-option-${party.id}`)).toBeNull(),
+    );
+    expect(detailsCalls).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(alert);
+    expect(screen.getByTestId("representation-option-self")).toBeDefined();
+    expect(screen.getByTestId<HTMLButtonElement>("representation-option-self").disabled).toBe(
+      false,
+    );
   });
 
   it("offers only the way back when there is nobody to represent", async () => {
