@@ -17,8 +17,8 @@
     "@peculiar/asn1-x509": "^2.11.0",
     "@portvakt/http-kit": "*",
     "express": "^5.3.0",
-    "jose": "^6.2.12",
-    "oidc-provider": "^9.12.2",
+    "jose": "^6.2.14",
+    "oidc-provider": "^9.13.3",
     "openid-client": "^6.8.8",
     "pg": "^8.23.1",
     "pino": "^10.4.0",
@@ -29,7 +29,7 @@
   "devDependencies": {
     "@portvakt/mock-idp": "*",
     "@types/express": "^5.0.6",
-    "@types/oidc-provider": "^9.12.1",
+    "@types/oidc-provider": "^9.13.1",
     "@types/pg": "^8.23.1",
     "@types/supertest": "^7.2.1",
     "supertest": "^7.3.1"
